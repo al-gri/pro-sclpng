@@ -41,14 +41,20 @@ fn config_body(bytes: &[u8]) -> crate::support::bodies::ConfigBody {
 
 #[test]
 fn af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes() {
-    let crlf = frozen::AF_MD.replace('\n', "\r\n");
+    let lf = frozen::AF_MD.replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+
     for id in ["AF-N1", "AF-B1", "AF-C1", "AF-F1", "AF-V1"] {
-        let (lf_descriptor, lf_body) = frozen::markdown_artifact_bytes(frozen::AF_MD, id);
+        let (native_descriptor, native_body) =
+            frozen::markdown_artifact_bytes(frozen::AF_MD, id);
+        let (lf_descriptor, lf_body) = frozen::markdown_artifact_bytes(&lf, id);
         let (crlf_descriptor, crlf_body) = frozen::markdown_artifact_bytes(&crlf, id);
         let original = frozen::original(id);
 
-        assert_eq!(crlf_descriptor, lf_descriptor, "{id} descriptor");
-        assert_eq!(crlf_body, lf_body, "{id} body");
+        assert_eq!(native_descriptor, lf_descriptor, "{id} native descriptor");
+        assert_eq!(native_body, lf_body, "{id} native body");
+        assert_eq!(crlf_descriptor, lf_descriptor, "{id} CRLF descriptor");
+        assert_eq!(crlf_body, lf_body, "{id} CRLF body");
         assert_eq!(lf_descriptor, original.descriptor, "{id} frozen descriptor");
         assert_eq!(lf_body, original.body, "{id} frozen body");
     }

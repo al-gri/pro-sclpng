@@ -193,3 +193,28 @@ The portability-fix implementation head `0af9c882fb099ccf23e7e42c864b82c2ac40fb7
 Workspace test counts on that exact SHA: **127 domain tests passed** = 73 contracts + 9 identity + 18 numeric + 27 wire, zero failed/ignored; separately **15 BOOT-001 CLI tests passed**, zero failed/ignored. The new wire count includes `artifact_wire.rs::af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes`, which checks all five Markdown-backed AF fixtures under both LF and synthetic CRLF wrappers.
 
 This Linux PASS does not overwrite the historical Windows FAIL at `dc7af8369e9c30c6877aae1b13cd23901c765cb3` and is not Windows evidence. The required next verification is a repeated owner-side `cargo test -p domain --locked` on Windows 11 x64 / PowerShell 5.1 / Rust 1.98.1 against the new final PR head. The containing handoff-only commit receives its own exact-head CI before handoff; its SHA is recorded in the PR post-commit rather than self-referenced here.
+
+
+## Second Windows standalone result: regression-construction defect
+
+Owner retest on exact SHA `387bdc624fbbae54785665374d0d8c790c7776a6`, Windows 11 x64 / PowerShell 5.1 / `1.98.1-x86_64-pc-windows-msvc`, again executed `cargo test -p domain --locked` and **FAILED**, but it confirmed the parser portability fix itself.
+
+Exact observed counts:
+- contracts: **73/73 PASS**;
+- identity: **9/9 PASS**;
+- numeric: **18/18 PASS**;
+- wire: **26 PASS / 1 FAIL / 0 ignored**.
+
+The only failure was `artifact_wire::af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes`, at `crates/domain/tests/support/binary_fixtures.rs:185:50` with `AF heading`. All previously failing AF/WAL coverage, including `af_psad_bodies_and_psam_match_frozen_bytes_without_hashing`, W01/W02/W05/W08/W09/W11-W16 and targeted V2 GAP tests, passed on Windows. Therefore `markdown_artifact_bytes` CRLF→LF normalization is confirmed effective for native Windows fixture materialization.
+
+The remaining failure was created by the regression itself. At `387bdc624fbbae54785665374d0d8c790c7776a6` the test used `frozen::AF_MD.replace('\n', "\r\n")`. When `AF_MD` was already CRLF on Windows, that transformed each `\r\n` into `\r\r\n`; the unchanged parser then normalized only `\r\n`→`\n`, intentionally leaving the extra `\r`, so the synthetic wrapper no longer represented valid CRLF text.
+
+The containing correction changes only regression construction:
+1. canonical LF wrapper = `frozen::AF_MD.replace("\r\n", "\n")`;
+2. synthetic CRLF wrapper = canonical LF with `\n` replaced by `\r\n`;
+3. the same `markdown_artifact_bytes` path parses native platform representation, canonical LF and synthetic CRLF;
+4. for AF-N1/B1/C1/F1/V1, all three representations must yield identical descriptor/body bytes and match the frozen originals.
+
+`markdown_artifact_bytes` semantics are unchanged. Normative fixtures, digests, WAL bytes, CRCs and contracts are unchanged. No dependency or production API change is introduced.
+
+This containing test-support correction requires fresh exact-head Linux fmt/Clippy/build/workspace CI. After that green SHA, the required next owner action is another `cargo test -p domain --locked` on Windows. Both Windows FAILs — `dc7af836…` (parser portability) and `387bdc624fbbae54785665374d0d8c790c7776a6` (regression construction only) — remain part of the evidence and are not rewritten as PASS.
