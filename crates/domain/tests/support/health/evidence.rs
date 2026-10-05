@@ -1,8 +1,17 @@
 use super::*;
 
 impl HealthModel {
-    pub(super) fn warmup(&mut self, at: RecordNo, wire: &WarmupEvidence, env: &mut ModelEnv, out: &mut StepResult) -> Result<()> {
-        let mut state = self.streams.remove(&wire.stream).ok_or(ModelError::UnknownDefinition)?;
+    pub(super) fn warmup(
+        &mut self,
+        at: RecordNo,
+        wire: &WarmupEvidence,
+        env: &mut ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
+        let mut state = self
+            .streams
+            .remove(&wire.stream)
+            .ok_or(ModelError::UnknownDefinition)?;
         if wire.anchor.get() <= state.barrier {
             self.diagnostic(at, wire.stream, DiagnosticCode::PreBarrier, out);
             self.streams.insert(wire.stream, state);
@@ -18,18 +27,29 @@ impl HealthModel {
             return Ok(());
         }
         let config_ref = self.config.as_ref().ok_or(ModelError::UnknownDefinition)?.0;
-        let body = env.warmup(wire.proof, config_ref, state.profile_ref, self.start.archive)?;
+        let body = env.warmup(
+            wire.proof,
+            config_ref,
+            state.profile_ref,
+            self.start.archive,
+        )?;
         let mut required = vec![wire.anchor];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);
         }
-        let raw = RawFrameId { archive: self.start.archive, record: wire.anchor };
+        let raw = RawFrameId {
+            archive: self.start.archive,
+            record: wire.anchor,
+        };
         if let Some(proof) = env.first_proofs.get(&raw) {
             required.push(proof.record);
         }
         if let Some(last) = state.last_applied_raw {
             required.push(last);
-            if let Some(proof) = env.first_proofs.get(&RawFrameId { archive: self.start.archive, record: last }) {
+            if let Some(proof) = env.first_proofs.get(&RawFrameId {
+                archive: self.start.archive,
+                record: last,
+            }) {
                 required.push(proof.record);
             }
         }
@@ -38,27 +58,44 @@ impl HealthModel {
             && body.anchor == wire.anchor
             && body.update_count == wire.update_count
             && body.elapsed_ns == wire.elapsed_ns
-            && state.anchor.as_ref().is_some_and(|anchor| anchor.raw.record == wire.anchor);
+            && state
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.raw.record == wire.anchor);
         if matches_scope && state.witness.as_ref().is_some_and(|old| old.body == body) {
             self.diagnostic(at, wire.stream, DiagnosticCode::AlreadyApplied, out);
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
         let policy = self.policy()?;
-        let elapsed = state.anchor.as_ref().and_then(|anchor| {
-            self.evaluation_ns.checked_sub(anchor.original_sample_ns)
-        });
+        let elapsed = state
+            .anchor
+            .as_ref()
+            .and_then(|anchor| self.evaluation_ns.checked_sub(anchor.original_sample_ns));
         let valid = matches_scope
-            && matches!(state.book, Some(BookValidity::Warming | BookValidity::Usable))
+            && matches!(
+                state.book,
+                Some(BookValidity::Warming | BookValidity::Usable)
+            )
             && body.observed_at_ns == self.evaluation_ns
             && Some(body.elapsed_ns) == elapsed
             && body.update_count == state.progress
-            && policy.fields.warmup_min_updates.is_none_or(|n| state.progress >= n)
-            && policy.fields.warmup_min_elapsed_ns.is_none_or(|n| body.elapsed_ns >= n);
+            && policy
+                .fields
+                .warmup_min_updates
+                .is_none_or(|n| state.progress >= n)
+            && policy
+                .fields
+                .warmup_min_elapsed_ns
+                .is_none_or(|n| body.elapsed_ns >= n);
         if valid {
             if state.book == Some(BookValidity::Warming) {
                 state.book = Some(BookValidity::Usable);
-                state.witness = Some(FrozenWitness { record: at, reference: wire.proof, body });
+                state.witness = Some(FrozenWitness {
+                    record: at,
+                    reference: wire.proof,
+                    body,
+                });
             }
             // Once Usable, progress and its first truthful witness stay frozen.
         } else {
@@ -68,8 +105,17 @@ impl HealthModel {
         Ok(())
     }
 
-    pub(super) fn freshness_evidence(&mut self, at: RecordNo, wire: &FreshnessEvidence, env: &mut ModelEnv, out: &mut StepResult) -> Result<()> {
-        let mut state = self.streams.remove(&wire.stream).ok_or(ModelError::UnknownDefinition)?;
+    pub(super) fn freshness_evidence(
+        &mut self,
+        at: RecordNo,
+        wire: &FreshnessEvidence,
+        env: &mut ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
+        let mut state = self
+            .streams
+            .remove(&wire.stream)
+            .ok_or(ModelError::UnknownDefinition)?;
         let Some(basis) = wire.basis else {
             self.diagnostic(at, wire.stream, DiagnosticCode::MissingFreshnessBasis, out);
             self.streams.insert(wire.stream, state);
@@ -90,7 +136,12 @@ impl HealthModel {
             return Ok(());
         }
         let config_ref = self.config.as_ref().ok_or(ModelError::UnknownDefinition)?.0;
-        let body = env.freshness(wire.proof, config_ref, state.profile_ref, self.start.archive)?;
+        let body = env.freshness(
+            wire.proof,
+            config_ref,
+            state.profile_ref,
+            self.start.archive,
+        )?;
         let mut required = vec![basis];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);
@@ -106,7 +157,10 @@ impl HealthModel {
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
-        let raw_id = RawFrameId { archive: self.start.archive, record: basis };
+        let raw_id = RawFrameId {
+            archive: self.start.archive,
+            record: basis,
+        };
         let source = env.prefix.raw(raw_id).ok_or(EventError::MissingRawInput)?;
         let applied = state.last_applied_raw.is_some_and(|last| basis <= last)
             && (source.validate()? == FrameKind::Trades || env.first_proofs.contains_key(&raw_id));
@@ -116,7 +170,12 @@ impl HealthModel {
             && source.source.binding == state.binding
             && applied;
         if !scope_ok {
-            self.diagnostic(at, wire.stream, DiagnosticCode::FreshnessAssertionMismatch, out);
+            self.diagnostic(
+                at,
+                wire.stream,
+                DiagnosticCode::FreshnessAssertionMismatch,
+                out,
+            );
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
@@ -134,7 +193,12 @@ impl HealthModel {
                 || body.observed_at_ns != sample
                 || body.freshness != ordinary
             {
-                self.diagnostic(at, wire.stream, DiagnosticCode::FreshnessAssertionMismatch, out);
+                self.diagnostic(
+                    at,
+                    wire.stream,
+                    DiagnosticCode::FreshnessAssertionMismatch,
+                    out,
+                );
             }
             // Ordinary evidence is an assertion, never a command to overwrite
             // the freshness of a later already-applied sample.
@@ -143,7 +207,13 @@ impl HealthModel {
         Ok(())
     }
 
-    fn apply_quiet(&self, state: &mut StreamState, body: FreshnessBody, sample: u64, policy: HealthPolicy) -> Option<DiagnosticCode> {
+    fn apply_quiet(
+        &self,
+        state: &mut StreamState,
+        body: FreshnessBody,
+        sample: u64,
+        policy: HealthPolicy,
+    ) -> Option<DiagnosticCode> {
         if !policy.fields.allow_quiet_with_proof {
             return Some(DiagnosticCode::QuietPolicyDenied);
         }
@@ -152,7 +222,9 @@ impl HealthModel {
             return Some(DiagnosticCode::FreshnessAssertionMismatch);
         }
         let (Some(from), Some(until), Some(max_lifetime)) = (
-            body.valid_from_ns, body.valid_until_ns, policy.quiet_max_lifetime_ns,
+            body.valid_from_ns,
+            body.valid_until_ns,
+            policy.quiet_max_lifetime_ns,
         ) else {
             return Some(DiagnosticCode::InvalidQuietBounds);
         };

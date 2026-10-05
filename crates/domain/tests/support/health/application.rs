@@ -1,8 +1,17 @@
 use super::*;
 
 impl HealthModel {
-    pub(super) fn raw(&mut self, at: RecordNo, raw: &RawInput, env: &mut ModelEnv, out: &mut StepResult) -> Result<()> {
-        let mut state = self.streams.remove(&raw.stream).ok_or(ModelError::UnknownDefinition)?;
+    pub(super) fn raw(
+        &mut self,
+        at: RecordNo,
+        raw: &RawInput,
+        env: &mut ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
+        let mut state = self
+            .streams
+            .remove(&raw.stream)
+            .ok_or(ModelError::UnknownDefinition)?;
         state.loss.raw(raw.attempt, raw.tag)?;
         if raw.tag != state.binding.tag {
             self.diagnostic(at, raw.stream, DiagnosticCode::ObsoleteScope, out);
@@ -14,8 +23,15 @@ impl HealthModel {
             self.streams.insert(raw.stream, state);
             return Ok(());
         }
-        let id = RawFrameId { archive: self.start.archive, record: at };
-        let fact = env.normalizations.get(&id).cloned().ok_or(ArtifactError::ArtifactUnverified)?;
+        let id = RawFrameId {
+            archive: self.start.archive,
+            record: at,
+        };
+        let fact = env
+            .normalizations
+            .get(&id)
+            .cloned()
+            .ok_or(ArtifactError::ArtifactUnverified)?;
         let kind = match fact.frame.validate() {
             Ok(kind) => kind,
             Err(error) => {
@@ -30,22 +46,34 @@ impl HealthModel {
             }
         };
         let policy = self.policy()?;
-        let count = u32::try_from(fact.frame.outputs.len()).map_err(|_| EventError::EventTooLarge)?;
+        let count =
+            u32::try_from(fact.frame.outputs.len()).map_err(|_| EventError::EventTooLarge)?;
         if kind == FrameKind::Trades {
             env.prefix.insert_frame(fact.frame.clone());
             self.emit(&mut state, at, &fact.frame, None, env, out)?;
             state.last_applied_raw = Some(at);
-            state.last_valid_sample_ns = Some(state.last_valid_sample_ns.map_or(
-                raw.context.monotonic_ns.get(),
-                |previous| previous.max(raw.context.monotonic_ns.get()),
-            ));
+            state.last_valid_sample_ns = Some(
+                state
+                    .last_valid_sample_ns
+                    .map_or(raw.context.monotonic_ns.get(), |previous| {
+                        previous.max(raw.context.monotonic_ns.get())
+                    }),
+            );
             state.quiet = None;
             self.refresh_freshness(&mut state, policy, at, out);
         } else if kind != FrameKind::NoMarketData {
             let frames = state.pending.len() as u64 + 1;
-            let bytes = state.pending.iter().map(|p| u64::from(p.raw_bytes)).sum::<u64>()
+            let bytes = state
+                .pending
+                .iter()
+                .map(|p| u64::from(p.raw_bytes))
+                .sum::<u64>()
                 + u64::from(fact.frame.raw_byte_len);
-            let outputs = state.pending.iter().map(|p| u64::from(p.outputs)).sum::<u64>()
+            let outputs = state
+                .pending
+                .iter()
+                .map(|p| u64::from(p.outputs))
+                .sum::<u64>()
                 + u64::from(count);
             let exceeded = if frames > u64::from(policy.pending_max_frames) {
                 Some("frames")
@@ -58,7 +86,12 @@ impl HealthModel {
             };
             if let Some(field) = exceeded {
                 self.fault(&mut state, at, Fault::PendingOverflow(field), out);
-            } else if let Some(deadline_ns) = raw.context.monotonic_ns.get().checked_add(policy.pending_wait_ns) {
+            } else if let Some(deadline_ns) = raw
+                .context
+                .monotonic_ns
+                .get()
+                .checked_add(policy.pending_wait_ns)
+            {
                 if self.evaluation_ns >= deadline_ns {
                     self.fault(&mut state, at, Fault::PendingTimeout, out);
                 } else {
@@ -80,10 +113,25 @@ impl HealthModel {
         Ok(())
     }
 
-    pub(super) fn verification(&mut self, at: RecordNo, wire: &VerificationEvidence, env: &mut ModelEnv, out: &mut StepResult) -> Result<()> {
-        let mut state = self.streams.remove(&wire.stream).ok_or(ModelError::UnknownDefinition)?;
-        let id = RawFrameId { archive: self.start.archive, record: wire.raw };
-        let recorded_raw = env.raw_records.get(&id).ok_or(EventError::MissingRawInput)?;
+    pub(super) fn verification(
+        &mut self,
+        at: RecordNo,
+        wire: &VerificationEvidence,
+        env: &mut ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
+        let mut state = self
+            .streams
+            .remove(&wire.stream)
+            .ok_or(ModelError::UnknownDefinition)?;
+        let id = RawFrameId {
+            archive: self.start.archive,
+            record: wire.raw,
+        };
+        let recorded_raw = env
+            .raw_records
+            .get(&id)
+            .ok_or(EventError::MissingRawInput)?;
         if wire.raw.get() <= state.barrier {
             self.diagnostic(at, wire.stream, DiagnosticCode::PreBarrier, out);
             self.streams.insert(wire.stream, state);
@@ -103,13 +151,22 @@ impl HealthModel {
             return Ok(());
         }
         let config_ref = self.config.as_ref().ok_or(ModelError::UnknownDefinition)?.0;
-        let body = env.verification(wire.proof, config_ref, state.profile_ref, self.start.archive)?;
+        let body = env.verification(
+            wire.proof,
+            config_ref,
+            state.profile_ref,
+            self.start.archive,
+        )?;
         let mut required = vec![wire.raw];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);
         }
         env.check_basis(self.start.archive, at, &body.basis_records, &required)?;
-        let source = env.prefix.raw(id).cloned().ok_or(EventError::MissingRawInput)?;
+        let source = env
+            .prefix
+            .raw(id)
+            .cloned()
+            .ok_or(EventError::MissingRawInput)?;
         let source_kind = source.validate()?;
         let expected_kind = match source_kind {
             FrameKind::Snapshot => Some(BookEvidenceKind::Snapshot),
@@ -125,15 +182,23 @@ impl HealthModel {
             && body.raw_sample_ns == source.source.received.monotonic.ns.get()
             && body.not_before_ns == state.barrier_evaluation_ns
             && body.raw_sample_ns >= body.not_before_ns
-            && body.valid_until_ns.is_none_or(|until| until > body.not_before_ns)
+            && body
+                .valid_until_ns
+                .is_none_or(|until| until > body.not_before_ns)
             && usize::try_from(body.output_count).ok() == Some(source.outputs.len());
         if !basic_match {
             self.fault(&mut state, at, Fault::ProofConflict, out);
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
-        if state.last_applied_raw.is_some_and(|frontier| wire.raw <= frontier) {
-            let first = env.first_proofs.get(&id).ok_or(ArtifactError::MissingArtifact)?;
+        if state
+            .last_applied_raw
+            .is_some_and(|frontier| wire.raw <= frontier)
+        {
+            let first = env
+                .first_proofs
+                .get(&id)
+                .ok_or(ArtifactError::MissingArtifact)?;
             if first.body == body {
                 self.diagnostic(at, wire.stream, DiagnosticCode::AlreadyApplied, out);
             } else {
@@ -162,12 +227,19 @@ impl HealthModel {
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
-        if body.valid_until_ns.is_some_and(|until| self.evaluation_ns >= until) {
+        if body
+            .valid_until_ns
+            .is_some_and(|until| self.evaluation_ns >= until)
+        {
             self.fault(&mut state, at, Fault::ProofExpired, out);
             self.streams.insert(wire.stream, state);
             return Ok(());
         }
-        let first = AcceptedProof { record: at, reference: wire.proof, body };
+        let first = AcceptedProof {
+            record: at,
+            reference: wire.proof,
+            body,
+        };
         state.pending[position].proof = Some(first.clone());
         env.first_proofs.insert(id, first);
         self.release(&mut state, at, env, out)?;
@@ -175,24 +247,49 @@ impl HealthModel {
         Ok(())
     }
 
-    fn release(&self, state: &mut StreamState, at: RecordNo, env: &mut ModelEnv, out: &mut StepResult) -> Result<()> {
+    fn release(
+        &self,
+        state: &mut StreamState,
+        at: RecordNo,
+        env: &mut ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
         let policy = self.policy()?;
-        while state.pending.first().is_some_and(|pending| pending.proof.is_some()) {
+        while state
+            .pending
+            .first()
+            .is_some_and(|pending| pending.proof.is_some())
+        {
             let pending = state.pending.remove(0);
             let proof = pending.proof.ok_or(ArtifactError::MissingArtifact)?;
-            if proof.body.valid_until_ns.is_some_and(|until| self.evaluation_ns >= until) {
+            if proof
+                .body
+                .valid_until_ns
+                .is_some_and(|until| self.evaluation_ns >= until)
+            {
                 self.fault(state, at, Fault::ProofExpired, out);
                 break;
             }
-            let source = env.prefix.raw(pending.raw).cloned().ok_or(EventError::MissingRawInput)?;
+            let source = env
+                .prefix
+                .raw(pending.raw)
+                .cloned()
+                .ok_or(EventError::MissingRawInput)?;
             let kind = source.validate()?;
             if kind == FrameKind::Snapshot {
-                if policy.fields.require_two_sided_snapshot && !source.outputs[0].payload.two_sided_snapshot() {
+                if policy.fields.require_two_sided_snapshot
+                    && !source.outputs[0].payload.two_sided_snapshot()
+                {
                     self.fault(state, at, Fault::SnapshotNotTwoSided, out);
                     break;
                 }
             } else if kind == FrameKind::Delta {
-                if state.anchor.is_none() || !matches!(state.book, Some(BookValidity::Warming | BookValidity::Usable)) {
+                if state.anchor.is_none()
+                    || !matches!(
+                        state.book,
+                        Some(BookValidity::Warming | BookValidity::Usable)
+                    )
+                {
                     self.fault(state, at, Fault::NeedsSnapshot, out);
                     break;
                 }
@@ -216,12 +313,19 @@ impl HealthModel {
                 let threshold = policy.fields.warmup_min_updates.unwrap_or(0);
                 for _ in &source.outputs {
                     if state.progress < threshold {
-                        state.progress = state.progress.checked_add(1).ok_or(EventError::EventTooLarge)?;
+                        state.progress = state
+                            .progress
+                            .checked_add(1)
+                            .ok_or(EventError::EventTooLarge)?;
                     }
                 }
             }
             let sample = source.source.received.monotonic.ns.get();
-            state.last_valid_sample_ns = Some(state.last_valid_sample_ns.map_or(sample, |old| old.max(sample)));
+            state.last_valid_sample_ns = Some(
+                state
+                    .last_valid_sample_ns
+                    .map_or(sample, |old| old.max(sample)),
+            );
             state.last_applied_raw = Some(source.source.raw.record);
             state.quiet = None;
             self.refresh_freshness(state, policy, at, out);
@@ -229,21 +333,42 @@ impl HealthModel {
         Ok(())
     }
 
-    fn emit(&self, state: &mut StreamState, at: RecordNo, source: &NormalizedFrame, proof: Option<ArtifactRef>, env: &ModelEnv, out: &mut StepResult) -> Result<()> {
-        let mut references = vec![self.config.as_ref().ok_or(ModelError::UnknownDefinition)?.0, state.profile_ref];
+    fn emit(
+        &self,
+        state: &mut StreamState,
+        at: RecordNo,
+        source: &NormalizedFrame,
+        proof: Option<ArtifactRef>,
+        env: &ModelEnv,
+        out: &mut StepResult,
+    ) -> Result<()> {
+        let mut references = vec![
+            self.config.as_ref().ok_or(ModelError::UnknownDefinition)?.0,
+            state.profile_ref,
+        ];
         references.extend(proof);
         references.sort_unstable();
         references.dedup();
         let mut frame_effects = Vec::new();
         for (source_index, normalized) in source.outputs.iter().enumerate() {
-            let output_index = u32::try_from(out.effects.len() + frame_effects.len()).map_err(|_| EventError::EventTooLarge)?;
-            let cursor = EventCursor { apply_record: at, output_index: OutputIndex::new(output_index) };
+            let output_index = u32::try_from(out.effects.len() + frame_effects.len())
+                .map_err(|_| EventError::EventTooLarge)?;
+            let cursor = EventCursor {
+                apply_record: at,
+                output_index: OutputIndex::new(output_index),
+            };
             let event = EventEnvelope {
                 schema_version: 1,
-                event_id: EventId { archive: self.start.archive, cursor, normalizer: source.source.context.normalizer },
+                event_id: EventId {
+                    archive: self.start.archive,
+                    cursor,
+                    normalizer: source.source.context.normalizer,
+                },
                 source_candidate: SourceCandidateKey {
                     raw: source.source.raw,
-                    index: RawSubIndex::new(u32::try_from(source_index).map_err(|_| EventError::EventTooLarge)?),
+                    index: RawSubIndex::new(
+                        u32::try_from(source_index).map_err(|_| EventError::EventTooLarge)?,
+                    ),
                     normalizer: source.source.context.normalizer,
                 },
                 raw_input_ref: source.source.raw,
@@ -251,20 +376,37 @@ impl HealthModel {
                 binding: source.source.binding.clone(),
                 source_timestamp: normalized.timestamp.clone(),
                 received: source.source.received,
-                applied_at: MonotonicSample { scope: self.clock(), ns: MonotonicNs::new(self.evaluation_ns) },
+                applied_at: MonotonicSample {
+                    scope: self.clock(),
+                    ns: MonotonicNs::new(self.evaluation_ns),
+                },
                 context: source.source.context,
                 available_at: cursor,
-                as_of: CausalBasis { record_frontier: at, prior_effects: vec![] },
+                as_of: CausalBasis {
+                    record_frontier: at,
+                    prior_effects: vec![],
+                },
                 record_schema_version: 1,
                 artifact_refs: references.clone(),
                 payload: normalized.payload.clone(),
             };
             let prior: Vec<_> = out.effects.iter().map(|e| e.event_id.cursor).collect();
-            let view = ApplyingView { history: &env.prefix, current: self.at(at), source };
-            event.validate(&EnvelopeContext {
-                apply: self.at(at), binding: &state.binding, active: self.context()?,
-                clock: self.clock(), artifact_refs: &references, prior_outputs_this_step: &prior,
-            }, &view)?;
+            let view = ApplyingView {
+                history: &env.prefix,
+                current: self.at(at),
+                source,
+            };
+            event.validate(
+                &EnvelopeContext {
+                    apply: self.at(at),
+                    binding: &state.binding,
+                    active: self.context()?,
+                    clock: self.clock(),
+                    artifact_refs: &references,
+                    prior_outputs_this_step: &prior,
+                },
+                &view,
+            )?;
             frame_effects.push(event);
         }
         state.last_batch_effects = frame_effects.iter().map(|event| event.event_id).collect();
@@ -284,7 +426,11 @@ struct ApplyingView<'a> {
 
 impl PrefixView for ApplyingView<'_> {
     fn raw(&self, id: RawFrameId) -> Option<&NormalizedFrame> {
-        if id == self.source.source.raw { Some(self.source) } else { self.history.raw(id) }
+        if id == self.source.source.raw {
+            Some(self.source)
+        } else {
+            self.history.raw(id)
+        }
     }
 
     fn record_exists(&self, record: RecordRef) -> bool {

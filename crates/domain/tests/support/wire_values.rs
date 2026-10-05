@@ -40,7 +40,13 @@ impl Reader<'_> {
         let offset = self.offset();
         let value = self.u8()?;
         T::try_from(value).map_err(|_| {
-            Error::new(offset, ErrorKind::Unsupported { field, value: value.into() })
+            Error::new(
+                offset,
+                ErrorKind::Unsupported {
+                    field,
+                    value: value.into(),
+                },
+            )
         })
     }
 
@@ -58,21 +64,29 @@ impl Reader<'_> {
         let offset = self.offset();
         let length = usize::from(self.u8()?);
         if length == 0 || length > N || N > 128 {
-            return Err(Error::new(offset, ErrorKind::Identity(IdentityError::InvalidToken)));
+            return Err(Error::new(
+                offset,
+                ErrorKind::Identity(IdentityError::InvalidToken),
+            ));
         }
-        let text = std::str::from_utf8(self.take(length)?).map_err(|_| {
-            Error::new(offset, ErrorKind::Identity(IdentityError::InvalidToken))
-        })?;
+        let text = std::str::from_utf8(self.take(length)?)
+            .map_err(|_| Error::new(offset, ErrorKind::Identity(IdentityError::InvalidToken)))?;
         checked(offset, Token::new(text))
     }
 
     pub fn artifact(&mut self) -> Result<ArtifactRef> {
         let offset = self.offset();
         if self.u8()? != 71 {
-            return Err(Error::new(offset, ErrorKind::Artifact(ArtifactError::InvalidArtifactRef)));
+            return Err(Error::new(
+                offset,
+                ErrorKind::Artifact(ArtifactError::InvalidArtifactRef),
+            ));
         }
         let text = std::str::from_utf8(self.take(71)?).map_err(|_| {
-            Error::new(offset, ErrorKind::Artifact(ArtifactError::InvalidArtifactRef))
+            Error::new(
+                offset,
+                ErrorKind::Artifact(ArtifactError::InvalidArtifactRef),
+            )
         })?;
         checked(offset, text.parse())
     }
@@ -108,8 +122,15 @@ impl Reader<'_> {
         let offset = self.offset();
         let config = self.u32()?;
         let normalizer = self.u32()?;
-        let context = checked(offset, InputContext::decode(config, normalizer, kind, has_active))?;
-        Ok(WireContext { unix_ns, monotonic_ns, context })
+        let context = checked(
+            offset,
+            InputContext::decode(config, normalizer, kind, has_active),
+        )?;
+        Ok(WireContext {
+            unix_ns,
+            monotonic_ns,
+            context,
+        })
     }
 
     pub fn active_context(&mut self) -> Result<ActiveContext> {
@@ -138,8 +159,14 @@ impl Reader<'_> {
         let version = self.spec_version()?;
         let instrument = self.instrument()?;
         let fields = NumericSpecFields {
-            reference: SpecRef { instrument, version },
-            price_units: PriceUnits { quote: self.token()?, basis: self.token()? },
+            reference: SpecRef {
+                instrument,
+                version,
+            },
+            price_units: PriceUnits {
+                quote: self.token()?,
+                basis: self.token()?,
+            },
             quantity_unit: self.token()?,
             base_asset: self.token()?,
             price_increment: self.decimal()?,

@@ -55,7 +55,10 @@ impl LossState {
         if self.window.is_some() {
             return Err(LossError::AmbiguousLossWindow);
         }
-        let expected = self.accounted_frontier.checked_add(1).ok_or(LossError::AttemptCounterExhausted)?;
+        let expected = self
+            .accounted_frontier
+            .checked_add(1)
+            .ok_or(LossError::AttemptCounterExhausted)?;
         if let Some((first, last)) = target.range {
             if first.get() <= self.accounted_frontier {
                 return Err(LossError::LossOverlap);
@@ -75,8 +78,15 @@ impl LossState {
         Ok(())
     }
 
-    pub fn raw(&mut self, attempt: CaptureAttemptNo, tag: EpochTag) -> Result<RawAccounting, LossError> {
-        let expected = self.accounted_frontier.checked_add(1).ok_or(LossError::AttemptCounterExhausted)?;
+    pub fn raw(
+        &mut self,
+        attempt: CaptureAttemptNo,
+        tag: EpochTag,
+    ) -> Result<RawAccounting, LossError> {
+        let expected = self
+            .accounted_frontier
+            .checked_add(1)
+            .ok_or(LossError::AttemptCounterExhausted)?;
         let value = attempt.get();
         if value <= self.accounted_frontier {
             return Err(LossError::AttemptOrderError);
@@ -97,7 +107,10 @@ impl LossState {
             if value != expected {
                 return Err(LossError::UnaccountedAttemptGap);
             }
-            RawAccounting { inferred_interval: None, recorded_count: None }
+            RawAccounting {
+                inferred_interval: None,
+                recorded_count: None,
+            }
         };
         self.accounted_frontier = value;
         self.window = None;

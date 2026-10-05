@@ -11,7 +11,13 @@ fn side(r: &mut Reader<'_>) -> Result<Side> {
     match value {
         1 => Ok(Side::Bid),
         2 => Ok(Side::Ask),
-        _ => Err(Error::new(offset, ErrorKind::Unsupported { field: "Side", value: value.into() })),
+        _ => Err(Error::new(
+            offset,
+            ErrorKind::Unsupported {
+                field: "Side",
+                value: value.into(),
+            },
+        )),
     }
 }
 
@@ -29,7 +35,10 @@ fn homogeneous(outputs: &[MarketPayload]) -> Result<()> {
     }
     for output in outputs {
         if !matches!(output, MarketPayload::Update(_)) {
-            return Err(Error::new(10, ErrorKind::Event(EventError::MixedFrameUnsupported)));
+            return Err(Error::new(
+                10,
+                ErrorKind::Event(EventError::MixedFrameUnsupported),
+            ));
         }
         checked(10, output.validate())?;
     }
@@ -42,10 +51,12 @@ pub fn decode_commitment(bytes: &[u8]) -> Result<Vec<MarketPayload>> {
         return Err(Error::new(0, ErrorKind::Corrupt("PSCO.magic")));
     }
     if r.u16()? != 1 {
-        return Err(Error::new(4, ErrorKind::Event(EventError::UnsupportedSchema)));
+        return Err(Error::new(
+            4,
+            ErrorKind::Event(EventError::UnsupportedSchema),
+        ));
     }
-    let count = usize::try_from(r.u32()?)
-        .map_err(|_| Error::new(6, ErrorKind::LengthError))?;
+    let count = usize::try_from(r.u32()?).map_err(|_| Error::new(6, ErrorKind::LengthError))?;
     r.count(count, 5, 65_536)?;
     let mut outputs = Vec::with_capacity(count);
     for _ in 0..count {
@@ -73,23 +84,37 @@ pub fn decode_commitment(bytes: &[u8]) -> Result<Vec<MarketPayload>> {
                     let offset = r.offset();
                     let operation = r.u8()?;
                     if operation != 1 && operation != 2 {
-                        return Err(Error::new(offset, ErrorKind::Unsupported {
-                            field: "PSCO.operation", value: operation.into(),
-                        }));
+                        return Err(Error::new(
+                            offset,
+                            ErrorKind::Unsupported {
+                                field: "PSCO.operation",
+                                value: operation.into(),
+                            },
+                        ));
                     }
                     let side = side(&mut r)?;
                     let price = price(&mut r)?;
                     changes.push(if operation == 1 {
-                        LevelChange::Set(Level { side, price, quantity: QuantitySteps::new(r.u64()?) })
+                        LevelChange::Set(Level {
+                            side,
+                            price,
+                            quantity: QuantitySteps::new(r.u64()?),
+                        })
                     } else {
                         LevelChange::Delete { side, price }
                     });
                 }
                 MarketPayload::Update(changes)
             }
-            _ => return Err(Error::new(offset, ErrorKind::Unsupported {
-                field: "PSCO.output_tag", value: tag.into(),
-            })),
+            _ => {
+                return Err(Error::new(
+                    offset,
+                    ErrorKind::Unsupported {
+                        field: "PSCO.output_tag",
+                        value: tag.into(),
+                    },
+                ));
+            }
         };
         checked(offset, output.validate())?;
         outputs.push(output);
@@ -103,7 +128,9 @@ pub fn encode_commitment(outputs: &[MarketPayload]) -> Result<Vec<u8>> {
     homogeneous(outputs)?;
     // A commitment cannot contain more than the validated source outputs and
     // 4096 entries per output. Checked writer capacity, not an untrusted reserve.
-    let cap = outputs.len().checked_mul(5 + MAX_BOOK_ENTRIES * 18)
+    let cap = outputs
+        .len()
+        .checked_mul(5 + MAX_BOOK_ENTRIES * 18)
         .and_then(|v| v.checked_add(10))
         .ok_or_else(|| Error::new(6, ErrorKind::LengthError))?;
     let mut w = Writer::new(cap);

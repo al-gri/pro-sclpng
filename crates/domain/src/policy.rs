@@ -5,9 +5,17 @@ use std::fmt;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PolicyError {
-    Unsupported { field: &'static str, value: u8 },
-    InvalidConfiguration { field: &'static str },
-    InvalidPayload { field: &'static str, detail: &'static str },
+    Unsupported {
+        field: &'static str,
+        value: u8,
+    },
+    InvalidConfiguration {
+        field: &'static str,
+    },
+    InvalidPayload {
+        field: &'static str,
+        detail: &'static str,
+    },
 }
 
 impl fmt::Display for PolicyError {
@@ -143,13 +151,34 @@ impl PolicyFields {
 
     pub fn validate_mirror(self, descriptor: Self) -> Result<()> {
         let pairs = [
-            (self.silence_rule == descriptor.silence_rule, "Config.silence_rule"),
-            (self.recording_gate == descriptor.recording_gate, "Config.recording_gate"),
-            (self.freshness_deadline_ns == descriptor.freshness_deadline_ns, "Config.freshness_deadline_ns"),
-            (self.warmup_min_updates == descriptor.warmup_min_updates, "Config.warmup_min_updates"),
-            (self.warmup_min_elapsed_ns == descriptor.warmup_min_elapsed_ns, "Config.warmup_min_elapsed_ns"),
-            (self.allow_quiet_with_proof == descriptor.allow_quiet_with_proof, "Config.allow_quiet_with_proof"),
-            (self.require_two_sided_snapshot == descriptor.require_two_sided_snapshot, "Config.require_two_sided_snapshot"),
+            (
+                self.silence_rule == descriptor.silence_rule,
+                "Config.silence_rule",
+            ),
+            (
+                self.recording_gate == descriptor.recording_gate,
+                "Config.recording_gate",
+            ),
+            (
+                self.freshness_deadline_ns == descriptor.freshness_deadline_ns,
+                "Config.freshness_deadline_ns",
+            ),
+            (
+                self.warmup_min_updates == descriptor.warmup_min_updates,
+                "Config.warmup_min_updates",
+            ),
+            (
+                self.warmup_min_elapsed_ns == descriptor.warmup_min_elapsed_ns,
+                "Config.warmup_min_elapsed_ns",
+            ),
+            (
+                self.allow_quiet_with_proof == descriptor.allow_quiet_with_proof,
+                "Config.allow_quiet_with_proof",
+            ),
+            (
+                self.require_two_sided_snapshot == descriptor.require_two_sided_snapshot,
+                "Config.require_two_sided_snapshot",
+            ),
         ];
         for (equal, field) in pairs {
             if !equal {
@@ -178,9 +207,18 @@ impl HealthPolicy {
     pub fn validate(self, mode: DurabilityMode) -> Result<()> {
         self.fields.validate(mode)?;
         let bounds = [
-            ((1..=256).contains(&self.pending_max_frames), "Config.pending_max_frames"),
-            ((1..=16_777_216).contains(&self.pending_max_raw_bytes), "Config.pending_max_raw_bytes"),
-            ((1..=65_536).contains(&self.pending_max_outputs), "Config.pending_max_outputs"),
+            (
+                (1..=256).contains(&self.pending_max_frames),
+                "Config.pending_max_frames",
+            ),
+            (
+                (1..=16_777_216).contains(&self.pending_max_raw_bytes),
+                "Config.pending_max_raw_bytes",
+            ),
+            (
+                (1..=65_536).contains(&self.pending_max_outputs),
+                "Config.pending_max_outputs",
+            ),
             (self.pending_wait_ns > 0, "Config.pending_wait_ns"),
         ];
         for (valid, field) in bounds {

@@ -9,7 +9,10 @@ fn v2_policy_silence_all_and_unsupported() {
         let expected = match byte {
             1 => Ok(SilenceRule::UnknownOnSilence),
             2 => Ok(SilenceRule::StaleAfterDeadline),
-            value => Err(PolicyError::Unsupported { field: "Config.silence_rule", value }),
+            value => Err(PolicyError::Unsupported {
+                field: "Config.silence_rule",
+                value,
+            }),
         };
         assert_eq!(SilenceRule::try_from(byte), expected);
     }
@@ -24,7 +27,10 @@ fn v2_policy_gate_all_and_unsupported() {
             1 => Ok(RecordingGate::Written),
             2 => Ok(RecordingGate::Flushed),
             3 => Ok(RecordingGate::Durable),
-            value => Err(PolicyError::Unsupported { field: "Config.recording_gate", value }),
+            value => Err(PolicyError::Unsupported {
+                field: "Config.recording_gate",
+                value,
+            }),
         };
         assert_eq!(RecordingGate::try_from(byte), expected);
     }
@@ -52,7 +58,9 @@ fn v_r2_mode_gate_all_nine_cells() {
         let expected = if valid {
             Ok(())
         } else {
-            Err(PolicyError::InvalidConfiguration { field: "Config.recording_gate" })
+            Err(PolicyError::InvalidConfiguration {
+                field: "Config.recording_gate",
+            })
         };
         assert_eq!(mode.validate_gate(gate), expected);
     }
@@ -72,14 +80,23 @@ fn v2_policy_no_ordinal_cast_between_gate_and_watermark() {
     assert!(RecordingGate::Flushed.covers(RecordingGate::Written));
     assert!(!RecordingGate::Written.covers(RecordingGate::Flushed));
     for (tag, value) in [
-        (1, WatermarkKind::Accepted), (2, WatermarkKind::Appended),
-        (3, WatermarkKind::Written), (4, WatermarkKind::Flushed), (5, WatermarkKind::Durable),
+        (1, WatermarkKind::Accepted),
+        (2, WatermarkKind::Appended),
+        (3, WatermarkKind::Written),
+        (4, WatermarkKind::Flushed),
+        (5, WatermarkKind::Durable),
     ] {
         assert_eq!(WatermarkKind::try_from(tag), Ok(value));
         assert_eq!(value.tag(), tag);
     }
     for tag in [0, 6, 255] {
-        assert_eq!(WatermarkKind::try_from(tag), Err(PolicyError::Unsupported { field: "RecordingEvidence.watermark_kind", value: tag }));
+        assert_eq!(
+            WatermarkKind::try_from(tag),
+            Err(PolicyError::Unsupported {
+                field: "RecordingEvidence.watermark_kind",
+                value: tag
+            })
+        );
     }
 }
 
@@ -97,14 +114,22 @@ fn v2_policy_wal_psad_match_and_supported_mismatch() {
     let wire = policy().fields;
     let mut body = wire;
     body.silence_rule = SilenceRule::StaleAfterDeadline;
-    assert_eq!(wire.validate_mirror(body), Err(PolicyError::InvalidPayload {
-        field: "Config.silence_rule", detail: "PolicyRepresentationMismatch",
-    }));
+    assert_eq!(
+        wire.validate_mirror(body),
+        Err(PolicyError::InvalidPayload {
+            field: "Config.silence_rule",
+            detail: "PolicyRepresentationMismatch",
+        })
+    );
     body = wire;
     body.recording_gate = RecordingGate::Written;
-    assert_eq!(wire.validate_mirror(body), Err(PolicyError::InvalidPayload {
-        field: "Config.recording_gate", detail: "PolicyRepresentationMismatch",
-    }));
+    assert_eq!(
+        wire.validate_mirror(body),
+        Err(PolicyError::InvalidPayload {
+            field: "Config.recording_gate",
+            detail: "PolicyRepresentationMismatch",
+        })
+    );
     assert_eq!(wire, policy().fields);
 }
 
@@ -116,11 +141,21 @@ fn policy_thresholds_pending_bounds_and_none_semantics() {
     p.fields.freshness_deadline_ns = None;
     assert_eq!(p.validate(DurabilityMode::SyncBeforePublish), Ok(()));
     p.fields.silence_rule = SilenceRule::StaleAfterDeadline;
-    assert_eq!(p.validate(DurabilityMode::SyncBeforePublish), Err(PolicyError::InvalidConfiguration { field: "Config.freshness_deadline_ns" }));
+    assert_eq!(
+        p.validate(DurabilityMode::SyncBeforePublish),
+        Err(PolicyError::InvalidConfiguration {
+            field: "Config.freshness_deadline_ns"
+        })
+    );
     p = valid;
     p.fields.warmup_min_updates = None;
     p.fields.warmup_min_elapsed_ns = None;
-    assert_eq!(p.validate(DurabilityMode::SyncBeforePublish), Err(PolicyError::InvalidConfiguration { field: "Config.warmup_thresholds" }));
+    assert_eq!(
+        p.validate(DurabilityMode::SyncBeforePublish),
+        Err(PolicyError::InvalidConfiguration {
+            field: "Config.warmup_thresholds"
+        })
+    );
     for (frames, bytes, outputs, wait, field) in [
         (0, 256, 4, 50, "Config.pending_max_frames"),
         (257, 256, 4, 50, "Config.pending_max_frames"),
@@ -135,11 +170,19 @@ fn policy_thresholds_pending_bounds_and_none_semantics() {
         p.pending_max_raw_bytes = bytes;
         p.pending_max_outputs = outputs;
         p.pending_wait_ns = wait;
-        assert_eq!(p.validate(DurabilityMode::Buffered), Err(PolicyError::InvalidConfiguration { field }));
+        assert_eq!(
+            p.validate(DurabilityMode::Buffered),
+            Err(PolicyError::InvalidConfiguration { field })
+        );
     }
     p = valid;
     p.fields.allow_quiet_with_proof = true;
-    assert_eq!(p.validate(DurabilityMode::Buffered), Err(PolicyError::InvalidConfiguration { field: "Config.quiet_max_lifetime_ns" }));
+    assert_eq!(
+        p.validate(DurabilityMode::Buffered),
+        Err(PolicyError::InvalidConfiguration {
+            field: "Config.quiet_max_lifetime_ns"
+        })
+    );
     p.quiet_max_lifetime_ns = Some(10);
     assert_eq!(p.validate(DurabilityMode::Buffered), Ok(()));
 }

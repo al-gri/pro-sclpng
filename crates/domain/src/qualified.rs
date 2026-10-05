@@ -62,7 +62,10 @@ impl NumericSpec {
         if fields.price_increment.is_zero() || fields.quantity_increment.is_zero() {
             return Err(NumericError::InvalidIncrement.into());
         }
-        if fields.quantity_to_base_multiplier.is_some_and(ExactDecimal::is_zero) {
+        if fields
+            .quantity_to_base_multiplier
+            .is_some_and(ExactDecimal::is_zero)
+        {
             return Err(NumericError::InvalidMultiplier.into());
         }
         if fields.quantity_unit == fields.base_asset
@@ -111,12 +114,18 @@ impl NumericSpec {
 
     pub fn price_decimal(&self, value: &PricedValue) -> Result<ExactDecimal> {
         self.0.reference.ensure_same(&value.reference)?;
-        Ok(ExactDecimal::from_count(value.ticks.get(), self.0.price_increment)?)
+        Ok(ExactDecimal::from_count(
+            value.ticks.get(),
+            self.0.price_increment,
+        )?)
     }
 
     pub fn quantity_decimal(&self, value: &SizedValue) -> Result<ExactDecimal> {
         self.0.reference.ensure_same(&value.reference)?;
-        Ok(ExactDecimal::from_count(value.steps.get(), self.0.quantity_increment)?)
+        Ok(ExactDecimal::from_count(
+            value.steps.get(),
+            self.0.quantity_increment,
+        )?)
     }
 
     pub fn convert_quantity(

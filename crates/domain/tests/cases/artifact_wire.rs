@@ -52,7 +52,10 @@ fn af_psad_bodies_and_psam_match_frozen_bytes_without_hashing() {
             u64::try_from(artifact.body.len()).unwrap(),
             "{name}"
         );
-        assert_eq!(descriptor.metadata.body_sha256, artifact.body_digest, "{name}");
+        assert_eq!(
+            descriptor.metadata.body_sha256, artifact.body_digest,
+            "{name}"
+        );
         assert_eq!(
             encode_descriptor(&descriptor).unwrap(),
             artifact.descriptor,
@@ -123,11 +126,7 @@ fn psco_snapshot_and_update_goldens_decode_to_exact_outputs() {
                 price: PriceTicks::new(2002).unwrap(),
             },
         ]),
-        MarketPayload::Update(vec![LevelChange::Set(fixtures::level(
-            Side::Ask,
-            2003,
-            1,
-        ))]),
+        MarketPayload::Update(vec![LevelChange::Set(fixtures::level(Side::Ask, 2003, 1))]),
     ];
     assert_eq!(decode_commitment(&updates_bytes).unwrap(), expected);
     assert_eq!(encode_commitment(&expected).unwrap(), updates_bytes);
@@ -160,7 +159,11 @@ fn warmup_and_quiet_body_goldens_bind_scope_time_and_basis_records() {
             assert_eq!(value.observed_at_ns, 17);
             assert_eq!(
                 value.basis_records,
-                vec![fixtures::record(9), fixtures::record(10), fixtures::record(16)]
+                vec![
+                    fixtures::record(9),
+                    fixtures::record(10),
+                    fixtures::record(16)
+                ]
             );
         }
         other => panic!("expected warmup body, got {other:?}"),
@@ -181,7 +184,11 @@ fn warmup_and_quiet_body_goldens_bind_scope_time_and_basis_records() {
             assert_eq!(value.valid_until_ns, Some(25));
             assert_eq!(
                 value.basis_records,
-                vec![fixtures::record(9), fixtures::record(10), fixtures::record(15)]
+                vec![
+                    fixtures::record(9),
+                    fixtures::record(10),
+                    fixtures::record(15)
+                ]
             );
         }
         other => panic!("expected freshness body, got {other:?}"),
@@ -306,8 +313,10 @@ fn v2_policy_binary_unsupported_and_supported_mismatch_reach_target_guards() {
         WatermarkKind::Written.achieved_gate(),
         Some(RecordingGate::Written)
     );
-    assert!(!WatermarkKind::Written
-        .achieved_gate()
-        .unwrap()
-        .covers(RecordingGate::Durable));
+    assert!(
+        !WatermarkKind::Written
+            .achieved_gate()
+            .unwrap()
+            .covers(RecordingGate::Durable)
+    );
 }

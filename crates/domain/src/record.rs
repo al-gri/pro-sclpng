@@ -128,7 +128,13 @@ tags!(
     Synthetic = 2,
     SourceVerified = 3
 );
-tags!(Transport, "Transport.liveness", Unknown = 0, Up = 1, Down = 2);
+tags!(
+    Transport,
+    "Transport.liveness",
+    Unknown = 0,
+    Up = 1,
+    Down = 2
+);
 tags!(
     BookEvidenceKind,
     "Verification.evidence_kind",

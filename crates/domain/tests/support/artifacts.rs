@@ -59,7 +59,10 @@ impl SyntheticResolver {
         kind: ArtifactKind,
         archive: ArchiveId,
     ) -> Result<SyntheticApplicability, ArtifactError> {
-        let root = self.supplied.get(&reference).ok_or(ArtifactError::MissingArtifact)?;
+        let root = self
+            .supplied
+            .get(&reference)
+            .ok_or(ArtifactError::MissingArtifact)?;
         if root.metadata.identity.kind != kind {
             return Err(ArtifactError::ArtifactKindMismatch);
         }
@@ -68,7 +71,11 @@ impl SyntheticResolver {
         // Bind only after complete successful resolution; a failed closure must
         // not partially authorize future references or mutate prior bindings.
         self.bindings.extend(state.new_bindings);
-        Ok(SyntheticApplicability { reference, kind, archive })
+        Ok(SyntheticApplicability {
+            reference,
+            kind,
+            archive,
+        })
     }
 
     fn visit(
@@ -90,7 +97,10 @@ impl SyntheticResolver {
         if state.done.len() + state.visiting.len() >= MAX_CLOSURE {
             return Err(ArtifactError::ArtifactTooLarge);
         }
-        let node = self.supplied.get(&reference).ok_or(ArtifactError::MissingArtifact)?;
+        let node = self
+            .supplied
+            .get(&reference)
+            .ok_or(ArtifactError::MissingArtifact)?;
         node.metadata.validate()?;
         if node.metadata.identity.archive != archive || node.reference != reference {
             return Err(ArtifactError::ArtifactIdentityConflict);
@@ -103,8 +113,12 @@ impl SyntheticResolver {
         {
             return Err(ArtifactError::ArtifactTooLarge);
         }
-        node.metadata.validate_dependencies(&node.required_dependencies, &node.optional_basis)?;
-        let observed = node.observed.as_ref().ok_or(ArtifactError::ArtifactUnverified)?;
+        node.metadata
+            .validate_dependencies(&node.required_dependencies, &node.optional_basis)?;
+        let observed = node
+            .observed
+            .as_ref()
+            .ok_or(ArtifactError::ArtifactUnverified)?;
         if observed.body_length != node.metadata.body_length {
             return Err(ArtifactError::ArtifactLengthMismatch);
         }
@@ -117,7 +131,10 @@ impl SyntheticResolver {
             return Err(ArtifactError::ArtifactUnverified);
         }
         for dependency in &node.optional_basis {
-            let basis = self.supplied.get(dependency).ok_or(ArtifactError::MissingArtifact)?;
+            let basis = self
+                .supplied
+                .get(dependency)
+                .ok_or(ArtifactError::MissingArtifact)?;
             if basis.metadata.identity.kind != ArtifactKind::Basis {
                 return Err(ArtifactError::InvalidArtifactDependencies);
             }

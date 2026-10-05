@@ -241,11 +241,17 @@ impl HealthModel {
     }
 
     pub fn clock(&self) -> ClockScope {
-        ClockScope { session: self.start.session, clock: self.start.clock }
+        ClockScope {
+            session: self.start.session,
+            clock: self.start.clock,
+        }
     }
 
     pub fn policy(&self) -> Result<HealthPolicy> {
-        self.config.as_ref().map(|(_, body)| body.policy).ok_or(ModelError::UnknownDefinition)
+        self.config
+            .as_ref()
+            .map(|(_, body)| body.policy)
+            .ok_or(ModelError::UnknownDefinition)
     }
 
     pub fn context(&self) -> Result<ActiveContext> {
@@ -273,9 +279,15 @@ impl HealthModel {
     }
 
     pub fn usable_data(&self, id: StreamId) -> bool {
-        let Some(stream) = self.streams.get(&id) else { return false };
-        let Ok(policy) = self.policy() else { return false };
-        let Ok(scope) = self.scope(stream) else { return false };
+        let Some(stream) = self.streams.get(&id) else {
+            return false;
+        };
+        let Ok(policy) = self.policy() else {
+            return false;
+        };
+        let Ok(scope) = self.scope(stream) else {
+            return false;
+        };
         if self.blocked.is_some() || self.transport_for(stream) != Transport::Up {
             return false;
         }
@@ -340,11 +352,24 @@ impl HealthModel {
     }
 
     fn at(&self, record: RecordNo) -> RecordRef {
-        RecordRef { archive: self.start.archive, record }
+        RecordRef {
+            archive: self.start.archive,
+            record,
+        }
     }
 
-    fn diagnostic(&self, at: RecordNo, stream: StreamId, code: DiagnosticCode, out: &mut StepResult) {
-        out.diagnostics.push(Diagnostic { record: self.at(at), stream, code });
+    fn diagnostic(
+        &self,
+        at: RecordNo,
+        stream: StreamId,
+        code: DiagnosticCode,
+        out: &mut StepResult,
+    ) {
+        out.diagnostics.push(Diagnostic {
+            record: self.at(at),
+            stream,
+            code,
+        });
     }
 
     fn fault(&self, state: &mut StreamState, at: RecordNo, fault: Fault, out: &mut StepResult) {
@@ -353,12 +378,21 @@ impl HealthModel {
     }
 
     fn expire(&mut self, at: RecordNo, out: &mut StepResult) -> Result<()> {
-        let Some((_, config)) = &self.config else { return Ok(()) };
+        let Some((_, config)) = &self.config else {
+            return Ok(());
+        };
         let policy = config.policy;
         let ids: Vec<_> = self.streams.keys().copied().collect();
         for id in ids {
-            let mut state = self.streams.remove(&id).ok_or(ModelError::UnknownDefinition)?;
-            if state.pending.iter().any(|pending| self.evaluation_ns >= pending.deadline_ns) {
+            let mut state = self
+                .streams
+                .remove(&id)
+                .ok_or(ModelError::UnknownDefinition)?;
+            if state
+                .pending
+                .iter()
+                .any(|pending| self.evaluation_ns >= pending.deadline_ns)
+            {
                 self.fault(&mut state, at, Fault::PendingTimeout, out);
             } else {
                 self.refresh_freshness(&mut state, policy, at, out);
@@ -368,7 +402,13 @@ impl HealthModel {
         Ok(())
     }
 
-    fn refresh_freshness(&self, state: &mut StreamState, policy: HealthPolicy, at: RecordNo, out: &mut StepResult) {
+    fn refresh_freshness(
+        &self,
+        state: &mut StreamState,
+        policy: HealthPolicy,
+        at: RecordNo,
+        out: &mut StepResult,
+    ) {
         if let Some(quiet) = &state.quiet
             && self.evaluation_ns < quiet.expires_ns
         {
@@ -376,11 +416,8 @@ impl HealthModel {
             return;
         }
         state.quiet = None;
-        let (value, diagnostic) = ordinary_freshness(
-            state.last_valid_sample_ns,
-            self.evaluation_ns,
-            policy,
-        );
+        let (value, diagnostic) =
+            ordinary_freshness(state.last_valid_sample_ns, self.evaluation_ns, policy);
         state.freshness = value;
         if let Some(code) = diagnostic {
             self.diagnostic(at, state.binding.id, code, out);
@@ -388,15 +425,27 @@ impl HealthModel {
     }
 
     fn update_candidates(&mut self, at: RecordNo, out: &mut StepResult) -> Result<()> {
-        let Some((_, config)) = &self.config else { return Ok(()) };
+        let Some((_, config)) = &self.config else {
+            return Ok(());
+        };
         let policy = config.policy;
         let ids: Vec<_> = self.streams.keys().copied().collect();
         for id in ids {
-            let eligible = self.usable_data(id) && self.recording.health == RecordingHealth::Healthy;
-            let mut stream = self.streams.remove(&id).ok_or(ModelError::UnknownDefinition)?;
+            let eligible =
+                self.usable_data(id) && self.recording.health == RecordingHealth::Healthy;
+            let mut stream = self
+                .streams
+                .remove(&id)
+                .ok_or(ModelError::UnknownDefinition)?;
             if eligible {
-                let anchor = stream.anchor.as_ref().ok_or(ModelError::UnknownDefinition)?;
-                let witness = stream.witness.as_ref().ok_or(ModelError::UnknownDefinition)?;
+                let anchor = stream
+                    .anchor
+                    .as_ref()
+                    .ok_or(ModelError::UnknownDefinition)?;
+                let witness = stream
+                    .witness
+                    .as_ref()
+                    .ok_or(ModelError::UnknownDefinition)?;
                 let projection = CandidateProjection {
                     scope: self.scope(&stream)?,
                     gate: policy.fields.recording_gate,
@@ -407,9 +456,10 @@ impl HealthModel {
                     recording: self.recording.clone(),
                     evaluation_ns: self.evaluation_ns,
                 };
-                let changed = stream.candidate.as_ref().is_none_or(|previous| {
-                    previous.revoked || previous.projection != projection
-                });
+                let changed = stream
+                    .candidate
+                    .as_ref()
+                    .is_none_or(|previous| previous.revoked || previous.projection != projection);
                 if changed {
                     let candidate = PublicationCandidate::freeze(self.at(at), projection);
                     out.candidates_created.push(candidate.id);
@@ -428,8 +478,13 @@ impl HealthModel {
         candidate: &PublicationCandidate,
         completion: Option<&SyntheticCompletion>,
     ) -> std::result::Result<(), PermitError> {
-        let stream = self.streams.get(&candidate.id.stream).ok_or(PermitError::CandidateRevoked)?;
-        let scope = self.scope(stream).map_err(|_| PermitError::CanonicalBlocked)?;
+        let stream = self
+            .streams
+            .get(&candidate.id.stream)
+            .ok_or(PermitError::CandidateRevoked)?;
+        let scope = self
+            .scope(stream)
+            .map_err(|_| PermitError::CanonicalBlocked)?;
         publication_permit(
             candidate,
             &PermitState {
@@ -454,7 +509,10 @@ pub fn ordinary_freshness(
         return (Freshness::Unknown, None);
     };
     let Some(expiry) = sample.checked_add(deadline) else {
-        return (Freshness::Unknown, Some(DiagnosticCode::FreshnessDeadlineOverflow));
+        return (
+            Freshness::Unknown,
+            Some(DiagnosticCode::FreshnessDeadlineOverflow),
+        );
     };
     if evaluation < sample {
         return (Freshness::Unknown, None);

@@ -62,7 +62,10 @@ fn identity_tokens_are_bounded_ascii_without_case_folding() {
     for text in ["", " ", "a b", "a\0", "аб", "a+", "a\\b"] {
         assert_eq!(Token::<32>::new(text), Err(E::InvalidToken));
     }
-    assert_eq!(Token::<32>::new(&"a".repeat(32)).unwrap().as_str().len(), 32);
+    assert_eq!(
+        Token::<32>::new(&"a".repeat(32)).unwrap().as_str().len(),
+        32
+    );
     assert_eq!(Token::<32>::new(&"a".repeat(33)), Err(E::InvalidToken));
     assert_eq!(Token::<0>::new("a"), Err(E::InvalidToken));
     assert_eq!(Token::<129>::new("a"), Err(E::InvalidToken));
@@ -143,10 +146,7 @@ fn v_c1_writer_and_shared_connection_guards() {
 fn e16_positive_ids_and_checked_exhaustion() {
     macro_rules! check {
         ($name:ident, $integer:ty) => {
-            assert_eq!(
-                $name::new(0),
-                Err(E::ZeroIdentifier(stringify!($name)))
-            );
+            assert_eq!($name::new(0), Err(E::ZeroIdentifier(stringify!($name))));
             assert_eq!($name::new(1).unwrap().checked_next().unwrap().get(), 2);
             assert_eq!(
                 $name::new(<$integer>::MAX).unwrap().checked_next(),
@@ -173,10 +173,7 @@ fn e16_positive_ids_and_checked_exhaustion() {
         RawSubIndex::new(u32::MAX).checked_next(),
         Err(E::CounterExhausted("RawSubIndex"))
     );
-    assert_eq!(
-        ArchiveId::new([0; 16]),
-        Err(E::ZeroIdentifier("ArchiveId"))
-    );
+    assert_eq!(ArchiveId::new([0; 16]), Err(E::ZeroIdentifier("ArchiveId")));
     assert_eq!(
         CaptureSessionId::new([0; 16]),
         Err(E::ZeroIdentifier("CaptureSessionId"))

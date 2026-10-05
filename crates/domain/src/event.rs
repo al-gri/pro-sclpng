@@ -161,7 +161,9 @@ impl ContextTimeline {
         if self.effective_from.is_some_and(|first| record < first) {
             return Err(EventError::ContextMismatch);
         }
-        let expected = self.active.map_or(InputContext::Bootstrap, InputContext::Active);
+        let expected = self
+            .active
+            .map_or(InputContext::Bootstrap, InputContext::Active);
         if context != expected {
             return Err(EventError::ContextMismatch);
         }
@@ -273,7 +275,11 @@ impl TimestampUnit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SourceTimestamp {
     Unknown,
-    Known { value: i64, unit: TimestampUnit, origin: Token<32> },
+    Known {
+        value: i64,
+        unit: TimestampUnit,
+        origin: Token<32>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -322,7 +328,11 @@ pub enum RpiAttribute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TradeBookLink {
     Unknown,
-    Proven { book_event: EventRef, evidence: RecordRef, proof: ArtifactRef },
+    Proven {
+        book_event: EventRef,
+        evidence: RecordRef,
+        proof: ArtifactRef,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -543,7 +553,9 @@ impl EventEnvelope {
         if !view.record_exists(expected.apply) {
             return Err(EventError::MissingCausalReference);
         }
-        let raw = view.raw(self.raw_input_ref).ok_or(EventError::MissingRawInput)?;
+        let raw = view
+            .raw(self.raw_input_ref)
+            .ok_or(EventError::MissingRawInput)?;
         raw.validate()?;
         let key = self.source_candidate;
         if key.raw != self.raw_input_ref
@@ -557,11 +569,16 @@ impl EventEnvelope {
             return Err(EventError::SourceMismatch);
         }
         let index = usize::try_from(key.index.get()).map_err(|_| EventError::SubEventOrderError)?;
-        let source = raw.outputs.get(index).ok_or(EventError::SubEventOrderError)?;
+        let source = raw
+            .outputs
+            .get(index)
+            .ok_or(EventError::SubEventOrderError)?;
         if source.payload != self.payload || source.timestamp != self.source_timestamp {
             return Err(EventError::SourceMismatch);
         }
-        if self.received.monotonic.scope != expected.clock || self.applied_at.scope != expected.clock {
+        if self.received.monotonic.scope != expected.clock
+            || self.applied_at.scope != expected.clock
+        {
             return Err(EventError::IncomparableClock);
         }
         self.applied_at.elapsed_since(self.received.monotonic)?;
@@ -587,11 +604,18 @@ impl EventEnvelope {
             previous = Some(*cursor);
         }
         if let MarketPayload::Trade(Trade {
-            book_link: TradeBookLink::Proven { book_event, evidence, proof },
+            book_link:
+                TradeBookLink::Proven {
+                    book_event,
+                    evidence,
+                    proof,
+                },
             ..
         }) = &self.payload
         {
-            if book_event.archive != self.event_id.archive || evidence.archive != self.event_id.archive {
+            if book_event.archive != self.event_id.archive
+                || evidence.archive != self.event_id.archive
+            {
                 return Err(IdentityError::IdentityMismatch.into());
             }
             if book_event.cursor >= self.available_at || evidence.record > expected.apply.record {

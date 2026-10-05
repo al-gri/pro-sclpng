@@ -208,7 +208,13 @@ macro_rules! tagged_enum {
     };
 }
 
-tagged_enum!(MarketKind, "MarketKind", Spot = 1, Perpetual = 2, DatedFuture = 3);
+tagged_enum!(
+    MarketKind,
+    "MarketKind",
+    Spot = 1,
+    Perpetual = 2,
+    DatedFuture = 3
+);
 tagged_enum!(BookClass, "BookClass", Normal = 1, Rpi = 2);
 tagged_enum!(Channel, "Channel", BookNormal = 1, BookRpi = 2, Trades = 3);
 
@@ -301,7 +307,8 @@ impl StreamBinding {
             if self.book_id.is_some() && old.book_id == self.book_id {
                 return Err(IdentityError::IdentityConflict);
             }
-            if old.connection_id == self.connection_id && old.tag.connection != self.tag.connection {
+            if old.connection_id == self.connection_id && old.tag.connection != self.tag.connection
+            {
                 return Err(IdentityError::EpochMismatch);
             }
             if (old.instrument_slot == self.instrument_slot)

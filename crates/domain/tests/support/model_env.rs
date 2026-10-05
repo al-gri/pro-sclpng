@@ -223,7 +223,11 @@ impl ModelEnv {
             reference,
             ArtifactKind::Warmup,
             archive,
-            &format!("stream/{}/anchor/{}", body.scope.stream.get(), body.anchor.get()),
+            &format!(
+                "stream/{}/anchor/{}",
+                body.scope.stream.get(),
+                body.anchor.get()
+            ),
             None,
             &[config_ref, profile_ref],
         )?;
@@ -246,7 +250,11 @@ impl ModelEnv {
             reference,
             ArtifactKind::Freshness,
             archive,
-            &format!("stream/{}/basis/{}", body.scope.stream.get(), body.basis.get()),
+            &format!(
+                "stream/{}/basis/{}",
+                body.scope.stream.get(),
+                body.basis.get()
+            ),
             None,
             &[config_ref, profile_ref],
         )?;
@@ -270,7 +278,10 @@ impl ModelEnv {
             if *record >= referring_record {
                 return Err(EventError::FutureCausalReference);
             }
-            if !self.prefix.record_exists(RecordRef { archive, record: *record }) {
+            if !self.prefix.record_exists(RecordRef {
+                archive,
+                record: *record,
+            }) {
                 return Err(EventError::MissingCausalReference);
             }
         }
@@ -280,13 +291,11 @@ impl ModelEnv {
         Ok(())
     }
 
-    pub fn accept(
-        &mut self,
-        archive: ArchiveId,
-        input: &RecordFrame,
-        outputs: &[EventEnvelope],
-    ) {
-        self.prefix.records.insert(RecordRef { archive, record: input.record_no });
+    pub fn accept(&mut self, archive: ArchiveId, input: &RecordFrame, outputs: &[EventEnvelope]) {
+        self.prefix.records.insert(RecordRef {
+            archive,
+            record: input.record_no,
+        });
         match &input.value {
             Record::InstrumentSpec(spec) => {
                 self.specs.insert(
@@ -297,11 +306,16 @@ impl ModelEnv {
             Record::ConfigDefinition(config) => {
                 self.prefix.configs.insert(config.next.config);
                 if let Some(body) = self.configs.get(&config.evidence) {
-                    self.prefix.normalizers.insert(config.next.normalizer, body.normalizer_ref);
+                    self.prefix
+                        .normalizers
+                        .insert(config.next.normalizer, body.normalizer_ref);
                 }
             }
             Record::RawInput(raw) => {
-                let id = RawFrameId { archive, record: input.record_no };
+                let id = RawFrameId {
+                    archive,
+                    record: input.record_no,
+                };
                 self.raw_records.insert(id, raw.clone());
                 if let Some(fact) = self.normalizations.get(&id) {
                     self.prefix.insert_frame(fact.frame.clone());
@@ -310,7 +324,10 @@ impl ModelEnv {
             _ => {}
         }
         for event in outputs {
-            self.prefix.effects.insert(EventRef { archive, cursor: event.event_id.cursor });
+            self.prefix.effects.insert(EventRef {
+                archive,
+                cursor: event.event_id.cursor,
+            });
         }
     }
 }

@@ -14,7 +14,14 @@ fn at_candidate21() -> Scenario {
     for n in 15..=20 {
         s.timer(n).unwrap();
     }
-    let out = s.receipt(RecordingHealth::Healthy, WatermarkKind::Durable, Some(20), 21).unwrap();
+    let out = s
+        .receipt(
+            RecordingHealth::Healthy,
+            WatermarkKind::Durable,
+            Some(20),
+            21,
+        )
+        .unwrap();
     assert!(out.effects.is_empty());
     assert_eq!(out.candidates_created.len(), 1);
     assert_eq!(out.candidates_created[0].creation_record.get(), 21);
@@ -23,10 +30,15 @@ fn at_candidate21() -> Scenario {
 
 fn completion() -> SyntheticCompletion {
     SyntheticCompletion {
-        archive: fixtures::archive(), session: fixtures::clock().session,
-        gate: RecordingGate::Durable, through: Some(record(21)),
-        known_achieved_prefix: Some(record(21)), known_accepted_prefix: Some(record(21)),
-        previous_reported_prefix: Some(record(20)), continuous_prefix: true, explicitly_attested: true,
+        archive: fixtures::archive(),
+        session: fixtures::clock().session,
+        gate: RecordingGate::Durable,
+        through: Some(record(21)),
+        known_achieved_prefix: Some(record(21)),
+        known_accepted_prefix: Some(record(21)),
+        previous_reported_prefix: Some(record(20)),
+        continuous_prefix: true,
+        explicitly_attested: true,
     }
 }
 
@@ -38,9 +50,18 @@ fn v_r2_finite_receipt_then_final_fence_includes_receipt_in_basis() {
     assert_eq!(candidate.id.creation_record.get(), 21);
     assert_eq!(candidate.causal_frontier.get(), 21);
     assert_eq!(candidate.available_at.record.get(), 21);
-    assert_eq!(candidate.projection.recording.last_receipt, Some(record(21)));
-    assert_eq!(candidate.projection.recording.watermarks.durable, Some(record(20)));
-    assert_eq!(s.model.permit(candidate, None), Err(PermitError::FenceMissing));
+    assert_eq!(
+        candidate.projection.recording.last_receipt,
+        Some(record(21))
+    );
+    assert_eq!(
+        candidate.projection.recording.watermarks.durable,
+        Some(record(20))
+    );
+    assert_eq!(
+        s.model.permit(candidate, None),
+        Err(PermitError::FenceMissing)
+    );
     assert_eq!(s.model.permit(candidate, Some(&completion())), Ok(()));
     assert_eq!(s.model, before);
     assert_eq!(s.model.last_record.get(), 21);
@@ -101,7 +122,15 @@ fn v_r2_self_future_none_and_regressing_receipts_retain_prefix() {
             s.timer(n).unwrap();
         }
         let before = s.model.clone();
-        assert_eq!(s.receipt(RecordingHealth::Healthy, WatermarkKind::Durable, through, 21), Err(ModelError::Receipt(expected)));
+        assert_eq!(
+            s.receipt(
+                RecordingHealth::Healthy,
+                WatermarkKind::Durable,
+                through,
+                21
+            ),
+            Err(ModelError::Receipt(expected))
+        );
         assert_eq!(s.model.last_record.get(), 20);
         assert_eq!(s.model.evaluation_ns, 20);
         assert_eq!(s.model.streams, before.streams);
@@ -109,7 +138,15 @@ fn v_r2_self_future_none_and_regressing_receipts_retain_prefix() {
     }
     let mut s = at_candidate21();
     let before = s.model.clone();
-    assert_eq!(s.receipt(RecordingHealth::Healthy, WatermarkKind::Durable, Some(19), 22), Err(ModelError::Receipt(ReceiptError::WatermarkRegression)));
+    assert_eq!(
+        s.receipt(
+            RecordingHealth::Healthy,
+            WatermarkKind::Durable,
+            Some(19),
+            22
+        ),
+        Err(ModelError::Receipt(ReceiptError::WatermarkRegression))
+    );
     assert_eq!(s.model.last_record.get(), 21);
     assert_eq!(s.model.recording, before.recording);
 }
@@ -117,27 +154,55 @@ fn v_r2_self_future_none_and_regressing_receipts_retain_prefix() {
 #[test]
 fn v_r2_recording_order_partial_failure_and_weaker_evidence() {
     let mut marks = Watermarks::default();
-    marks.observe(record(21), record(20), &RecordingEvidence {
-        health: RecordingHealth::Healthy, kind: WatermarkKind::Written,
-        through: Some(record(20)), reason: Reason::NoFault,
-    }).unwrap();
+    marks
+        .observe(
+            record(21),
+            record(20),
+            &RecordingEvidence {
+                health: RecordingHealth::Healthy,
+                kind: WatermarkKind::Written,
+                through: Some(record(20)),
+                reason: Reason::NoFault,
+            },
+        )
+        .unwrap();
     assert_eq!(marks.written, Some(record(20)));
     assert_eq!(marks.flushed, None);
     assert_eq!(marks.durable, None);
     let before = marks.clone();
-    marks.observe(record(22), record(21), &RecordingEvidence {
-        health: RecordingHealth::Failed, kind: WatermarkKind::Durable,
-        through: None, reason: Reason::WriteFailure,
-    }).unwrap();
+    marks
+        .observe(
+            record(22),
+            record(21),
+            &RecordingEvidence {
+                health: RecordingHealth::Failed,
+                kind: WatermarkKind::Durable,
+                through: None,
+                reason: Reason::WriteFailure,
+            },
+        )
+        .unwrap();
     assert_eq!(marks, before);
     let mut impossible = before;
     impossible.durable = Some(record(20));
-    assert_eq!(impossible.validate(), Err(ReceiptError::WatermarkOrderError));
+    assert_eq!(
+        impossible.validate(),
+        Err(ReceiptError::WatermarkOrderError)
+    );
     let mut marks = Watermarks::default();
-    assert_eq!(marks.observe(record(21), record(19), &RecordingEvidence {
-        health: RecordingHealth::Healthy, kind: WatermarkKind::Durable,
-        through: Some(record(20)), reason: Reason::NoFault,
-    }), Err(ReceiptError::WatermarkOrderError));
+    assert_eq!(
+        marks.observe(
+            record(21),
+            record(19),
+            &RecordingEvidence {
+                health: RecordingHealth::Healthy,
+                kind: WatermarkKind::Durable,
+                through: Some(record(20)),
+                reason: Reason::NoFault,
+            }
+        ),
+        Err(ReceiptError::WatermarkOrderError)
+    );
     assert_eq!(marks, Watermarks::default());
 }
 
@@ -147,11 +212,21 @@ fn v_r2_revoked_candidates_cannot_be_resurrected_by_late_fence() {
         let mut s = at_candidate21();
         let candidate = s.stream().candidate.clone().unwrap();
         match reason {
-            0 => { s.gap(Reason::SourceGap, None, None, 22).unwrap(); }
-            1 => { s.transport(Transport::Down, 22).unwrap(); }
-            _ => { s.receipt(RecordingHealth::Failed, WatermarkKind::Durable, None, 22).unwrap(); }
+            0 => {
+                s.gap(Reason::SourceGap, None, None, 22).unwrap();
+            }
+            1 => {
+                s.transport(Transport::Down, 22).unwrap();
+            }
+            _ => {
+                s.receipt(RecordingHealth::Failed, WatermarkKind::Durable, None, 22)
+                    .unwrap();
+            }
         }
-        assert_eq!(s.model.permit(&candidate, Some(&completion())), Err(PermitError::CandidateRevoked));
+        assert_eq!(
+            s.model.permit(&candidate, Some(&completion())),
+            Err(PermitError::CandidateRevoked)
+        );
         assert!(s.stream().candidate.as_ref().unwrap().revoked);
         assert_eq!(s.model.last_record.get(), 22);
     }
@@ -165,8 +240,14 @@ fn v_r2_superseded_candidate_requires_new_causal_frontier() {
     let new = s.stream().candidate.as_ref().unwrap();
     assert_eq!(new.id.creation_record.get(), 22);
     assert_eq!(new.causal_frontier.get(), 22);
-    assert_eq!(s.model.permit(new, Some(&completion())), Err(PermitError::FenceBehindCandidate));
-    assert_eq!(s.model.permit(&old, Some(&completion())), Err(PermitError::CandidateRevoked));
+    assert_eq!(
+        s.model.permit(new, Some(&completion())),
+        Err(PermitError::FenceBehindCandidate)
+    );
+    assert_eq!(
+        s.model.permit(&old, Some(&completion())),
+        Err(PermitError::CandidateRevoked)
+    );
     let mut fence = completion();
     fence.through = Some(record(22));
     fence.known_achieved_prefix = Some(record(22));
@@ -176,15 +257,21 @@ fn v_r2_superseded_candidate_requires_new_causal_frontier() {
 
 #[test]
 fn v_r2_config_downgrade_cannot_weaken_immutable_mode() {
-    for mode in [DurabilityMode::GroupSynced, DurabilityMode::SyncBeforePublish] {
+    for mode in [
+        DurabilityMode::GroupSynced,
+        DurabilityMode::SyncBeforePublish,
+    ] {
         let mut s = at_candidate21();
         s.model.start.mode = mode;
         let mut policy = fixtures::policy();
         policy.fields.recording_gate = RecordingGate::Written;
         let before = s.model.clone();
-        assert_eq!(s.config_change(2, 1, policy, 22), Err(ModelError::Policy(PolicyError::InvalidConfiguration {
-            field: "Config.recording_gate",
-        })));
+        assert_eq!(
+            s.config_change(2, 1, policy, 22),
+            Err(ModelError::Policy(PolicyError::InvalidConfiguration {
+                field: "Config.recording_gate",
+            }))
+        );
         assert_eq!(s.model.start.mode, mode);
         assert_eq!(s.model.last_record.get(), 21);
         assert_eq!(s.model.streams, before.streams);
@@ -198,8 +285,14 @@ fn v_r2_missing_artifact_blocks_even_an_earlier_waiting_candidate() {
     let candidate = s.stream().candidate.clone().unwrap();
     let reference = s.stream().profile_ref;
     s.env.resolver.supplied.remove(&reference);
-    assert_eq!(s.timer(22), Err(ModelError::Artifact(ArtifactError::MissingArtifact)));
-    assert_eq!(s.model.permit(&candidate, Some(&completion())), Err(PermitError::CanonicalBlocked));
+    assert_eq!(
+        s.timer(22),
+        Err(ModelError::Artifact(ArtifactError::MissingArtifact))
+    );
+    assert_eq!(
+        s.model.permit(&candidate, Some(&completion())),
+        Err(PermitError::CanonicalBlocked)
+    );
     assert_eq!(s.model.last_record.get(), 21);
 }
 
@@ -212,5 +305,8 @@ fn v2_policy_no_ordinal_cast_reaches_publication_guard() {
     assert_eq!(candidate.projection.gate, wire_gate);
     let mut fence = completion();
     fence.gate = receipt_level;
-    assert_eq!(s.model.permit(candidate, Some(&fence)), Err(PermitError::FenceTooWeak));
+    assert_eq!(
+        s.model.permit(candidate, Some(&fence)),
+        Err(PermitError::FenceTooWeak)
+    );
 }

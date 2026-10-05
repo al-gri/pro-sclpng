@@ -42,10 +42,14 @@ pub fn decode_descriptor(bytes: &[u8], archive: ArchiveId) -> Result<Descriptor>
     r.count(text_length, 1, 1024)?;
     let text = r.take(text_length)?;
     if !text.iter().all(|byte| (0x20..=0x7e).contains(byte)) {
-        return Err(Error::new(text_offset, ErrorKind::InvalidPayload("PSAD.provenance_text")));
+        return Err(Error::new(
+            text_offset,
+            ErrorKind::InvalidPayload("PSAD.provenance_text"),
+        ));
     }
     let provenance_text = std::str::from_utf8(text)
-        .expect("validated ASCII provenance").to_owned();
+        .expect("validated ASCII provenance")
+        .to_owned();
     let count = usize::from(r.u16()?);
     r.count(count, 72, MAX_DEPENDENCIES)?;
     let mut dependencies = Vec::with_capacity(count);
@@ -54,7 +58,12 @@ pub fn decode_descriptor(bytes: &[u8], archive: ArchiveId) -> Result<Descriptor>
     }
     r.finish()?;
     let metadata = ArtifactMetadata {
-        identity: ArtifactIdentity { archive, kind, logical, revision },
+        identity: ArtifactIdentity {
+            archive,
+            kind,
+            logical,
+            revision,
+        },
         format_version,
         body_schema,
         body_length,
@@ -62,14 +71,21 @@ pub fn decode_descriptor(bytes: &[u8], archive: ArchiveId) -> Result<Descriptor>
         dependencies,
     };
     checked(0, metadata.validate())?;
-    Ok(Descriptor { metadata, provenance, provenance_text })
+    Ok(Descriptor {
+        metadata,
+        provenance,
+        provenance_text,
+    })
 }
 
 pub fn encode_descriptor(value: &Descriptor) -> Result<Vec<u8>> {
     checked(0, value.metadata.validate())?;
     let text = value.provenance_text.as_bytes();
     if text.len() > 1024 || !text.iter().all(|b| (0x20..=0x7e).contains(b)) {
-        return Err(Error::new(0, ErrorKind::InvalidPayload("PSAD.provenance_text")));
+        return Err(Error::new(
+            0,
+            ErrorKind::InvalidPayload("PSAD.provenance_text"),
+        ));
     }
     let mut w = Writer::new(MAX_DESCRIPTOR_BYTES as usize);
     let m = &value.metadata;
@@ -105,8 +121,7 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestEntry>> {
     if r.u16()? != 1 {
         return Err(artifact_error(4, ArtifactError::UnsupportedArtifactSchema));
     }
-    let count = usize::try_from(r.u32()?)
-        .map_err(|_| Error::new(6, ErrorKind::LengthError))?;
+    let count = usize::try_from(r.u32()?).map_err(|_| Error::new(6, ErrorKind::LengthError))?;
     r.count(count, 76, MAX_CLOSURE)?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
@@ -116,7 +131,10 @@ pub fn decode_manifest(bytes: &[u8]) -> Result<Vec<ManifestEntry>> {
         if u64::from(descriptor_length) > MAX_DESCRIPTOR_BYTES {
             return Err(artifact_error(offset, ArtifactError::ArtifactTooLarge));
         }
-        entries.push(ManifestEntry { reference, descriptor_length });
+        entries.push(ManifestEntry {
+            reference,
+            descriptor_length,
+        });
     }
     r.finish()?;
     let refs: Vec<_> = entries.iter().map(|entry| entry.reference).collect();

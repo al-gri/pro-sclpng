@@ -28,7 +28,10 @@ fn assert_effect(out: &StepResult, index: usize, raw: u64, sub: u32, applied: u6
 #[test]
 fn v_r1_barrier_and_post_barrier_resync() {
     let mut s = Scenario::initial(fixtures::policy());
-    assert_eq!(s.stream().book, Some(BookValidity::Invalid(Fault::Gap(Reason::SourceGap))));
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::Gap(Reason::SourceGap)))
+    );
     assert!(!s.model.usable_data(s.stream().binding.id));
     assert!(s.raw(vec![snapshot()], 10).unwrap().effects.is_empty());
     assert_eq!(s.stream().pending.len(), 1);
@@ -112,7 +115,10 @@ fn v_r1_multi_output_duplicate_and_conflicting_proof() {
     let out = s.proof_with(contradictory, 17).unwrap();
     assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::ProofConflict)]);
     assert!(out.effects.is_empty());
-    assert_eq!(s.stream().book, Some(BookValidity::Invalid(Fault::ProofConflict)));
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::ProofConflict))
+    );
     assert_eq!(s.stream().barrier, 17);
     assert_eq!(s.stream().anchor, None);
     assert_eq!(s.stream().progress, 0);
@@ -138,7 +144,10 @@ fn v_r1_pending_duplicate_does_not_bypass_earlier_frame() {
 fn v_r1_mixed_and_atomic_structural_failure() {
     let mut s = Scenario::initial(fixtures::policy());
     let out = s.raw(vec![snapshot(), update()], 10).unwrap();
-    assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::MixedFrameUnsupported)]);
+    assert_eq!(
+        codes(&out),
+        [DiagnosticCode::Fault(Fault::MixedFrameUnsupported)]
+    );
     assert!(out.effects.is_empty());
     assert_eq!(s.stream().barrier, 10);
     assert!(s.stream().pending.is_empty());
@@ -148,7 +157,12 @@ fn v_r1_mixed_and_atomic_structural_failure() {
         LevelChange::Set(fixtures::level(Side::Bid, 2000, 2)),
     ]);
     let out = s.raw(vec![update(), duplicate], 15).unwrap();
-    assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::Structural(EventError::DuplicateLevel))]);
+    assert_eq!(
+        codes(&out),
+        [DiagnosticCode::Fault(Fault::Structural(
+            EventError::DuplicateLevel
+        ))]
+    );
     assert!(out.effects.is_empty());
     assert_eq!(s.stream().anchor, None);
     assert_eq!(s.stream().progress, 0);
@@ -170,7 +184,10 @@ fn v_r1_pending_bounds_are_explicit_fail_closed_limits() {
         };
         let record = s.next_record().get();
         let out = s.submit(Record::RawInput(raw)).unwrap();
-        assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::PendingOverflow(field))]);
+        assert_eq!(
+            codes(&out),
+            [DiagnosticCode::Fault(Fault::PendingOverflow(field))]
+        );
         assert!(out.effects.is_empty());
         assert_eq!(s.stream().barrier, record);
         assert!(s.stream().pending.is_empty());
@@ -189,12 +206,21 @@ fn v_r1_pending_deadline_before_equal_and_proof_at_expiry() {
     assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::PendingTimeout)]);
     assert_eq!(s.stream().barrier, 12);
     let out = proof_at_expiry.proof(10, 60).unwrap();
-    assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::PendingTimeout), DiagnosticCode::PreBarrier]);
+    assert_eq!(
+        codes(&out),
+        [
+            DiagnosticCode::Fault(Fault::PendingTimeout),
+            DiagnosticCode::PreBarrier
+        ]
+    );
     assert!(out.effects.is_empty());
     assert_eq!(proof_at_expiry.stream().anchor, None);
     let mut overflow = Scenario::initial(fixtures::policy());
     let out = overflow.raw(vec![snapshot()], u64::MAX - 10).unwrap();
-    assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::PendingDeadlineOverflow)]);
+    assert_eq!(
+        codes(&out),
+        [DiagnosticCode::Fault(Fault::PendingDeadlineOverflow)]
+    );
     assert_eq!(overflow.stream().barrier, 10);
     assert!(overflow.stream().pending.is_empty());
 }
@@ -208,7 +234,10 @@ fn v_r1_down_up_and_config_change_do_not_reuse_pending_snapshot() {
     let out = s.proof(10, 13).unwrap();
     assert_eq!(codes(&out), [DiagnosticCode::PreBarrier]);
     assert_eq!(s.model.transport_for(s.stream()), Transport::Up);
-    assert_eq!(s.stream().book, Some(BookValidity::Invalid(Fault::TransportDown)));
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::TransportDown))
+    );
     assert_eq!(s.stream().barrier, 11);
     assert!(out.effects.is_empty());
     let mut s = Scenario::initial(fixtures::policy());
@@ -237,7 +266,12 @@ fn v_r1_old_sample_and_unproven_resync_membership() {
     assert_eq!(old.stream().barrier, 11);
     let mut unproven = Scenario::initial(fixtures::policy());
     let raw = unproven.raw_input(vec![snapshot()], 10, None, None);
-    unproven.env.normalizations.get_mut(&raw_id(10)).unwrap().post_barrier_membership = false;
+    unproven
+        .env
+        .normalizations
+        .get_mut(&raw_id(10))
+        .unwrap()
+        .post_barrier_membership = false;
     unproven.submit(Record::RawInput(raw)).unwrap();
     let out = unproven.proof(10, 11).unwrap();
     assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::ProofConflict)]);
@@ -258,7 +292,10 @@ fn v_r1_expired_later_proof_preserves_only_earlier_complete_frame() {
     assert_eq!(codes(&out), [DiagnosticCode::Fault(Fault::ProofExpired)]);
     assert_eq!(s.stream().last_event_cursor, Some(cursor(13, 0)));
     assert_eq!(s.stream().anchor, None);
-    assert_eq!(s.stream().book, Some(BookValidity::Invalid(Fault::ProofExpired)));
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::ProofExpired))
+    );
     assert_eq!(s.stream().barrier, 13);
     assert!(out.candidates_created.is_empty());
 }
@@ -311,7 +348,11 @@ fn v_c2_max_is_a_supplied_boundary_state_not_billions_of_updates() {
     let mut s = Scenario::initial(policy);
     s.raw(vec![snapshot()], 10).unwrap();
     s.proof(10, 11).unwrap();
-    s.model.streams.get_mut(&StreamId::new(1).unwrap()).unwrap().progress = u32::MAX - 1;
+    s.model
+        .streams
+        .get_mut(&StreamId::new(1).unwrap())
+        .unwrap()
+        .progress = u32::MAX - 1;
     s.raw(vec![update(), update()], 12).unwrap();
     s.proof(12, 13).unwrap();
     assert_eq!(s.stream().progress, u32::MAX);
@@ -328,17 +369,43 @@ fn v_r3_freshness_before_equal_after_none_and_overflow() {
     let mut policy = fixtures::policy();
     policy.fields.silence_rule = SilenceRule::StaleAfterDeadline;
     policy.fields.freshness_deadline_ns = Some(10);
-    assert_eq!(ordinary_freshness(Some(5), 14, policy), (Freshness::Fresh, None));
-    assert_eq!(ordinary_freshness(Some(5), 15, policy), (Freshness::Stale, None));
-    assert_eq!(ordinary_freshness(Some(5), 16, policy), (Freshness::Stale, None));
+    assert_eq!(
+        ordinary_freshness(Some(5), 14, policy),
+        (Freshness::Fresh, None)
+    );
+    assert_eq!(
+        ordinary_freshness(Some(5), 15, policy),
+        (Freshness::Stale, None)
+    );
+    assert_eq!(
+        ordinary_freshness(Some(5), 16, policy),
+        (Freshness::Stale, None)
+    );
     policy.fields.silence_rule = SilenceRule::UnknownOnSilence;
-    assert_eq!(ordinary_freshness(Some(5), 15, policy), (Freshness::Unknown, None));
-    assert_eq!(ordinary_freshness(Some(5), 16, policy), (Freshness::Unknown, None));
-    assert_eq!(ordinary_freshness(Some(u64::MAX - 5), u64::MAX, policy),
-        (Freshness::Unknown, Some(DiagnosticCode::FreshnessDeadlineOverflow)));
+    assert_eq!(
+        ordinary_freshness(Some(5), 15, policy),
+        (Freshness::Unknown, None)
+    );
+    assert_eq!(
+        ordinary_freshness(Some(5), 16, policy),
+        (Freshness::Unknown, None)
+    );
+    assert_eq!(
+        ordinary_freshness(Some(u64::MAX - 5), u64::MAX, policy),
+        (
+            Freshness::Unknown,
+            Some(DiagnosticCode::FreshnessDeadlineOverflow)
+        )
+    );
     policy.fields.freshness_deadline_ns = None;
-    assert_eq!(ordinary_freshness(Some(5), 5, policy), (Freshness::Unknown, None));
-    assert_eq!(ordinary_freshness(Some(5), 100, policy), (Freshness::Unknown, None));
+    assert_eq!(
+        ordinary_freshness(Some(5), 5, policy),
+        (Freshness::Unknown, None)
+    );
+    assert_eq!(
+        ordinary_freshness(Some(5), 100, policy),
+        (Freshness::Unknown, None)
+    );
 }
 
 #[test]
@@ -454,11 +521,17 @@ fn h19_missing_current_artifact_blocks_without_advancing_state() {
     let old = s.model.clone();
     let config_ref = s.model.config.as_ref().unwrap().0;
     s.env.resolver.supplied.remove(&config_ref);
-    assert_eq!(s.timer(15), Err(ModelError::Artifact(ArtifactError::MissingArtifact)));
+    assert_eq!(
+        s.timer(15),
+        Err(ModelError::Artifact(ArtifactError::MissingArtifact))
+    );
     assert_eq!(s.model.last_record, old.last_record);
     assert_eq!(s.model.evaluation_ns, old.evaluation_ns);
     assert_eq!(s.model.streams, old.streams);
-    assert_eq!(s.model.blocked, Some(ModelError::Artifact(ArtifactError::MissingArtifact)));
+    assert_eq!(
+        s.model.blocked,
+        Some(ModelError::Artifact(ArtifactError::MissingArtifact))
+    );
     assert!(!s.model.usable_data(s.stream().binding.id));
 }
 
@@ -469,11 +542,13 @@ fn proof_forward_basis_is_rejected_before_scope_transition() {
     let mut body: VerificationBody = s.proof_body(10);
     body.basis_records.push(RecordNo::new(11).unwrap());
     let old = s.model.clone();
-    assert_eq!(s.proof_with(body, 11), Err(ModelError::Event(EventError::FutureCausalReference)));
+    assert_eq!(
+        s.proof_with(body, 11),
+        Err(ModelError::Event(EventError::FutureCausalReference))
+    );
     assert_eq!(s.model.last_record, old.last_record);
     assert_eq!(s.model.streams, old.streams);
 }
-
 
 #[test]
 fn h13_spec_activation_invalidates_only_after_declared_new_spec() {
@@ -522,7 +597,10 @@ fn h13_spec_activation_invalidates_only_after_declared_new_spec() {
     assert_eq!(state.binding.tag.spec, SpecVersion::new(2).unwrap());
     assert_eq!(state.binding.spec.version, SpecVersion::new(2).unwrap());
     assert_eq!(state.barrier, activation_record.get());
-    assert_eq!(state.book, Some(BookValidity::Invalid(Fault::ContextChanged)));
+    assert_eq!(
+        state.book,
+        Some(BookValidity::Invalid(Fault::ContextChanged))
+    );
     assert_eq!(state.freshness, Freshness::Unknown);
     assert_eq!(state.anchor, None);
     assert_eq!(state.witness, None);
@@ -584,7 +662,6 @@ fn h18_restart_has_new_archive_clock_and_no_inherited_ready_state() {
     assert!(restarted.blocked.is_none());
 }
 
-
 #[test]
 fn v_r4_profile_norm_blocks_dependent_input_without_guessing_support() {
     let mut s = Scenario::initial(fixtures::policy());
@@ -593,7 +670,10 @@ fn v_r4_profile_norm_blocks_dependent_input_without_guessing_support() {
     let stream = s.stream().clone();
     assert_eq!(stream.binding.feed_profile.get(), 1);
     assert_eq!(s.model.context().unwrap().normalizer.get(), 2);
-    assert_eq!(stream.book, Some(BookValidity::Invalid(Fault::ContextChanged)));
+    assert_eq!(
+        stream.book,
+        Some(BookValidity::Invalid(Fault::ContextChanged))
+    );
     assert_eq!(stream.last_event_cursor, None);
 
     assert_eq!(

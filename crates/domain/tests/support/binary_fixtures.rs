@@ -13,33 +13,68 @@ use super::fixtures;
 use super::model_env::ModelEnv;
 
 pub const AF_MD: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/domain/artifacts-v1.md"
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/domain/artifacts-v1.md"
 ));
 pub const FROZEN: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/domain/wal-frames-v1.txt"
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/domain/wal-frames-v1.txt"
 ));
 pub const POLICIES: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/domain/policy-variants-v1.txt"
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/fixtures/domain/policy-variants-v1.txt"
 ));
 
 pub const SINGLE: &[&str] = &[
-    "W01", "SPEC2", "STREAM3", "CONFIG4", "UP5", "RAW6", "GAP7", "RAW8", "TIMER9", "SEAL10", "ARCHIVE11",
+    "W01",
+    "SPEC2",
+    "STREAM3",
+    "CONFIG4",
+    "UP5",
+    "RAW6",
+    "GAP7",
+    "RAW8",
+    "TIMER9",
+    "SEAL10",
+    "ARCHIVE11",
 ];
 pub const MULTI0: &[&str] = &[
-    "W01", "SPEC2", "STREAM3", "CONFIG4", "UP5", "RAW6", "GAP7", "MULTI-SEAL8",
+    "W01",
+    "SPEC2",
+    "STREAM3",
+    "CONFIG4",
+    "UP5",
+    "RAW6",
+    "GAP7",
+    "MULTI-SEAL8",
 ];
 pub const MULTI1: &[&str] = &[
-    "MULTI-START9", "RAW10", "TIMER11", "MULTI-SEAL12", "MULTI-ARCHIVE13",
+    "MULTI-START9",
+    "RAW10",
+    "TIMER11",
+    "MULTI-SEAL12",
+    "MULTI-ARCHIVE13",
 ];
 pub const OPEN: &[&str] = &[
-    "W01", "SPEC2", "STREAM3", "CONFIG4", "UP5", "RAW6", "OPEN-GAP7", "OPEN-SEAL8", "OPEN-ARCHIVE9",
+    "W01",
+    "SPEC2",
+    "STREAM3",
+    "CONFIG4",
+    "UP5",
+    "RAW6",
+    "OPEN-GAP7",
+    "OPEN-SEAL8",
+    "OPEN-ARCHIVE9",
 ];
 
 pub fn golden(id: &str) -> Vec<u8> {
-    let hex = FROZEN.lines().find_map(|line| {
-        let (name, hex) = line.split_once(' ')?;
-        (name == id).then_some(hex)
-    }).expect("named frozen fixture");
+    let hex = FROZEN
+        .lines()
+        .find_map(|line| {
+            let (name, hex) = line.split_once(' ')?;
+            (name == id).then_some(hex)
+        })
+        .expect("named frozen fixture");
     literal_hex(hex)
 }
 
@@ -90,29 +125,53 @@ impl FrozenArtifact {
             }
             // These frozen evidence fixtures name config1/profile1 explicitly;
             // this is not a generic choice of a latest or default registry.
-            Body::Verification(v) => vec![original("AF-C1").reference, original("AF-F1").reference, v.continuity_basis],
-            Body::Warmup(_) | Body::Freshness(_) => vec![original("AF-C1").reference, original("AF-F1").reference],
+            Body::Verification(v) => vec![
+                original("AF-C1").reference,
+                original("AF-F1").reference,
+                v.continuity_basis,
+            ],
+            Body::Warmup(_) | Body::Freshness(_) => {
+                vec![original("AF-C1").reference, original("AF-F1").reference]
+            }
         };
-        descriptor.metadata.validate_dependencies(&required, &[]).unwrap();
+        descriptor
+            .metadata
+            .validate_dependencies(&required, &[])
+            .unwrap();
         assert_eq!(descriptor.metadata.body_sha256, self.body_digest);
         let observed = self.witness(&self.descriptor, &self.body).unwrap();
-        env.resolver.supplied.insert(self.reference, SyntheticArtifact {
-            reference: self.reference,
-            metadata: descriptor.metadata,
-            descriptor_length: u64::try_from(self.descriptor.len()).unwrap(),
-            observed: Some(observed),
-            required_dependencies: required,
-            optional_basis: vec![],
-            applicable,
-        });
+        env.resolver.supplied.insert(
+            self.reference,
+            SyntheticArtifact {
+                reference: self.reference,
+                metadata: descriptor.metadata,
+                descriptor_length: u64::try_from(self.descriptor.len()).unwrap(),
+                observed: Some(observed),
+                required_dependencies: required,
+                optional_basis: vec![],
+                applicable,
+            },
+        );
         match body {
             Body::Opaque(_) => {}
-            Body::Config(v) => { env.configs.insert(self.reference, v); }
-            Body::FeedProfile(v) => { env.profiles.insert(self.reference, v); }
-            Body::InstrumentSpec(slot, v) => { env.instruments.insert(self.reference, (slot, v)); }
-            Body::Verification(v) => { env.verifications.insert(self.reference, v); }
-            Body::Warmup(v) => { env.warmups.insert(self.reference, v); }
-            Body::Freshness(v) => { env.freshness.insert(self.reference, v); }
+            Body::Config(v) => {
+                env.configs.insert(self.reference, v);
+            }
+            Body::FeedProfile(v) => {
+                env.profiles.insert(self.reference, v);
+            }
+            Body::InstrumentSpec(slot, v) => {
+                env.instruments.insert(self.reference, (slot, v));
+            }
+            Body::Verification(v) => {
+                env.verifications.insert(self.reference, v);
+            }
+            Body::Warmup(v) => {
+                env.warmups.insert(self.reference, v);
+            }
+            Body::Freshness(v) => {
+                env.freshness.insert(self.reference, v);
+            }
         }
     }
 }
@@ -152,7 +211,10 @@ pub fn original(id: &str) -> FrozenArtifact {
         let section = AF_MD.split_once(&header).expect("AF heading").1;
         let descriptor = section.split_once("Descriptor:\n```text\n").unwrap().1;
         let body = section.split_once("\nBody:\n```text\n").unwrap().1;
-        (literal_hex(descriptor.split_once("```").unwrap().0), literal_hex(body.split_once("```").unwrap().0))
+        (
+            literal_hex(descriptor.split_once("```").unwrap().0),
+            literal_hex(body.split_once("```").unwrap().0),
+        )
     };
     FrozenArtifact {
         reference: format!("sha256:{reference}").parse().unwrap(),
@@ -164,15 +226,22 @@ pub fn original(id: &str) -> FrozenArtifact {
 
 pub fn policy_variant(silence: u8, gate: u8) -> (FrozenArtifact, Vec<u8>) {
     let id = format!("POLICY-{silence}-{gate}");
-    let fields: Vec<_> = POLICIES.lines().find(|line| line.starts_with(&format!("{id}|")))
-        .expect("frozen policy combination").split('|').collect();
+    let fields: Vec<_> = POLICIES
+        .lines()
+        .find(|line| line.starts_with(&format!("{id}|")))
+        .expect("frozen policy combination")
+        .split('|')
+        .collect();
     assert_eq!(fields.len(), 6);
-    (FrozenArtifact {
-        reference: fields[1].parse().unwrap(),
-        body_digest: digest(fields[2]),
-        descriptor: literal_hex(fields[3]),
-        body: literal_hex(fields[4]),
-    }, literal_hex(fields[5]))
+    (
+        FrozenArtifact {
+            reference: fields[1].parse().unwrap(),
+            body_digest: digest(fields[2]),
+            descriptor: literal_hex(fields[3]),
+            body: literal_hex(fields[4]),
+        },
+        literal_hex(fields[5]),
+    )
 }
 
 pub fn environment() -> ModelEnv {
@@ -182,13 +251,22 @@ pub fn environment() -> ModelEnv {
     }
     for n in [6, 8, 10] {
         let bytes = format!("snapshot-{n}").into_bytes();
-        let mut frame = fixtures::frame(n, vec![fixtures::snapshot()], fixtures::binding(1, Channel::BookNormal));
+        let mut frame = fixtures::frame(
+            n,
+            vec![fixtures::snapshot()],
+            fixtures::binding(1, Channel::BookNormal),
+        );
         frame.raw_byte_len = u32::try_from(bytes.len()).unwrap();
-        env.normalizations.insert(fixtures::raw_id(n), SyntheticNormalization {
-            frame,
-            output_sha256: digest("3a5c48fcddc983224bbfd8907540b2beee16fb527f980d8e8e9539ed473323ea"),
-            post_barrier_membership: true,
-        });
+        env.normalizations.insert(
+            fixtures::raw_id(n),
+            SyntheticNormalization {
+                frame,
+                output_sha256: digest(
+                    "3a5c48fcddc983224bbfd8907540b2beee16fb527f980d8e8e9539ed473323ea",
+                ),
+                post_barrier_membership: true,
+            },
+        );
     }
     env
 }

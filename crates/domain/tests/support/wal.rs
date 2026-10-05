@@ -37,18 +37,30 @@ pub fn scan_frame(bytes: &[u8], absolute_offset: u64) -> Result<FrameView<'_>> {
         let offset = r.offset();
         let value = r.u16()?;
         if value != 1 {
-            return Err(Error::new(offset, ErrorKind::Unsupported { field, value: value.into() }));
+            return Err(Error::new(
+                offset,
+                ErrorKind::Unsupported {
+                    field,
+                    value: value.into(),
+                },
+            ));
         }
     }
     let tag = r.u16()?;
     let kind = RecordKind::try_from(tag).map_err(|_| {
-        Error::new(8, ErrorKind::Unsupported { field: "record_kind", value: tag.into() })
+        Error::new(
+            8,
+            ErrorKind::Unsupported {
+                field: "record_kind",
+                value: tag.into(),
+            },
+        )
     })?;
     if r.u16()? != 0 {
         return Err(Error::new(10, ErrorKind::Corrupt("flags")));
     }
-    let payload_len = usize::try_from(r.u32()?)
-        .map_err(|_| Error::new(12, ErrorKind::LengthError))?;
+    let payload_len =
+        usize::try_from(r.u32()?).map_err(|_| Error::new(12, ErrorKind::LengthError))?;
     if payload_len > MAX_PAYLOAD {
         return Err(Error::new(12, ErrorKind::LengthError));
     }
@@ -57,11 +69,12 @@ pub fn scan_frame(bytes: &[u8], absolute_offset: u64) -> Result<FrameView<'_>> {
     if r.u32()? != 0 {
         return Err(Error::new(28, ErrorKind::Corrupt("reserved")));
     }
-    let length = payload_len.checked_add(36)
+    let length = payload_len
+        .checked_add(36)
         .ok_or_else(|| Error::new(12, ErrorKind::LengthError))?;
-    let wide_length = u64::try_from(length)
-        .map_err(|_| Error::new(12, ErrorKind::LengthError))?;
-    absolute_offset.checked_add(wide_length)
+    let wide_length = u64::try_from(length).map_err(|_| Error::new(12, ErrorKind::LengthError))?;
+    absolute_offset
+        .checked_add(wide_length)
         .ok_or_else(|| Error::new(12, ErrorKind::LengthError))?;
     if bytes.len() < length {
         return Err(Error::new(0, ErrorKind::TruncatedTail));
@@ -82,7 +95,11 @@ pub fn scan_frame(bytes: &[u8], absolute_offset: u64) -> Result<FrameView<'_>> {
     })
 }
 
-pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions) -> Result<RecordFrame> {
+pub fn decode_frame(
+    view: &FrameView<'_>,
+    has_active: bool,
+    specs: &Definitions,
+) -> Result<RecordFrame> {
     let mut r = Reader::new(view.payload, HEADER_LEN)?;
     let value = match view.kind {
         RecordKind::ArchiveStart => Record::ArchiveStart(ArchiveStart {
@@ -108,7 +125,8 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
             let instrument_slot = r.slot()?;
             let spec_offset = r.offset();
             let version = r.spec_version()?;
-            let known = specs.get(&(instrument_slot, version))
+            let known = specs
+                .get(&(instrument_slot, version))
                 .ok_or_else(|| Error::new(spec_offset, ErrorKind::UnknownDefinition))?;
             let connection_id = r.connection()?;
             let connection = r.connection_epoch()?;
@@ -124,7 +142,12 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
                 connection_id,
                 channel,
                 book_id,
-                tag: EpochTag { spec: version, connection, subscription, book },
+                tag: EpochTag {
+                    spec: version,
+                    connection,
+                    subscription,
+                    book,
+                },
                 feed_profile,
             };
             Record::StreamDefinition(StreamDefinition {
@@ -148,9 +171,13 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
             let offset = r.offset();
             let encoding = r.u8()?;
             if encoding != 1 {
-                return Err(Error::new(offset, ErrorKind::Unsupported {
-                    field: "RawInput.payload_encoding", value: encoding.into(),
-                }));
+                return Err(Error::new(
+                    offset,
+                    ErrorKind::Unsupported {
+                        field: "RawInput.payload_encoding",
+                        value: encoding.into(),
+                    },
+                ));
             }
             let offset = r.offset();
             let length = usize::try_from(r.u32()?)
@@ -160,11 +187,20 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
             }
             // Length has already been compared to the validated frame slice.
             let bytes = r.take(length)?.to_vec();
-            Record::RawInput(RawInput { context, stream, tag, attempt, bytes })
+            Record::RawInput(RawInput {
+                context,
+                stream,
+                tag,
+                attempt,
+                bytes,
+            })
         }
         RecordKind::Control => {
             let context = r.context(6, has_active)?;
-            Record::Control(ControlRecord { context, value: decode_control(&mut r)? })
+            Record::Control(ControlRecord {
+                context,
+                value: decode_control(&mut r)?,
+            })
         }
         RecordKind::Gap => {
             let context = r.context(7, has_active)?;
@@ -196,7 +232,11 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
         }),
     };
     r.finish()?;
-    let frame = RecordFrame { record_no: view.record_no, segment_no: view.segment_no, value };
+    let frame = RecordFrame {
+        record_no: view.record_no,
+        segment_no: view.segment_no,
+        value,
+    };
     checked(HEADER_LEN, frame.validate_shape())?;
     Ok(frame)
 }
@@ -204,7 +244,10 @@ pub fn decode_frame(view: &FrameView<'_>, has_active: bool, specs: &Definitions)
 pub fn decode_exact(bytes: &[u8], has_active: bool, specs: &Definitions) -> Result<RecordFrame> {
     let view = scan_frame(bytes, 0)?;
     if view.length != bytes.len() {
-        return Err(Error::new(view.length, ErrorKind::InvalidPayload("trailing_bytes")));
+        return Err(Error::new(
+            view.length,
+            ErrorKind::InvalidPayload("trailing_bytes"),
+        ));
     }
     decode_frame(&view, has_active, specs)
 }
@@ -252,8 +295,8 @@ pub fn encode_frame(frame: &RecordFrame) -> Result<Vec<u8>> {
             w.epoch_tag(v.tag)?;
             w.u64(v.attempt.get())?;
             w.u8(1)?;
-            let length = u32::try_from(v.bytes.len())
-                .map_err(|_| Error::new(12, ErrorKind::LengthError))?;
+            let length =
+                u32::try_from(v.bytes.len()).map_err(|_| Error::new(12, ErrorKind::LengthError))?;
             w.u32(length)?;
             w.bytes(&v.bytes)?;
         }
@@ -285,8 +328,8 @@ pub fn encode_frame(frame: &RecordFrame) -> Result<Vec<u8>> {
         }
     }
     let payload = w.finish();
-    let length = u32::try_from(payload.len())
-        .map_err(|_| Error::new(12, ErrorKind::LengthError))?;
+    let length =
+        u32::try_from(payload.len()).map_err(|_| Error::new(12, ErrorKind::LengthError))?;
     let mut w = Writer::new(MAX_PAYLOAD + 36);
     w.bytes(b"PSRW")?;
     w.u16(1)?;

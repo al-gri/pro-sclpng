@@ -24,7 +24,10 @@ impl Reader<'_> {
     pub fn evidence_scope(&mut self) -> Result<EvidenceScope> {
         Ok(EvidenceScope {
             archive: self.archive()?,
-            clock: ClockScope { session: self.session()?, clock: self.clock()? },
+            clock: ClockScope {
+                session: self.session()?,
+                clock: self.clock()?,
+            },
             stream: self.stream()?,
             slot: self.slot()?,
             tag: self.epoch_tag()?,
@@ -43,7 +46,10 @@ impl Reader<'_> {
             records.push(self.record_no()?);
         }
         if records.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::new(offset, ErrorKind::InvalidPayload("BasisRecords.order")));
+            return Err(Error::new(
+                offset,
+                ErrorKind::InvalidPayload("BasisRecords.order"),
+            ));
         }
         Ok(records)
     }
@@ -67,7 +73,10 @@ impl Writer {
             return Err(Error::new(0, ErrorKind::LengthError));
         }
         if records.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err(Error::new(0, ErrorKind::InvalidPayload("BasisRecords.order")));
+            return Err(Error::new(
+                0,
+                ErrorKind::InvalidPayload("BasisRecords.order"),
+            ));
         }
         self.u16(u16::try_from(records.len()).expect("bounded basis"))?;
         for record in records {
@@ -79,15 +88,23 @@ impl Writer {
 
 pub fn decode_body(kind: ArtifactKind, bytes: &[u8]) -> Result<Body> {
     if bytes.len() > MAX_BODY_BYTES as usize {
-        return Err(Error::new(0, ErrorKind::Artifact(ArtifactError::ArtifactTooLarge)));
+        return Err(Error::new(
+            0,
+            ErrorKind::Artifact(ArtifactError::ArtifactTooLarge),
+        ));
     }
     let mut r = Reader::new(bytes, 0)?;
     let body = match kind {
-        ArtifactKind::Normalizer | ArtifactKind::Basis => Body::Opaque(r.take(bytes.len())?.to_vec()),
+        ArtifactKind::Normalizer | ArtifactKind::Basis => {
+            Body::Opaque(r.take(bytes.len())?.to_vec())
+        }
         ArtifactKind::Config => {
             let proposal_revision = r.u16()?;
             if proposal_revision != 2 {
-                return Err(Error::new(0, ErrorKind::Artifact(ArtifactError::UnsupportedArtifactSchema)));
+                return Err(Error::new(
+                    0,
+                    ErrorKind::Artifact(ArtifactError::UnsupportedArtifactSchema),
+                ));
             }
             let next = r.active_context()?;
             let normalizer_ref = r.artifact()?;
@@ -101,7 +118,13 @@ pub fn decode_body(kind: ArtifactKind, bytes: &[u8]) -> Result<Body> {
                 quiet_max_lifetime_ns: r.option(Reader::u64)?,
             };
             checked(0, policy.validate(DurabilityMode::Buffered))?;
-            Body::Config(ConfigBody { proposal_revision, next, normalizer_ref, provenance, policy })
+            Body::Config(ConfigBody {
+                proposal_revision,
+                next,
+                normalizer_ref,
+                provenance,
+                policy,
+            })
         }
         ArtifactKind::FeedProfile => {
             let stream = r.stream()?;
@@ -172,7 +195,10 @@ pub fn encode_body(value: &Body) -> Result<Vec<u8>> {
         Body::Opaque(bytes) => w.bytes(bytes)?,
         Body::Config(v) => {
             if v.proposal_revision != 2 {
-                return Err(Error::new(0, ErrorKind::Artifact(ArtifactError::UnsupportedArtifactSchema)));
+                return Err(Error::new(
+                    0,
+                    ErrorKind::Artifact(ArtifactError::UnsupportedArtifactSchema),
+                ));
             }
             checked(0, v.policy.validate(DurabilityMode::Buffered))?;
             w.u16(v.proposal_revision)?;

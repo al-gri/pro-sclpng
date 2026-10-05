@@ -156,3 +156,12 @@ No production connector/book/queues/supervisor/publisher/filesystem recorder/rep
 Real Bitget feed semantics remain UNKNOWN/BLOCKED_BY_MD_001. Physical fsync/crash/power-loss and external delivery remain OUT_OF_SCOPE/NOT_RUN.
 
 Next: obtain exact-head CI for this implementation, repair only demonstrated formatting/Clippy/test failures, then update this handoff once more with actual results. Final exact SHA remains a post-commit PR comment. No merge/auto-merge/force-push/settings changes or Issue #3/#6 closure.
+
+## Pre-final exact-head evidence before formatter correction
+
+Exact-head CI on `a38d5dcf24e04bdcd7766e4cfc33e557bfab9039`: [run 37374378766](https://github.com/al-gri/pro-sclpng/actions/runs/37374378766), event pull_request, completed/failure solely because the formatter check failed. The jobs were actually acquired and executed:
+- rust-tests job `111979126078`: **PASS**. Expected SHA = checked out SHA = `a38d5dcf24e04bdcd7766e4cfc33e557bfab9039`; `cargo build --workspace --locked` and `cargo test --workspace --locked` passed; Cargo.lock comparison and final cleanliness passed. Executed domain integration binaries: 73 contracts + 9 identity + 18 numeric + 26 wire = **126 domain tests passed**, zero failed/ignored; separately **15 BOOT-001 CLI tests passed**.
+- rust-clippy job `111979125739`: **PASS**, including `cargo clippy --workspace --all-targets --locked -- -D warnings`, clean final checkout.
+- rust-fmt job `111979126135`: **FAIL**, with actual `cargo fmt --all -- --check` diff. This is a demonstrated formatting defect, not a cancelled/queued inference. The containing commit applies that exact formatter output across the allowed `crates/domain/**` files without semantic changes.
+
+The containing commit therefore requires fresh exact-head CI before any QA-ready claim. Its final SHA is intentionally recorded only in the PR after commit. The existing workflow still does not execute the separate mandatory `cargo test -p domain --locked`; with no local Rust toolchain or checkout, that command remains **NOT_RUN / verification blocker** unless an authorized environment runs it. Linux CI is not Windows evidence.

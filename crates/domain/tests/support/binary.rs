@@ -84,7 +84,11 @@ impl<'a> Reader<'a> {
     pub fn new(bytes: &'a [u8], base: usize) -> Result<Self> {
         base.checked_add(bytes.len())
             .ok_or_else(|| Error::new(base, ErrorKind::LengthError))?;
-        Ok(Self { bytes, cursor: 0, base })
+        Ok(Self {
+            bytes,
+            cursor: 0,
+            base,
+        })
     }
 
     pub fn offset(&self) -> usize {
@@ -96,9 +100,13 @@ impl<'a> Reader<'a> {
     }
 
     pub fn take(&mut self, count: usize) -> Result<&'a [u8]> {
-        let end = self.cursor.checked_add(count)
+        let end = self
+            .cursor
+            .checked_add(count)
             .ok_or_else(|| Error::new(self.offset(), ErrorKind::LengthError))?;
-        let value = self.bytes.get(self.cursor..end)
+        let value = self
+            .bytes
+            .get(self.cursor..end)
             .ok_or_else(|| Error::new(self.offset(), ErrorKind::LengthError))?;
         self.cursor = end;
         Ok(value)
@@ -140,7 +148,8 @@ impl<'a> Reader<'a> {
 
     /// Validate nested count * minimum entry size and cap before allocation.
     pub fn count(&self, count: usize, minimum: usize, cap: usize) -> Result<()> {
-        let needed = count.checked_mul(minimum)
+        let needed = count
+            .checked_mul(minimum)
             .ok_or_else(|| Error::new(self.offset(), ErrorKind::LengthError))?;
         if count > cap || needed > self.remaining() {
             return Err(Error::new(self.offset(), ErrorKind::LengthError));
@@ -150,7 +159,10 @@ impl<'a> Reader<'a> {
 
     pub fn finish(&self) -> Result<()> {
         if self.remaining() != 0 {
-            return Err(Error::new(self.offset(), ErrorKind::InvalidPayload("trailing_bytes")));
+            return Err(Error::new(
+                self.offset(),
+                ErrorKind::InvalidPayload("trailing_bytes"),
+            ));
         }
         Ok(())
     }
@@ -171,11 +183,16 @@ macro_rules! write_integer {
 
 impl Writer {
     pub fn new(cap: usize) -> Self {
-        Self { bytes: Vec::new(), cap }
+        Self {
+            bytes: Vec::new(),
+            cap,
+        }
     }
 
     pub fn bytes(&mut self, value: &[u8]) -> Result<()> {
-        self.bytes.len().checked_add(value.len())
+        self.bytes
+            .len()
+            .checked_add(value.len())
             .filter(|length| *length <= self.cap)
             .ok_or_else(|| Error::new(self.bytes.len(), ErrorKind::LengthError))?;
         self.bytes.extend_from_slice(value);
@@ -193,7 +210,11 @@ impl Writer {
         self.u8(u8::from(value))
     }
 
-    pub fn option<T>(&mut self, value: Option<T>, write: impl FnOnce(&mut Self, T) -> Result<()>) -> Result<()> {
+    pub fn option<T>(
+        &mut self,
+        value: Option<T>,
+        write: impl FnOnce(&mut Self, T) -> Result<()>,
+    ) -> Result<()> {
         match value {
             None => self.u8(0),
             Some(value) => {
@@ -244,8 +265,11 @@ pub fn literal_hex(text: &str) -> Vec<u8> {
     let digits: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     assert!(digits.len().is_multiple_of(2), "malformed fixture hex");
     let (pairs, _) = digits.as_bytes().as_chunks::<2>();
-    pairs.iter().map(|pair| {
-        let value = std::str::from_utf8(pair).expect("ASCII fixture");
-        u8::from_str_radix(value, 16).expect("hex fixture")
-    }).collect()
+    pairs
+        .iter()
+        .map(|pair| {
+            let value = std::str::from_utf8(pair).expect("ASCII fixture");
+            u8::from_str_radix(value, 16).expect("hex fixture")
+        })
+        .collect()
 }

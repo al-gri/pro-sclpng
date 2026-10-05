@@ -69,9 +69,13 @@ impl Recovery {
     }
 
     fn fail(&mut self, segment: usize, local: usize, absolute: u64, fault: RecoveryFault) {
-        self.completion = if matches!(fault, RecoveryFault::Binary(Error {
-            kind: ErrorKind::TruncatedTail, ..
-        })) {
+        self.completion = if matches!(
+            fault,
+            RecoveryFault::Binary(Error {
+                kind: ErrorKind::TruncatedTail,
+                ..
+            })
+        ) {
             Completion::TruncatedTail
         } else {
             Completion::Invalid
@@ -93,9 +97,11 @@ impl Recovery {
 
     fn loss_diagnostics(&mut self) {
         self.unresolved_loss_streams = self.model.as_ref().map_or_else(Vec::new, |model| {
-            model.streams.iter().filter_map(|(id, state)| {
-                state.loss.window.as_ref().map(|_| *id)
-            }).collect()
+            model
+                .streams
+                .iter()
+                .filter_map(|(id, state)| state.loss.window.as_ref().map(|_| *id))
+                .collect()
         });
     }
 }
@@ -137,7 +143,12 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
         let mut local_gap = false;
         while local < bytes.len() {
             if finished {
-                out.fail(segment_index, local, absolute, RecoveryFault::TrailingDataError);
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::TrailingDataError,
+                );
                 return out;
             }
             let view = match scan_frame(&bytes[local..], absolute) {
@@ -150,16 +161,31 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
             };
             let wide_len = u64::try_from(view.length).expect("frame cap fits u64");
             let Some(end) = absolute.checked_add(wide_len) else {
-                out.fail(segment_index, local, absolute, RecoveryFault::OffsetOverflow);
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::OffsetOverflow,
+                );
                 return out;
             };
             out.framing_good_offset = end;
             let expected_record = out.last_record.map_or(Some(1), |r| r.get().checked_add(1));
-            if Some(view.record_no.get()) != expected_record || view.segment_no.get() != segment_number {
-                out.fail(segment_index, local, absolute, RecoveryFault::OrderOrChainError);
+            if Some(view.record_no.get()) != expected_record
+                || view.segment_no.get() != segment_number
+            {
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::OrderOrChainError,
+                );
                 return out;
             }
-            let has_active = out.model.as_ref().is_some_and(|m| m.timeline.active().is_some());
+            let has_active = out
+                .model
+                .as_ref()
+                .is_some_and(|m| m.timeline.active().is_some());
             let frame = match decode_frame(&view, has_active, &out.env.specs) {
                 Ok(frame) => frame,
                 Err(error) => {
@@ -177,19 +203,24 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
                 link.segment.get() != segment_number
                     || (link.final_segment && matches!(frame.value, Record::ArchiveSeal(_)))
             } else {
-                !matches!(frame.value, Record::ArchiveStart(_) | Record::SegmentStart(_))
+                !matches!(
+                    frame.value,
+                    Record::ArchiveStart(_) | Record::SegmentStart(_)
+                )
             };
             if !position_ok {
-                out.fail(segment_index, local, absolute, RecoveryFault::OrderOrChainError);
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::OrderOrChainError,
+                );
                 return out;
             }
             let chain_ok = match &frame.value {
                 Record::ArchiveStart(_) => global_count == 0 && absolute == 0,
-                Record::SegmentStart(start) => out
-                    .model
-                    .as_ref()
-                    .zip(seal.as_ref())
-                    .is_some_and(|(m, s)| {
+                Record::SegmentStart(start) => {
+                    out.model.as_ref().zip(seal.as_ref()).is_some_and(|(m, s)| {
                         start.archive == m.start.archive
                             && start.session == m.start.session
                             && start.clock == m.start.clock
@@ -199,7 +230,8 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
                             && start.previous_seal_crc32 == s.checksum
                             && !s.final_segment
                             && local == 0
-                    }),
+                    })
+                }
                 Record::SegmentSeal(value) => {
                     value.prefix_frame_count == local_count
                         && u64::try_from(local).ok() == Some(value.prefix_physical_len)
@@ -210,14 +242,21 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
                 Record::ArchiveSeal(value) => {
                     out.loss_diagnostics();
                     let quality_ok = match value.input_quality {
-                        InputQuality::NoKnownLoss => !any_gap && out.unresolved_loss_streams.is_empty(),
-                        InputQuality::GapsRecorded => any_gap && out.unresolved_loss_streams.is_empty(),
+                        InputQuality::NoKnownLoss => {
+                            !any_gap && out.unresolved_loss_streams.is_empty()
+                        }
+                        InputQuality::GapsRecorded => {
+                            any_gap && out.unresolved_loss_streams.is_empty()
+                        }
                         InputQuality::Unknown => true,
                     };
                     seal.as_ref().is_some_and(|s| {
-                        s.final_segment && s.segment == frame.segment_no && Some(s.record) == out.last_record
+                        s.final_segment
+                            && s.segment == frame.segment_no
+                            && Some(s.record) == out.last_record
                     }) && value.expected_segment_count == segment_number + 1
-                        && usize::try_from(value.expected_segment_count).ok() == Some(segments.len())
+                        && usize::try_from(value.expected_segment_count).ok()
+                            == Some(segments.len())
                         && value.prior_frame_count == global_count
                         && value.total_prefix_physical_bytes == absolute
                         && value.prefix_crc32 == global_crc.digest()
@@ -227,7 +266,12 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
                 _ => true,
             };
             if !chain_ok {
-                out.fail(segment_index, local, absolute, RecoveryFault::OrderOrChainError);
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::OrderOrChainError,
+                );
                 return out;
             }
             let step = match &frame.value {
@@ -248,7 +292,12 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
             let step = match step {
                 Ok(step) => step,
                 Err(error) => {
-                    out.fail(segment_index, local, absolute, RecoveryFault::Semantic(error));
+                    out.fail(
+                        segment_index,
+                        local,
+                        absolute,
+                        RecoveryFault::Semantic(error),
+                    );
                     out.loss_diagnostics();
                     return out;
                 }
@@ -276,14 +325,24 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
             local_crc.update(protected);
             global_crc.update(protected);
             let Some(next_count) = global_count.checked_add(1) else {
-                out.fail(segment_index, local, absolute, RecoveryFault::OffsetOverflow);
+                out.fail(
+                    segment_index,
+                    local,
+                    absolute,
+                    RecoveryFault::OffsetOverflow,
+                );
                 return out;
             };
             global_count = next_count;
             local_count = match local_count.checked_add(1) {
                 Some(count) => count,
                 None => {
-                    out.fail(segment_index, local, absolute, RecoveryFault::OffsetOverflow);
+                    out.fail(
+                        segment_index,
+                        local,
+                        absolute,
+                        RecoveryFault::OffsetOverflow,
+                    );
                     return out;
                 }
             };
@@ -302,7 +361,12 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
             };
         }
         if segment_index + 1 < segments.len() && seal.is_none() {
-            out.fail(segment_index, local, absolute, RecoveryFault::OrderOrChainError);
+            out.fail(
+                segment_index,
+                local,
+                absolute,
+                RecoveryFault::OrderOrChainError,
+            );
             return out;
         }
     }

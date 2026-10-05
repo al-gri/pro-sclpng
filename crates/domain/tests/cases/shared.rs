@@ -55,10 +55,8 @@ fn apply_frame(
         context: s.context(14),
         stream: binding.id,
         tag: binding.tag,
-        attempt: CaptureAttemptNo::new(
-            s.model.streams[&binding.id].loss.accounted_frontier + 1,
-        )
-        .unwrap(),
+        attempt: CaptureAttemptNo::new(s.model.streams[&binding.id].loss.accounted_frontier + 1)
+            .unwrap(),
         bytes: vec![b's'],
     };
     let frame = NormalizedFrame {
@@ -107,7 +105,11 @@ fn apply_frame(
         ArtifactKind::Verification,
         &format!("stream/{}/raw/{}", binding.id.get(), raw_record.get()),
         1,
-        vec![s.model.config.as_ref().unwrap().0, state.profile_ref, reference(5)],
+        vec![
+            s.model.config.as_ref().unwrap().0,
+            state.profile_ref,
+            reference(5),
+        ],
     );
     let wire = VerificationEvidence {
         stream: binding.id,
@@ -134,8 +136,13 @@ fn v_r6_shared_registration_down_and_epoch_preserve_other_connection() {
     let numeric = NumericSpec::new(numeric).unwrap();
     let spec_node = mock_node(201, ArtifactKind::InstrumentSpec, "instrument/2", 1, vec![]);
     let slot = InstrumentSlot::new(2).unwrap();
-    s.env.instruments.insert(spec_node.reference, (slot, numeric.clone()));
-    s.env.resolver.supplied.insert(spec_node.reference, spec_node.clone());
+    s.env
+        .instruments
+        .insert(spec_node.reference, (slot, numeric.clone()));
+    s.env
+        .resolver
+        .supplied
+        .insert(spec_node.reference, spec_node.clone());
     s.submit(Record::InstrumentSpec(InstrumentSpecRecord {
         context: s.context(14),
         slot,
@@ -165,10 +172,19 @@ fn v_r6_shared_registration_down_and_epoch_preserve_other_connection() {
     .unwrap();
     let snapshot_effect = apply_frame(&mut s, &c, snapshot(), 203);
     assert_eq!(snapshot_effect.effects.len(), 1);
-    assert_eq!(snapshot_effect.effects[0].source_candidate.raw.record.get(), 18);
-    assert_eq!(snapshot_effect.effects[0].available_at, fixtures::cursor(19, 0));
+    assert_eq!(
+        snapshot_effect.effects[0].source_candidate.raw.record.get(),
+        18
+    );
+    assert_eq!(
+        snapshot_effect.effects[0].available_at,
+        fixtures::cursor(19, 0)
+    );
     let update_effect = apply_frame(&mut s, &c, update(), 204);
-    assert_eq!(update_effect.effects[0].available_at, fixtures::cursor(21, 0));
+    assert_eq!(
+        update_effect.effects[0].available_at,
+        fixtures::cursor(21, 0)
+    );
     let current = &s.model.streams[&c.id];
     let body = WarmupBody {
         scope: s.model.scope(current).unwrap(),
@@ -186,7 +202,10 @@ fn v_r6_shared_registration_down_and_epoch_preserve_other_connection() {
         vec![s.model.config.as_ref().unwrap().0, current.profile_ref],
     );
     s.env.warmups.insert(warmup.reference, body.clone());
-    s.env.resolver.supplied.insert(warmup.reference, warmup.clone());
+    s.env
+        .resolver
+        .supplied
+        .insert(warmup.reference, warmup.clone());
     s.submit(Record::Control(ControlRecord {
         context: s.context(14),
         value: Control::Warmup(WarmupEvidence {
@@ -217,7 +236,10 @@ fn v_r6_shared_registration_down_and_epoch_preserve_other_connection() {
     assert!(result.candidates_created.is_empty());
     assert_eq!(s.stream(), &a_before);
     assert_eq!(s.model.streams[&c.id], c_before);
-    assert_eq!(s.model.transport_for(&s.model.streams[&b.id]), Transport::Up);
+    assert_eq!(
+        s.model.transport_for(&s.model.streams[&b.id]),
+        Transport::Up
+    );
     assert_eq!(s.model.streams[&b.id].book, Some(BookValidity::NoSnapshot));
     assert_eq!(s.model.streams[&b.id].freshness, Freshness::Unknown);
     assert_eq!(s.model.streams[&b.id].barrier, 23);
@@ -228,7 +250,10 @@ fn v_r6_shared_registration_down_and_epoch_preserve_other_connection() {
     for id in [a_before.binding.id, b.id] {
         let state = &s.model.streams[&id];
         assert_eq!(s.model.transport_for(state), Transport::Down);
-        assert_eq!(state.book, Some(BookValidity::Invalid(Fault::TransportDown)));
+        assert_eq!(
+            state.book,
+            Some(BookValidity::Invalid(Fault::TransportDown))
+        );
         assert_eq!(state.barrier, 24);
         assert_eq!(state.anchor, None);
     }

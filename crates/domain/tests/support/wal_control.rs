@@ -38,11 +38,20 @@ pub fn decode_control(r: &mut Reader<'_>) -> Result<Control> {
                     expected: r.book_epoch()?,
                     next: r.book_epoch()?,
                 },
-                _ => return Err(Error::new(offset, ErrorKind::Unsupported {
-                    field: "EpochAdvance.scope", value: scope.into(),
-                })),
+                _ => {
+                    return Err(Error::new(
+                        offset,
+                        ErrorKind::Unsupported {
+                            field: "EpochAdvance.scope",
+                            value: scope.into(),
+                        },
+                    ));
+                }
             };
-            Control::EpochAdvance { change, reason: r.enum_tag("reason")? }
+            Control::EpochAdvance {
+                change,
+                reason: r.enum_tag("reason")?,
+            }
         }
         4 => Control::SpecActivate {
             slot: r.slot()?,
@@ -78,9 +87,15 @@ pub fn decode_control(r: &mut Reader<'_>) -> Result<Control> {
             through: r.option(Reader::record_no)?,
             reason: r.enum_tag("reason")?,
         }),
-        _ => return Err(Error::new(offset, ErrorKind::Unsupported {
-            field: "control_tag", value: tag.into(),
-        })),
+        _ => {
+            return Err(Error::new(
+                offset,
+                ErrorKind::Unsupported {
+                    field: "control_tag",
+                    value: tag.into(),
+                },
+            ));
+        }
     })
 }
 
@@ -90,21 +105,31 @@ pub fn decode_gap(r: &mut Reader<'_>, context: WireContext) -> Result<Gap> {
     // This check intentionally occurs before reading reason/count or touching
     // accounting. V2 reversed bytes must fail here at frame offset56.
     if scope_tag != 1 && scope_tag != 2 {
-        return Err(Error::new(scope_offset, ErrorKind::Unsupported {
-            field: "Gap.scope_kind", value: scope_tag.into(),
-        }));
+        return Err(Error::new(
+            scope_offset,
+            ErrorKind::Unsupported {
+                field: "Gap.scope_kind",
+                value: scope_tag.into(),
+            },
+        ));
     }
     let reason = r.enum_tag("reason")?;
     let count_offset = r.offset();
     let count = usize::from(r.u16()?);
     let scope = if scope_tag == 2 {
         if count != 0 {
-            return Err(Error::new(count_offset, ErrorKind::InvalidPayload("Gap.target_count")));
+            return Err(Error::new(
+                count_offset,
+                ErrorKind::InvalidPayload("Gap.target_count"),
+            ));
         }
         GapScope::AllDeclaredStreams
     } else {
         if count == 0 || count > 256 {
-            return Err(Error::new(count_offset, ErrorKind::InvalidPayload("Gap.target_count")));
+            return Err(Error::new(
+                count_offset,
+                ErrorKind::InvalidPayload("Gap.target_count"),
+            ));
         }
         // Smallest target: StreamId4 + spec4/connection8/subscription8/bookOpt1
         // + three absent option tags3 = 28 bytes. Book targets are larger.
@@ -122,11 +147,20 @@ pub fn decode_gap(r: &mut Reader<'_>, context: WireContext) -> Result<Gap> {
                 _ => return Err(Error::new(offset, ErrorKind::InvalidPayload("Gap.range"))),
             };
             let loss_count = r.option(Reader::u64)?;
-            targets.push(GapTarget { stream, tag, range, loss_count });
+            targets.push(GapTarget {
+                stream,
+                tag,
+                range,
+                loss_count,
+            });
         }
         GapScope::ExplicitTargets(targets)
     };
-    let gap = Gap { context, scope, reason };
+    let gap = Gap {
+        context,
+        scope,
+        reason,
+    };
     checked(scope_offset, gap.validate())?;
     Ok(gap)
 }
@@ -134,12 +168,20 @@ pub fn decode_gap(r: &mut Reader<'_>, context: WireContext) -> Result<Gap> {
 pub fn encode_control(w: &mut Writer, value: &Control) -> Result<()> {
     w.u8(value.tag())?;
     match value {
-        Control::Timer { stream, timer_id, deadline_ns } => {
+        Control::Timer {
+            stream,
+            timer_id,
+            deadline_ns,
+        } => {
             w.u32(stream.get())?;
             w.u64(*timer_id)?;
             w.u64(*deadline_ns)?;
         }
-        Control::Transport { connection, epoch, value } => {
+        Control::Transport {
+            connection,
+            epoch,
+            value,
+        } => {
             w.u32(connection.get())?;
             w.u64(epoch.get())?;
             w.u8(value.tag())?;
@@ -152,7 +194,11 @@ pub fn encode_control(w: &mut Writer, value: &Control) -> Result<()> {
             w.u64(next)?;
             w.u8(reason.tag())?;
         }
-        Control::SpecActivate { slot, expected, next } => {
+        Control::SpecActivate {
+            slot,
+            expected,
+            next,
+        } => {
             w.u32(slot.get())?;
             w.u32(expected.get())?;
             w.u32(next.get())?;
@@ -196,14 +242,18 @@ pub fn encode_gap(w: &mut Writer, value: &Gap) -> Result<()> {
     match &value.scope {
         GapScope::AllDeclaredStreams => w.u16(0)?,
         GapScope::ExplicitTargets(targets) => {
-            let count = u16::try_from(targets.len())
-                .map_err(|_| Error::new(58, ErrorKind::LengthError))?;
+            let count =
+                u16::try_from(targets.len()).map_err(|_| Error::new(58, ErrorKind::LengthError))?;
             w.u16(count)?;
             for target in targets {
                 w.u32(target.stream.get())?;
                 w.epoch_tag(target.tag)?;
-                w.option(target.range.map(|v| v.0), |w, v: CaptureAttemptNo| w.u64(v.get()))?;
-                w.option(target.range.map(|v| v.1), |w, v: CaptureAttemptNo| w.u64(v.get()))?;
+                w.option(target.range.map(|v| v.0), |w, v: CaptureAttemptNo| {
+                    w.u64(v.get())
+                })?;
+                w.option(target.range.map(|v| v.1), |w, v: CaptureAttemptNo| {
+                    w.u64(v.get())
+                })?;
                 w.option(target.loss_count, Writer::u64)?;
             }
         }
