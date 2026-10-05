@@ -583,3 +583,32 @@ fn h18_restart_has_new_archive_clock_and_no_inherited_ready_state() {
     assert_eq!(restarted.recording.last_receipt, None);
     assert!(restarted.blocked.is_none());
 }
+
+
+#[test]
+fn v_r4_profile_norm_blocks_dependent_input_without_guessing_support() {
+    let mut s = Scenario::initial(fixtures::policy());
+    s.config_change(2, 2, fixtures::policy(), 10).unwrap();
+    let after_activation = s.model.clone();
+    let stream = s.stream().clone();
+    assert_eq!(stream.binding.feed_profile.get(), 1);
+    assert_eq!(s.model.context().unwrap().normalizer.get(), 2);
+    assert_eq!(stream.book, Some(BookValidity::Invalid(Fault::ContextChanged)));
+    assert_eq!(stream.last_event_cursor, None);
+
+    assert_eq!(
+        s.timer(11),
+        Err(ModelError::Artifact(
+            ArtifactError::UnsupportedNormalizerBinding
+        ))
+    );
+    assert_eq!(s.model.last_record, after_activation.last_record);
+    assert_eq!(s.model.evaluation_ns, after_activation.evaluation_ns);
+    assert_eq!(s.model.streams, after_activation.streams);
+    assert_eq!(
+        s.model.blocked,
+        Some(ModelError::Artifact(
+            ArtifactError::UnsupportedNormalizerBinding
+        ))
+    );
+}
