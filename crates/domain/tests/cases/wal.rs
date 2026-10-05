@@ -285,7 +285,11 @@ fn w13_wrong_segment_link_or_detached_segment_fails_at_boundary() {
     let first = sequence(frozen::MULTI0);
     for offset in [24_usize, 32, 48, 64, 68, 72, 80] {
         let mut second = sequence(frozen::MULTI1);
-        second[offset] ^= 1;
+        if offset == 64 {
+            second[64..68].copy_from_slice(&2_u32.to_le_bytes());
+        } else {
+            second[offset] ^= 1;
+        }
         repair_crc(&mut second[..88]);
         let result = recover(&[&first, &second], frozen::environment());
         assert_eq!(result.last_good_offset, 1030, "offset={offset}");
