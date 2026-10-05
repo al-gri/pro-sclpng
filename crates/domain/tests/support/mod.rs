@@ -1,11 +1,19 @@
-//! Memory-only fixtures and pure reference relations for this integration binary.
-//! None of this module is compiled into the production domain library.
-
 pub mod accounting;
+pub mod artifact_bodies;
+pub mod artifact_bytes;
 pub mod artifacts;
+pub mod binary;
+pub mod binary_fixtures;
 pub mod bodies;
+pub mod commitment;
 pub mod fixtures;
 pub mod health;
 pub mod model_env;
 pub mod publication;
 pub mod scenario;
+pub mod wal;
+pub mod wal_apply;
+pub mod wal_control;
+pub mod wal_expected;
+pub mod wal_recovery;
+pub mod wire_values;
