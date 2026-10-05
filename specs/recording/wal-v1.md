@@ -1,201 +1,185 @@
-# WAL v1 — byte, recovery and completion proposal
+# WAL v1 — byte, recovery, accounting and publication proposal
 
-Status: **PROPOSED**. SPEC-001 / DESIGN REVIEW.
+Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED.
 Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
-Связанные контракты: [types](../domain/types-v1.md), [events](../market-data/events-v1.md), [DataHealth](../market-data/data-health-v1.md), [matrix](../domain/test-matrix-v1.md), [ADR-0002](../../docs/adr/0002-domain-event-wal-contracts.md).
-Это проект wire contract. Production recorder, файловый I/O, recovery engine и platform sync здесь **не реализуются**. После design approval допустим только memory-only reference codec в domain tests/support.
+Links: [types](../domain/types-v1.md), [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [artifacts](../domain/artifacts-v1.md), [matrix](../domain/test-matrix-v1.md), [review vectors](../domain/review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
+No production recorder, file I/O, queue or replay/recovery engine is implemented. A memory codec/model also awaits renewed design approval.
 
-## 1. Область v1
+## 1. Revision boundary and archive scope
 
-Один ArchiveId содержит одну CaptureSessionId и ClockId, последовательность segments и один authoritative порядок RecordNo. Process restart создаёт новый архив и clock scope; прежний архив не дописывается. Опциональная previous_archive ссылка не доказывает непрерывность данных или часов.
-Записываются raw source messages, metadata, configuration и control inputs. Отдельного normalized-event record kind в v1 нет: [EventId и DTO](../market-data/events-v1.md) воспроизводятся из этих inputs и записанной normalization revision. Не сериализовать Rust structs, usize, native endian, float или случайный порядок HashMap.
-Все значения, лимиты и tags ниже — инженерное предложение, **не параметры Bitget**.
+One ArchiveId, one CaptureSessionId/ClockId, ordered segments and a dense authoritative RecordNo sequence. Restart creates a new archive, never appends to the old one. previous_archive is provenance, not clock/sequence continuity. Raw/control-only archive remains authoritative; there is no persisted normalized-event record kind. No Rust memory layout, usize, float, native endian or unordered map serialization.
 
-## 2. Frame layout
+**Explicit changes from reviewed proposal:** existing provenance/evidence/proof Token128 fields now require typed content-bound ArtifactRef values; config descriptor carries pending/quiet policy and proposal_revision=2; frame-wide proof/delayed application, activation, local GAP accounting and publication gate/fence semantics are defined below/across linked contracts. These are semantic changes to a PROPOSED format, not an assertion that the prior bytes already guaranteed them. Header, RecordKind/Control tags, payload field order and CRC coverage are unchanged. W01 remains byte-identical. No wire field is added for ArtifactRef, StorageFence or GAP windows. A legacy prose proof token fails revised semantic validation. No accepted archive migration is claimed.
 
-Каждый frame: **header[32] || payload[L] || crc32[4]**, без padding/alignment bytes. Все многобайтовые integers little-endian. Offsets ниже от начала frame, интервалы полуоткрытые.
+## 2. Fixed framing — unchanged
 
-| Offset | Bytes | Поле | Правило |
+Frame = `header[32] || payload[L] || crc32[4]`, no padding. All multi-byte integers little-endian.
+
+| Offset | Bytes | Field | Rule |
 |---:|---:|---|---|
-| 0 | 4 | magic | ASCII `PSRW`, hex `50 53 52 57` |
-| 4 | 2 | frame_version | u16, строго 1 |
-| 6 | 2 | record_schema_version | u16, строго 1 |
-| 8 | 2 | record_kind | u16, известный tag из раздела 4 |
-| 10 | 2 | flags | u16, 0 в v1 |
-| 12 | 4 | payload_len L | u32; число только payload bytes |
-| 16 | 8 | record_no | u64, 1..=MAX; плотный возрастающий порядок всего архива |
-| 24 | 4 | segment_no | u32, начинается с 0, возрастает на 1 при rotation |
-| 28 | 4 | reserved | u32, 0 |
-| 32 | L | payload | точная canonical schema своего kind |
-| 32+L | 4 | checksum | u32 LE; CRC header || payload, без trailer |
+| 0 | 4 | magic | ASCII PSRW = 50 53 52 57 |
+| 4 | 2 | frame_version | u16=1 |
+| 6 | 2 | record_schema_version | u16=1 |
+| 8 | 2 | record_kind | known u16 tag from section 4 |
+| 10 | 2 | flags | u16=0 |
+| 12 | 4 | payload_len | u32=L, payload ONLY |
+| 16 | 8 | record_no | u64, 1..MAX, dense archive order |
+| 24 | 4 | segment_no | u32, starts 0, advances exactly 1 |
+| 28 | 4 | reserved | u32=0 |
+| 32 | L | payload | exact canonical body |
+| 32+L | 4 | checksum | u32 LE over header+payload |
 
-`MAX_PAYLOAD = 1_048_576`; `frame_len = checked_add(36, L)`, максимум **1_048_612 bytes**.
-Перед allocation: прочитать фиксированные 32 bytes; проверить magic/version/kind/flags/reserved и bound L; checked-вычислить frame_len, absolute_offset + frame_len и преобразование в usize; сравнить с доступным validated slice/остатком. Непроверенная длина не передаётся в reserve/resize/allocation.
-Variable-length поля затем ограничиваются оставшимися payload bytes и собственными caps; произведение count*minimum_entry_size проверяется до выделения памяти. Frame cap не оправдывает allocation по ложному вложенному count.
-Ненулевые flags/reserved, trailing payload bytes, неоднозначные enum tags и неканоничные decimals отклоняются. У формата нет режима «пропустить неизвестное и продолжить».
+MAX_PAYLOAD=1048576; checked frame_len=36+L<=1048612. Read/validate the fixed header, versions/tags/flags/reserved/cap, checked absolute_offset+frame_len and usize conversion BEFORE allocating from L. Nested count*minimum_entry_size/lengths must fit validated remaining bytes and own caps before allocation. Reject trailing body bytes, malformed options/bools/decimals; no skip-unknown mode.
 
-### Checksum
+CRC-32/ISO-HDLC: width32, poly0x04C11DB7, reflected poly0xEDB88320, init0xFFFFFFFF, refin/refout=true, xorout0xFFFFFFFF. Process stored bytes in order, 8 reflected bits per byte, complement once. Coverage exactly [0,32+L), including header and length/order fields, excluding trailer. Streaming aggregate continues internal state across chunks; final complement only on obtaining a digest. Reference: [RFC1952 section 8](https://www.rfc-editor.org/rfc/rfc1952#section-8). CRC is not authentication, artifact identity or physical durability evidence.
 
-CRC-32/ISO-HDLC (IEEE): width=32, polynomial=0x04C11DB7, reflected polynomial=0xEDB88320, init=0xFFFFFFFF, refin=true, refout=true, xorout=0xFFFFFFFF. Reflected алгоритм обрабатывает bytes в сохранённом порядке и восемь младших битов каждого byte; final complement только один раз.
-Покрытие: ровно bytes `[0,32+L)` данного frame, включая magic, versions, length, RecordNo и SegmentNo. Trailer содержит полученное значение little-endian.
-Для streaming prefix CRC state продолжается между chunks без промежуточного final complement; итоговый xor применяется при получении значения.
-Primary reference/independent method: [RFC 1952, section 8, sample CRC code](https://www.rfc-editor.org/rfc/rfc1952#section-8). CRC — проверка случайной порчи, **не аутентификация, не collision-resistant hash и не доказательство отсутствия malicious edits**.
+## 3. Payload primitives and Context
 
-## 3. Canonical payload primitives
+Concatenate fields in declared order. Opt<T>=u8 0 with no body, or 1 followed by T; other tags invalid. bool=u8 0/1. TokenN=u8 length then 1..N ASCII bytes from types grammar (N<=128). ExactDecimal=u128 coefficient,u8 canonical scale. InstrumentRef=venue:Token32,market_kind:u8,product_namespace:Token32,native_symbol:Token64. EpochTag=spec_version:u32,connection_epoch:u64,subscription_epoch:u64,book_epoch:Opt<u64>; present versions/epochs positive, book Some only for a book stream.
 
-Fields конкатенируются в перечисленном порядке, без implicit fields и padding.
-`Opt<T>` = u8 tag 0 без последующих bytes либо tag 1 + T; другой tag ошибочен. `bool` = ровно u8 0/1.
-`TokenN` = u8 length + length ASCII bytes; 1..N, алфавит из [types](../domain/types-v1.md), N<=128.
-`ExactDecimal` = u128 coefficient + u8 scale в canonical форме types-v1; increments/multiplier положительны.
-`InstrumentRef` = venue:Token32, market_kind:u8, product_namespace:Token32, native_symbol:Token64.
-`EpochTag` = spec_version:u32, connection_epoch:u64, subscription_epoch:u64, book_epoch:Opt<u64>. Все присутствующие значения положительны; book epoch Some только для book stream.
-Raw/event references в пределах архива используют RecordNo; ArchiveId восстанавливается из ArchiveStart, не из текущего процесса. Ссылка на неизвестный или будущий record ошибочна.
+Kinds2..7 begin with Context[24]: `local_receive_unix_ns:i64, local_receive_monotonic_ns:u64, config_version:u32, normalizer_version:u32`. Session/clock inherit ArchiveStart. Context is the configuration BEFORE the current input. Wire(0,0) decodes to separate BootstrapContext ONLY before first config and only for administrative kinds2/3/4. Mixed zero/nonzero or Bootstrap RawInput/Control/Gap => InvalidBootstrapContext. Ordinary version newtypes never accept 0. Definitions and referenced raw/control records must precede use. Future refs are errors.
 
-Kinds **2..7** начинаются с общего **Context[24]**:
-`local_receive_unix_ns:i64, local_receive_monotonic_ns:u64, config_version:u32, normalizer_version:u32`.
-CaptureSessionId/ClockId наследуются из ArchiveStart. Context показывает действующую **до обработки input** конфигурацию. До первой ConfigDefinition только administrative metadata/definition records могут использовать (config,normalizer)=(0,0); смешанная пара 0/nonzero запрещена. RawInput, Control и Gap требуют активную ненулевую конфигурацию.
-Definitions доступны до references на них. У ConfigDefinition новый config действует со следующего RecordNo; старый Context не делает изменение retroactive. Никаких неявных default metadata/config.
-Определения version/identity immutable. Повтор определения с тем же ключом в журнале отклоняется, даже если bytes совпали; idempotent transport redelivery уже прочитанного события — отдельный consumer contract.
+ConfigDefinition validates old Context and new descriptor/mode/policy, invalidates dependent scope at this RecordNo, then activates new context for the NEXT record. ConfigVersion definitions cannot repeat; reusing the same immutable normalizer/profile ref is allowed, not a redefinition. Canonical EventCursor comparison crosses recorded revisions ([events section 6](../market-data/events-v1.md#6-a3r4-canonical-activation-timeline)). Evidence artifacts available offline early are still inactive until their recorded proof.
 
-## 4. Record kinds и точные тела
+## 4. Exact record bodies
 
 ### 1 — ArchiveStart
 
-Без Context: `archive_id:[u8;16], capture_session_id:[u8;16], clock_id:u32, durability_mode:u8, previous_archive:Opt<[u8;16]>`.
-Оба собственных ID не все нули; clock_id>0; previous_archive, если есть, не все нули и не равен своему ArchiveId. mode: Buffered=1, GroupSynced=2, SyncBeforePublish=3.
-Только RecordNo=1, SegmentNo=0, offset=0 первого segment. Его отсутствие — NoArchive, не архив с guessed identity.
-Durability mode immutable в этом архиве. Будущая смена mode требует нового архива или отдельной schema revision.
+No Context: `archive_id:[u8;16],capture_session_id:[u8;16],clock_id:u32,durability_mode:u8,previous_archive:Opt<[u8;16]>`.
+Own IDs nonzero, clock>0; previous nonzero and different from own if present. Buffered=1,GroupSynced=2,SyncBeforePublish=3. Only record1/segment0/offset0. Mode immutable; no guessed archive identity on missing start.
 
 ### 2 — InstrumentSpec
 
-После Context: `instrument_slot:u32, spec_version:u32, InstrumentRef, price_quote_unit:Token32, price_basis_unit:Token32, quantity_unit:Token32, base_asset:Token32, price_increment:ExactDecimal, quantity_increment:ExactDecimal, quantity_to_base_multiplier:Opt<ExactDecimal>, provenance:Token128`.
-Slot связывается с одной identity навсегда; новая spec version может повторить этот slot/identity, но не переопределить прежнюю version. Новые версии становятся активными только через SpecActivate, кроме первой версии до регистрации stream. Units/multiplier и checked conversion — types-v1, отсутствие multiplier не равно 1.
+After Context: `instrument_slot:u32,spec_version:u32,InstrumentRef,price_quote_unit:Token32,price_basis_unit:Token32,quantity_unit:Token32,base_asset:Token32,price_increment:ExactDecimal,quantity_increment:ExactDecimal,quantity_to_base_multiplier:Opt<ExactDecimal>,provenance:Token128`.
+Slot has one immutable identity; new spec version never overwrites old. First spec is available before stream registration; subsequent activation needs SpecActivate. Unit/multiplier rules in types; None is not 1. provenance now binds an InstrumentSpec descriptor whose body matches all preceding body fields. No prose-token fallback.
 
 ### 3 — StreamDefinition
 
-После Context: `stream_id:u32, instrument_slot:u32, spec_version:u32, connection_id:u32, connection_epoch:u64, subscription_epoch:u64, channel:u8, book_id:Opt<u32>, book_epoch:Opt<u64>, feed_profile_version:u32, provenance:Token128`.
-Tags channel и ownership — types-v1. ConnectionId может разделяться несколькими streams, но объявленная current connection epoch должна совпадать. InstrumentSpec должен существовать. Book ID/epoch присутствуют вместе только у book channel.
-В v1 один BookRef имеет один зарегистрированный writer-stream в архиве. Переназначение writer другому StreamId в том же архиве не поддерживается: требуется новый capture archive, а не неописанный rebind. Переподписка того же StreamId выражается EpochAdvance. Это сужение первой вертикали, review D4.
-Feed profile version/provenance идентифицируют immutable проверенный decoder profile, который обязан быть доступен replay как входной registry. Отсутствующий/непроверенный профиль не загружается из сети и не подменяется догадкой: MissingVerificationProfile / BLOCKED_BY_MD_001 для Bitget. Наличие номера само по себе не доказывает feed semantics.
+After Context: `stream_id:u32,instrument_slot:u32,spec_version:u32,connection_id:u32,connection_epoch:u64,subscription_epoch:u64,channel:u8,book_id:Opt<u32>,book_epoch:Opt<u64>,feed_profile_version:u32,provenance:Token128`.
+Register once; referenced spec exists. Book ID/epoch present together for book channels only. ConnectionId may be shared; existing current connection epoch MUST match. Creating another stream on it does not reset its transport. One registered writer-stream per BookRef per archive; another StreamId for that book => WriterRebindRequiresNewArchive. Same-stream resubscription uses epochs.
+provenance is a FeedProfile descriptor matching stream/instrument/channel/version and supporting the selected normalizer. Missing or unverified real feed semantics => Blocked/BLOCKED_BY_MD_001, not guessed synthetic verification.
 
 ### 4 — ConfigDefinition
 
-После Context: `new_config_version:u32, new_normalizer_version:u32, provenance_kind:u8, evidence:Token128, silence_rule:u8, freshness_deadline_ns:Opt<u64>, warmup_min_updates:Opt<u32>, warmup_min_elapsed_ns:Opt<u64>, allow_quiet_with_proof:bool, require_two_sided_snapshot:bool, recording_gate:u8`.
-Provenance tags: Engineering=1, Synthetic=2, SourceVerified=3. SilenceRule и RecordingGate — [DataHealth](../market-data/data-health-v1.md). Новые version>0 и не переиспользуются; new normalizer version должна разрешаться в immutable revision registry. Registry и evidence — явные inputs окружения replay, не текущий случайно установленный decoder.
-Policy validation (positive deadline, обязательные thresholds/evidence и прочее) выполняется до activation. Недоступная normalization revision/config блокирует зависимый replay. Group sync batching policy относится к REC-001; этот payload не задаёт несуществующий универсальный fsync interval.
+After Context: `new_config_version:u32,new_normalizer_version:u32,provenance_kind:u8,evidence:Token128,silence_rule:u8,freshness_deadline_ns:Opt<u64>,warmup_min_updates:Opt<u32>,warmup_min_elapsed_ns:Opt<u64>,allow_quiet_with_proof:bool,require_two_sided_snapshot:bool,recording_gate:u8`.
+Versions positive; new ConfigVersion defined once, NormalizerVersion may reference an existing identical artifact. Provenance Engineering=1,Synthetic=2,SourceVerified=3. evidence is a Config descriptor mirroring body fields, referencing exact normalizer and adding required pending/quiet policy. Descriptor format/proposal_revision and limits in artifacts-v1. Validate mode/gate before activation: Buffered admits Written/Flushed/Durable; GroupSynced and SyncBeforePublish ONLY Durable. Invalid pair => INVALID_CONFIGURATION, old config/state retained and semantic processing stops before this record.
 
 ### 5 — RawInput
 
-После Context: `stream_id:u32, EpochTag, capture_attempt_no:u64, payload_encoding:u8, raw_len:u32, raw_bytes:[u8;raw_len]`.
-Encoding tag=1 означает opaque source-message bytes; неизвестный tag отклоняется. `raw_len` точно равен остатку; пустой source message представим как diagnostic input, но не становится валидным market event автоматически.
-CaptureAttemptNo>0, относится к StreamId, сохраняет локальный порядок попыток приёма до возможной queue loss. Последовательность успешных raw records одного stream не может уменьшаться/повторяться; обнаруженный пропуск требует предшествующего GAP с соответствующим известным range или явно Unknown-loss scope. AttemptNo **не exchange sequence** и не RecordNo.
-Raw epochs сохраняются даже у диагностического old-epoch input; semantic market validator не применяет его к current state. Непривязанный StreamId или неизвестная SpecVersion — ошибка reference.
+After Context: `stream_id:u32,EpochTag,capture_attempt_no:u64,payload_encoding:u8,raw_len:u32,raw_bytes:[u8;raw_len]`.
+Encoding1=opaque complete source-message bytes; other tags Unsupported. raw_len exactly remaining payload; empty raw is representable for diagnostic rejection, not automatically a valid event. Attempt>0; per-stream accounting is section4.1, NOT exchange sequence. Old-tag raw may be recorded/accounted for diagnostics, but cannot apply to current book. Unknown stream/spec references fail validation. Raw book admission creates candidates; only complete frame verification can later apply effects. No normalized payload is silently inserted into WAL.
 
 ### 6 — Control
 
-После Context — `control_tag:u8`, затем ровно тело варианта:
+After Context: control_tag:u8 followed by EXACT variant body:
 
-| Tag | Variant | Body в byte order |
+| Tag | Variant | Body order |
 |---:|---|---|
-| 1 | TimerFired | stream_id:u32, timer_id:u64, deadline_monotonic_ns:u64 |
-| 2 | TransportObservation | connection_id:u32, connection_epoch:u64, liveness:u8 (Unknown=0, Up=1, Down=2) |
-| 3 | EpochAdvance | scope:u8 (Connection=1, Subscription=2, Book=3), owner_id:u32, expected:u64, next:u64, reason:u8 |
-| 4 | SpecActivate | instrument_slot:u32, expected_spec_version:u32, new_spec_version:u32 |
-| 5 | VerificationEvidence | stream_id:u32, EpochTag, raw_record_no:u64, evidence_kind:u8 (Snapshot=1, Delta=2), feed_profile_version:u32, proof:Token128 |
-| 6 | WarmupEvidence | stream_id:u32, EpochTag, snapshot_raw_record_no:u64, update_count:u32, elapsed_ns:u64, proof:Token128 |
-| 7 | FreshnessEvidence | stream_id:u32, EpochTag, freshness:u8 (Unknown=0, Fresh=1, QuietVerified=2, Stale=3), basis_raw_record_no:Opt<u64>, proof:Token128 |
-| 8 | RecordingEvidence | health:u8 (Unknown=0, Healthy=1, Degraded=2, Failed=3), watermark_kind:u8 (Accepted=1, Appended=2, Written=3, Flushed=4, Durable=5), through_record_no:Opt<u64>, reason:u8 |
+| 1 | TimerFired | stream_id:u32,timer_id:u64,deadline_monotonic_ns:u64 |
+| 2 | TransportObservation | connection_id:u32,connection_epoch:u64,liveness:u8 (Unknown0/Up1/Down2) |
+| 3 | EpochAdvance | scope:u8 (Connection1/Subscription2/Book3),owner_id:u32,expected:u64,next:u64,reason:u8 |
+| 4 | SpecActivate | instrument_slot:u32,expected_spec_version:u32,new_spec_version:u32 |
+| 5 | VerificationEvidence | stream_id:u32,EpochTag,raw_record_no:u64,evidence_kind:u8 (Snapshot1/Delta2),feed_profile_version:u32,proof:Token128 |
+| 6 | WarmupEvidence | stream_id:u32,EpochTag,snapshot_raw_record_no:u64,update_count:u32,elapsed_ns:u64,proof:Token128 |
+| 7 | FreshnessEvidence | stream_id:u32,EpochTag,freshness:u8 (Unknown0/Fresh1/QuietVerified2/Stale3),basis_raw_record_no:Opt<u64>,proof:Token128 |
+| 8 | RecordingEvidence | health:u8 (Unknown0/Healthy1/Degraded2/Failed3),watermark_kind:u8 (Accepted1/Appended2/Written3/Flushed4/Durable5),through_record_no:Opt<u64>,reason:u8 |
 
-Reason tags, здесь и в GAP: UserReset=1, Reconnect=2, SourceGap=3, QueueOverflow=4, DecodeRejected=5, WriteFailure=6, NoFault=7, Unknown=255. Другие tags unsupported. NoFault допустим только у RecordingEvidence Healthy, не у GAP/epoch reset. Fault reason не заменяет scope.
-TimerId>0; TimerFired должен иметь Context monotonic sample >= deadline. Ни decoder, ни reference model не читают live clock для проверки.
-EpochAdvance проверяет owner identity, expected=current, next>expected и bounded arithmetic; влияние на states — DataHealth table. SpecActivate требует объявленную новую версию того же instrument и new>expected.
-Verification/Warmup/Freshness evidence могут ссылаться только на более ранний доступный raw prefix. Witness сверяется с профилем, current tag/config, anchor, вычисленными counts/elapsed; произвольная строка proof не командует force-ready.
-RecordingEvidence through, если есть, строго меньше собственного RecordNo; None — неизвестный watermark, **не 0 и не успешная durability**. Для Healthy нужен известный применимый frontier. Такое наблюдение не доказывает физическую сохранность носителя после crash.
-Unsupported control tag останавливает semantic recovery; неизвестный обязательный input не пропускается.
+Reasons: UserReset1,Reconnect2,SourceGap3,QueueOverflow4,DecodeRejected5,WriteFailure6,NoFault7,Unknown255; others Unsupported. NoFault only for Healthy RecordingEvidence, never GAP/reset. timer_id>0, Context sample>=timer deadline. EpochAdvance: expected=current,next>expected, no wrap. SpecActivate: declared higher version of SAME instrument. Owner-qualified invalidation fan-out in health table; Up never clears a barrier.
+
+The three proof fields now bind typed ArtifactRef descriptors, resolving exact full scope, barrier/anchor/basis, ordered output commitment and temporal bounds. Verification covers the ENTIRE homogeneous book frame, not a single sub-event. Delayed/reordered/duplicate proofs use events sections3–4; effects get actual apply cursors. A newer record ID is not permission to reapply a source. Warmup count is capped progress of applied BookUpdate outputs; QuietVerified has finite original-observation bounds. Arbitrary digest-looking text cannot force-ready.
+
+RecordingEvidence is an observation about a strictly earlier prefix: through<own RecordNo. Healthy success with through=None => MissingWatermark, no new successful observation. Other health states may carry None without replacing known frontiers by zero. Self/future => InvalidAcknowledgement; regression/inconsistent prefix => WatermarkRegression/WatermarkOrderError. Receipt is included in any candidate's causal prefix when used. Final StorageFence is deliberately NOT a Control tag/record; section6 defines the finite boundary.
 
 ### 7 — Gap
 
-После Context: `scope:u8, reason:u8, target_count:u16, targets:[Target;target_count]`.
-Scope ExplicitTargets=1: count 1..=256, Target entries отсортированы по StreamId, без дубликатов.
-Scope AllDeclaredStreams=2: count=0; затронуты все объявленные current stream/tag, range/count **Unknown**. Пустой explicit scope запрещён.
-`Target = stream_id:u32, EpochTag, first_lost_attempt:Opt<u64>, last_lost_attempt:Opt<u64>, loss_count:Opt<u64>`.
-Range относится только к CaptureAttemptNo этого stream, никогда к guessed exchange seq. Оба конца присутствуют вместе или оба отсутствуют; first>0, last>=first; известный count>0. При известном полном range loss_count обязан быть Some(checked(last-first+1)); переполнение отвергается. При неизвестном range count может быть None либо известным положительным количеством без точных позиций.
-Unknown loss count **не превращается в 0**. GAP с причиной NoFault запрещён.
-GAP означает обнаруженную потерю, не её компенсацию: affected book/freshness fail-closed до verified resync/warm-up. Source gap может иметь неизвестный attempt range, поскольку локальных попыток для биржевого пропуска вообще не было.
-Невозможность записать GAP при отказе носителя не создаёт фиктивный durable record: recorder Failed, завершённость Incomplete/Unknown, dependent work остановлена. Сообщение об отказе может быть только out-of-band, если WAL уже не принимает bytes.
+After Context: `reason:u8,scope_kind:u8,target_count:u16,targets:[Target;target_count]`.
+Explicit=1: 1..256 distinct targets sorted by StreamId. AllDeclaredStreams=2: target_count=0; expand to all declared current stream/tag, unknown range/count. Empty explicit list invalid. `Target=stream_id:u32,EpochTag,first_lost_attempt:Opt<u64>,last_lost_attempt:Opt<u64>,loss_count:Opt<u64>`.
+Both range ends present together or absent; first>0,last>=first, known count>0. Known complete range requires Some(checked(last-first+1)). Unknown range permits None or known positive count ONLY for local QueueOverflow; source/unlocalized reasons require both range/count None. Unknown never becomes zero. NoFault prohibited. Validate every target/accounting change before applying this record atomically.
+
+GAP invalidates applicable current health and records loss, not compensation. Old-tag source GAP is diagnostic only. Local attempt accounting does not guess exchange sequence or fabricate lost RawFrameIds. Failed media may prevent even GAP: recorder Failed, archive Incomplete/Unknown; no durable GAP promise.
+
+### 4.1 CaptureAttempt accounting — R5
+
+Per StreamId for the WHOLE archive, maintain accounted_frontier f (integer0 before any attempt) and at most one unresolved local loss window. Next expected attempt=checked(f+1). Epoch changes never reset it. Account successful old-tag raw too, independently of market applicability.
+
+Only QueueOverflow means pre-admission LOCAL loss eligible to cover CaptureAttempt holes. SourceGap/DecodeRejected/WriteFailure/UserReset/Reconnect/Unknown never authorize local holes; their loss target ranges/counts must be None. A source gap invalidates book continuity but says nothing about missing local attempts. Once RecordNo is assigned, loss is a failed/incomplete archive, not an attempt-window workaround.
+
+Known local range must start EXACTLY at f+1 and count=last-first+1; accept it as the next accounted lost interval and advance f=last. First<=f is LossOverlap (successful or previously lost attempt cannot be lost again). First>f+1 is LossCoverageGap. Following raw must be f+1 unless another explicit loss advances/opens accounting. Known ranges can be contiguous separate records but not overlap.
+
+Unknown-range local GAP opens one window `(gap RecordNo,left=f,tag,optional count)` without advancing f. Next raw of that stream closes it ONCE: require attempt a>f; k=a-f-1 is the inferred local missing interval size. If claimed count=Some(n), require k=n; otherwise preserve recorded loss_count=None (even when inferred k is known). Advance f=a and consume window, including k=0. No evidence is reusable for the later jump. A second local GAP while a window is open is AmbiguousLossWindow (v1 rejects combining/overwriting unknown windows). Known ranges may not be inserted into an open window. This explicit simplification avoids new wire fields and is submitted for review.
+
+Without a window/range, first raw must be attempt1 and every later raw f+1; jump=>UnaccountedAttemptGap, a<=f=>AttemptOrderError. Failed validation leaves the accounting frontier unchanged and stops semantic prefix at that input; it is not silently admitted as a valid suffix. RecordNo itself remains dense in physical bytes; accounting validity is a separate check.
+
+An open window is bound to its target tag. An intervening relevant epoch/spec/config continuity change before the right raw boundary yields GapScopeTransition and blocks semantic continuation for that ambiguous accounting trace; do not carry an old-scope permit into a new generation. A current local GAP targeting a mismatching tag similarly fails GapScopeTransition. A known already-accounted range survives epoch changes as historical accounting. Additional same-scope SourceGap does not consume/renew a local window.
+
+EOF/finalization with an unresolved window reports UnresolvedLossWindow. Physical seals can be checked, but input_quality MUST be Unknown and dependent data cannot claim gap-free completeness. No right boundary is not zero loss. NoKnownLoss is forbidden whenever any Gap exists; unresolved windows also prohibit GapsRecorded as a fully accounted quality label. CaptureAttempt=u64::MAX can be last; advancing afterwards is AttemptCounterExhausted, no wrap.
 
 ### 8 — SegmentSeal
 
-Без Context: `prefix_frame_count:u64, prefix_physical_len:u64, prefix_crc32:u32, prior_record_no:u64, has_known_gap:bool, is_final_segment:bool` (30 bytes).
-Prefix начинается с offset=0 данного segment и заканчивается непосредственно перед этим seal. Count включает все предшествующие frames данного segment, physical_len — их полные bytes вместе с trailers, prior_record_no=seal.RecordNo-1.
-**Prefix CRC вычисляется по конкатенации header || payload каждого prefix frame, исключая каждый индивидуальный CRC trailer.** Включение готовых trailers даёт нежелательную CRC residue-конструкцию; оно не является предложенным aggregate integrity check.
-Seal имеет обычный собственный frame CRC, защищающий counts/length/prefix CRC/flags. has_known_gap должен совпасть с наличием Gap в этом segment prefix. Нельзя закрыть segment при незаписанном accepted input.
+No Context: `prefix_frame_count:u64,prefix_physical_len:u64,prefix_crc32:u32,prior_record_no:u64,has_known_gap:bool,is_final_segment:bool` (30 bytes).
+Prefix is all segment frames before seal, from offset0. Count/physical length include full trailers; prior_record_no=seal.RecordNo-1. Aggregate CRC includes only each prefix frame's header||payload, EXCLUDES its trailer (including ready trailers would produce unwanted CRC residue behavior). Seal has its own usual frame CRC. has_known_gap equals presence of Gap in segment prefix. Cannot seal with unrecorded accepted inputs.
 
 ### 9 — SegmentStart
 
-Без Context: `archive_id:[u8;16], capture_session_id:[u8;16], clock_id:u32, previous_segment_no:u32, previous_segment_seal_record_no:u64, previous_segment_seal_frame_crc32:u32` (52 bytes).
-Только offset=0 следующего segment. IDs/clock совпадают с ArchiveStart; header.segment_no=checked(previous+1); RecordNo продолжается без пропусков; previous seal существует, совпадает по RecordNo и **собственному frame CRC**, is_final_segment=false.
-Definitions/config/tag state наследуются из проверенной предыдущей цепочки. Отдельный segment без начала архива/зависимых definitions не считается самодостаточным replay archive.
+No Context: `archive_id:[u8;16],capture_session_id:[u8;16],clock_id:u32,previous_segment_no:u32,previous_segment_seal_record_no:u64,previous_segment_seal_frame_crc32:u32` (52 bytes).
+Only offset0 next segment; IDs/clock exact match, segment number previous+1 checked, RecordNo continues dense. Previous seal exists, own frame CRC/RecordNo match, final=false. Definitions/config/accounting/state inherit verified prefix. A detached segment is not a self-contained canonical archive.
 
 ### 10 — ArchiveSeal
 
-Без Context: `expected_segment_count:u32, prior_frame_count:u64, total_prefix_physical_bytes:u64, prefix_crc32:u32, prior_record_no:u64, input_quality:u8` (33 bytes).
-Quality: NoKnownLoss=1, GapsRecorded=2, Unknown=3. NoKnownLoss запрещён при любом Gap; GapsRecorded требует хотя бы один Gap; Unknown не подменяется NoKnownLoss. NoKnownLoss означает отсутствие **записанной известной** потери, не доказанную exchange continuity.
-ArchiveSeal идёт непосредственно после SegmentSeal(is_final_segment=true), в том же final segment. Это единственный разрешённый frame после final SegmentSeal; ни bytes, ни дополнительные segments после ArchiveSeal не разрешены.
-Prefix охватывает все segments в порядке, все frames до ArchiveSeal, включая SegmentStart/SegmentSeal. Count/physical bytes включают индивидуальные trailers; aggregate CRC снова охватывает только header || payload каждого prefix frame. `prior_record_no = ArchiveSeal.RecordNo-1`, expected_segment_count=final_segment_no+1 с checked arithmetic.
-Все значения сверяются с реально разобранной цепочкой, а не принимаются как доверенная декларация completeness.
+No Context: `expected_segment_count:u32,prior_frame_count:u64,total_prefix_physical_bytes:u64,prefix_crc32:u32,prior_record_no:u64,input_quality:u8` (33 bytes).
+Quality NoKnownLoss1/GapsRecorded2/Unknown3. NoKnownLoss requires no Gap; GapsRecorded requires a Gap and no unresolved local window; Unknown does not imply no loss. NoKnownLoss is absence of RECORDED known loss, not proof of exchange continuity.
+Only immediately after final SegmentSeal in that same segment; only this record allowed after final seal, exact EOF afterwards. Prefix includes all earlier segments/frames, including segment starts/seals. Count/physical lengths include trailers; aggregate CRC again excludes each trailer. expected_segment_count=final_segment_no+1 and prior_record_no=own-1, checked. Verify every value against parsed chain, not trusted declarations.
 
-## 5. Recovery result и запрет magic scanning
+## 5. Recovery and artifact limitations
 
-Результат разделяет `physical_completion` (Incomplete / Complete), `input_quality` (NoKnownLoss / GapsRecorded / Unknown) и применимость данных. Complete+GapsRecorded возможен; это **не пригодная без resync книга**.
-Recovery сообщает segment_no, local/absolute `last_good_offset`, последний принятый RecordNo и причину остановки. last_good_offset указывает конец последнего frame, прошедшего framing, CRC, payload schema и reference/order validation. Только framing scanner обязан называться иначе и не выдавать свой offset за semantic acceptance.
+Separate physical_completion (Incomplete/Complete), input_quality and canonical applicability. Complete+GapsRecorded does not restore book data. `last_good_offset` is the end of the last frame passing framing/CRC/payload/reference/order/accounting checks, with segment/local/absolute offsets and last accepted RecordNo. A framing-only scanner has a separate `framing_good_offset`; it cannot claim canonical success while artifacts are missing. Missing required artifacts stops semantic resolution with Blocked at the dependent record; physical scan may continue with explicit limitation.
 
-| Наблюдение | Результат |
+| Observation | Result |
 |---|---|
-| Пустой input | NoArchive, Incomplete, last_good_offset=0 |
-| EOF до 32-byte header либо до полного payload/trailer | TruncatedTail на начале неполного frame; last_good_offset предыдущей границы |
-| L выше cap / checked offset или count overflow | LengthError до allocation; остановка на предыдущей good границе |
-| Bad magic/flags/reserved/checksum, неканоничный payload | Corrupt/InvalidPayload, Incomplete; не пропускать даже последний frame |
-| Неизвестный frame/schema/kind/control version | Unsupported, prefix отдельно доступен для диагностики; не «успешный replay с пропуском» |
-| Повтор/пропуск RecordNo, неверный SegmentNo или разорванная seal chain | OrderOrChainError, Incomplete |
-| Валидный EOF на frame boundary без final ArchiveSeal | ValidPrefixIncomplete; последний целый frame не доказывает completion |
-| Только валидный SegmentSeal | SegmentSealedArchiveIncomplete, пока не доказана вся archive chain |
-| Все frames/seals/counts/lengths/CRCs/IDs согласованы и точный EOF после ArchiveSeal | Complete с отдельно указанным input_quality |
-| Bytes/segments после ArchiveSeal | TrailingDataError, не Complete |
+| Empty | NoArchive,Incomplete,offset0 |
+| EOF within header/payload/trailer | TruncatedTail at incomplete frame; last_good previous boundary |
+| Oversized length/nested count/checked offset overflow | LengthError BEFORE allocation; previous good boundary |
+| Bad magic/flags/reserved/checksum/noncanonical payload | Corrupt/InvalidPayload/ChecksumMismatch, stop; even last frame not silently dropped |
+| Unsupported schema/frame/kind/control | Unsupported, no suffix application |
+| RecordNo/SegmentNo/reference/seal mismatch | OrderOrChainError,Incomplete |
+| Invalid attempt accounting | exact section4.1 diagnostic; semantic offset before offending input, no suffix acceptance |
+| Valid EOF boundary without ArchiveSeal | ValidPrefixIncomplete |
+| Valid SegmentSeal only | SegmentSealedArchiveIncomplete |
+| All seals/IDs/counts/lengths/CRCs plus exact EOF consistent | physical Complete with separate input_quality/applicability |
+| Extra bytes/segments after ArchiveSeal | TrailingDataError,not Complete |
 
-EOF после обещанной header длины — наблюдаемый truncated tail, не доказательство причины (это также может быть испорченная length). Никаких forensic/crash guarantees из одной классификации.
-При corruption между good frames следующий похожий magic **не** точка восстановления. Не сканировать и не склеивать suffix молча. Prefix разрешён как явный incomplete diagnostic input; восстановление полного архива требует отдельного решения, не auto repair.
-Удаление целого последнего raw/control frame вместе с seal, самого ArchiveSeal или final segment не даёт Complete. Полностью отсутствующий архив нельзя обнаружить по его отсутствующим bytes без внешнего inventory; такой гарантии нет.
+No magic-scan/skip/rejoin after middle corruption. Valid prefix can be used only as explicitly incomplete diagnostic input. Deleting whole final frame+seals, ArchiveSeal or final segment never yields Complete. Completely absent archive cannot be detected without an external inventory. Truncated-tail classification does not prove cause (length might have been corrupted). CRC/seals do not prove malicious-edit resistance, artifact validity or power-loss durability.
 
-## 6. Watermarks, loss и durability
+## 6. Watermarks, mode and finite StorageFence
 
-Watermarks — Option<RecordNo> непрерывного prefix; None означает неизвестное/ещё отсутствующее подтверждение, не запись 0. В одной session при известных значениях:
-`durable <= flushed <= written <= appended <= accepted`.
+Option<RecordNo> describes CONTIGUOUS achieved prefix, None unknown, not0. Known frontiers obey durable<=flushed<=written<=appended<=accepted. Accepted: RecordNo assigned by bounded owner. Appended: complete logical canonical frame. Written: writer accepted bytes, possibly userspace. Flushed: delivered to OS, not power-loss guarantee. Durable: successful platform sync/required metadata protocol.
 
-| Frontier | Значение, но не более сильная гарантия |
-|---|---|
-| Accepted | input атомарно принят bounded owner, ему присвоен RecordNo в выбранном admission order |
-| Appended | полный canonical frame сформирован в логическом append buffer |
-| Written | writer принял все bytes frame; они ещё могут находиться в userspace buffer |
-| Flushed | userspace buffers переданы OS; это не гарантия пережить power loss |
-| Durable | выполнен и успешно подтверждён platform-specific sync protocol для этого prefix и необходимых metadata updates |
+Partial write/flush/sync does not advance its frontier. A trusted known stronger completion covers weaker prefix, never vice versa. None observation does not erase an existing known bound or establish new success. Explicit known regression is an error. Cannot preserve a dense log after losing an admitted RecordNo by substituting a new payload/GAP under its identity. Restart does not inherit in-memory success.
 
-До admission потеря отражается CaptureAttemptNo и будущим Gap; непринятый input не получает RecordNo. После присвоения RecordNo потерять frame и продолжить журнал с дыркой нельзя: recorder Failed/архив Incomplete. Нельзя задним числом заменить payload уже принятой identity на Gap. При утрате всего volatile хвоста отсутствие completion seal не должно выдавать prefix за полный архив.
-Partial write, flush или sync error не продвигает соответствующий frontier. Более сильный frontier не «догадывается» по более слабому или CRC-readback. При restart старые in-memory watermarks не переносятся как факты; начинается новый архив.
+Buffered permits selected Written/Flushed/Durable gate with honest labels. GroupSynced and SyncBeforePublish require Durable; weaker config is INVALID_CONFIGURATION. GroupSynced batches storage operations; it does not allow early volatile publication. No latency/fsync interval is asserted.
 
-Mode Buffered=1: допустима публикация после Written только при явной ослабленной recording policy; возможная потеря при process/OS/power failure объявляется. Mode GroupSynced=2: sync выполняется группами, Durable продвигается только после успеха; зависимая работа с Durable gate ждёт его, а не произвольное время. Mode SyncBeforePublish=3: публикация state/effect требует durable prefix его raw/control causal basis. Это рекомендуемый кандидат безопасного capture profile, не обещание latency.
-Durability observations и DataHealth evidence не могут удостоверять сами себя. Ack собственного record не разрешён. Как writer предоставляет проверяемый durable acknowledgement и как recorder публикует ready state без циклического ожидания — обязательный integration review REC-001; модель SPEC-001 проверяет только порядок/bounds acknowledgements, не физический storage.
+A finite pure contract, not OS implementation:
 
-## 7. Rotation, finalization и границы доказательств
+```text
+prefix through r20 -> actual chosen storage gate reached for20
+r21 RecordingEvidence(through20) -> reducer computes candidate(frontier21)
+actual storage operation reaches chosen gate through21
+StorageFence(archive,session,gate,through21) -> guard may release that candidate
+```
 
-Rotation: остановить admission в закрываемый segment, записать принятый prefix, SegmentSeal(final=false), выполнить выбранный flush/sync policy, затем новый SegmentStart с проверенной ссылкой. Данные не пропускаются ради смены файла. Не объявлять новый segment durable до требуемой platform metadata persistence.
-Finalization: прекратить admission, дождаться полного drain accepted inputs, записать final SegmentSeal и ArchiveSeal, flush/sync их bytes и необходимые файловые metadata; только после успешного принятого platform protocol рекламировать archive Complete. Ошибка на любом шаге оставляет incomplete/unknown result, даже если ранние frames валидны.
-Порядок file creation/rename/directory sync, atomic publication/manifest, crash recovery и power-loss tests относятся к REC-001 и проверяемой OS. Этот proposal требует их evidence, но не утверждает, что вызов одной абстрактной `flush` обеспечивает durability на Windows/Linux.
-Повторное открытие для append после process restart не поддерживается v1; новый архив с previous link сохраняет факт разрыва clock/session. Merge архива, repair, compression, encryption/authentication, persisted normalized projection и произвольные extensions требуют новой принятой revision.
+The candidate's full basis includes r21 if it affects state/time/readiness, so durable20 alone is insufficient. Final fence is a typed storage operation completion on an ALREADY DEFINED prefix, NOT a WAL input, RecordNo, clock sample or signal. It triggers no automatic RecordingEvidence-about-itself cycle. Every successful final fence must originate from the future verified storage boundary, not a parsed field/CRC/synthetic token. The pure guard checks scope, required gate, nonrevoked candidate and known contiguous achieved prefix including candidate frontier. Self/future receipt, absent fence, weak/wrong-scope/future/regressing fence or invalidation while waiting => no permit. Precise relations/candidate identity are in health section5.
 
-## 8. Independently checked golden frame
+Replay can reconstruct candidates/recorded observations, not historical sync or external send success. Crash between fence and send has Unknown delivery; neither exactly-once nor automatic resend is promised. OS completion provenance, batching, sync/flush/metadata and crash tests remain REC-001. SPEC now defines the finite semantic relation instead of deferring that ambiguity.
 
-Fixture W01: origin=synthetic, frame/schema=1, ArchiveId=16 bytes 0x01, CaptureSessionId=16 bytes 0x02, ClockId=1, mode=SyncBeforePublish(3), previous=None; RecordNo=1, SegmentNo=0. L=38, frame=74 bytes. Это один ArchiveStart, **не Complete archive**.
+## 7. Rotation, finalization and remaining OS scope
+
+Rotation stops admission into closing segment, drains accepted prefix, appends SegmentSeal(final=false), completes chosen flush/sync protocol, then starts next segment referencing seal. No skipping data to rotate. Platform metadata persistence is separately required before advertising durable creation.
+Finalization drains accepted inputs, appends final SegmentSeal/ArchiveSeal, flushes/syncs bytes and required metadata successfully before advertising durable finalized storage. Parsed physical completeness is a byte property, separate from an external durable-finalization claim. Failure leaves storage completion unknown/incomplete even when some bytes can later scan as a complete sequence.
+File creation/rename/directory sync/manifest atomicity/actual crash tests belong to verified OS-specific REC work. Compression, encryption/authentication, archive repair/merge, persisted normalized projections and append-after-restart require a new accepted revision. No Windows claim follows from Linux CI.
+
+## 8. W01 golden — unchanged bytes and checksum
+
+W01 synthetic, frame/schema1; archive16x01,session16x02,clock1,SyncBeforePublish3,previous=None; RecordNo1,SegmentNo0. Header32,payload38,total74. ArchiveStart only, NOT a complete archive.
 
 ```text
 0000: 50 53 52 57 01 00 01 00 01 00 00 00 26 00 00 00
@@ -205,9 +189,4 @@ Fixture W01: origin=synthetic, frame/schema=1, ArchiveId=16 bytes 0x01, CaptureS
 0040: 01 00 00 00 03 00 13 c4 02 9e
 ```
 
-Header+payload CRC = **0x9E02C413**; trailer little-endian `13 c4 02 9e`.
-Reference vectors: ASCII `123456789` -> **0xCBF43926**; empty bytes -> **0x00000000**.
-На КП1 эти значения и 32/38/74-byte размеры реально сверены offline: Python 3.13.5, zlib build/runtime 1.3.1 и отдельно написанный bit-at-a-time loop с reflected polynomial. Это два расчёта документационного golden, **не запуск Rust codec, decoder или recovery test**. CRC всего готового frame с trailer = 0x2144DF1C; поэтому aggregate CRC выше не включает trailers.
-Expected bytes должны храниться независимо от проверяемого codec; runtime round-trip не заменяет golden assertion. Полный synthetic raw/control/Gap/seal набор и all-offset truncation assertions планируются в [matrix](../domain/test-matrix-v1.md) после approval.
-
-Review D5/D6: raw/control-only формат, one-session/restart policy, seal chain, completion vs input quality, modes/ack boundary, CRC и caps. Всё остаётся **PROPOSED**; filesystem durability и Windows execution **NOT_RUN**.
+CRC(header+payload)=0x9E02C413, trailer13 c4 02 9e. CRC(ASCII123456789)=0xCBF43926; empty=0. Whole-frame-with-trailer CRC=0x2144DF1C, hence aggregate excludes trailers. Original checkpoint checked zlib plus bit-loop; this revision rechecked literal bytes/length/zlib without changing the golden. Neither is Rust codec execution. Full multi-frame/segment/each-offset assertions remain required after approval and NOT_IMPLEMENTED/NOT_RUN now.

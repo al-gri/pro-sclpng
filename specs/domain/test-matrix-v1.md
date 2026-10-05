@@ -1,132 +1,130 @@
 # SPEC-001 — proposed positive / negative test matrix
 
-Status: **PROPOSED**. Контрольная точка DESIGN REVIEW, не отчёт о готовых domain tests.
+Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED; not a report of executed domain tests.
 Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
-Контракты: [types](types-v1.md), [events](../market-data/events-v1.md), [DataHealth](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
+Contracts: [types](types-v1.md), [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [artifacts](artifacts-v1.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
+**Exact review traces and finding mapping:** [review-vectors-v2](review-vectors-v2.md). **Independently specified descriptor bytes:** [AF fixtures](../../../tests/fixtures/domain/artifacts-v1.md).
 
-## 1. Статус и fixture protocol
+## 1. Checkpoint and fixture protocol
 
-На КП1 **нет новой Rust реализации типов, валидаторов, reference model/codec или executable contract tests**. Все строки ниже — test design; их Rust execution **NOT_RUN / NOT_IMPLEMENTED** до явного design approval в PR. Исключение по выполненной работе: arithmetic иллюстрации и W01 CRC/length рассчитаны offline для проверки текста; это не считается выполнением соответствующих Rust assertions.
-Все данные synthetic, без network, secrets, live clock и real Bitget parameters. Каждая будущая fixture несёт `id`, `origin=synthetic`, `schema_version=1`, `policy_version` (конкретная version либо not_applicable), `input`, `expected_result_or_error`, `rationale`. Один schema tag без expected outcome не является тестом.
-Для health vectors отдельный профиль `synthetic-1`: snapshot/delta verification задаётся тестовым evidence, не Bitget mapping. Пример policy H-A: config=1, normalizer=1, provenance=Synthetic, freshness deadline=10 ns, StaleAfterDeadline, warmup_min_updates=Some(2), warmup_min_elapsed_ns=Some(5), allow_quiet_with_proof=false, require_two_sided_snapshot=true, recording_gate=Durable. Эти маленькие числа — **только test values**, не рекомендации для feed.
+No new Rust value types, validators, model, codec or executable contract tests exist at this docs-only checkpoint. D1/D2 have isolated numeric implementation permission but are NOT_STARTED here. Event/health/WAL implementation awaits renewed explicit approval. All baseline and new named test rows are NOT_IMPLEMENTED / NOT_RUN as Rust tests. Offline byte/hash/length calculations are separately reported, not substituted for runtime assertions.
 
-Future integration tests: `crates/domain/tests/**`; memory-only codec helpers: `crates/domain/tests/support/**`; fixtures: `tests/fixtures/domain/**`, подключаются manifest-relative из domain tests. Не оставлять Rust tests лишь в корневом tests/ виртуального workspace. Не добавлять dependencies, features, build scripts или файловый recorder.
+Every future fixture: id,origin=synthetic,schema_version=1,proposal_revision=2,concrete policy_version or not_applicable,input,exact expected result/error/state/IDs/cursor/available_at,rationale. No network,secrets,live clock or real Bitget constants. Synthetic resolver outcomes are explicitly supplied, not production verification. New review traces define complete initial state and effect/control cursor distinctions; no raw/control record gets a fabricated market EventCursor.
+Future integration tests belong in crates/domain/tests/**, memory-only helpers in crates/domain/tests/support/**, fixtures in tests/fixtures/domain/** using manifest-relative includes. No tests only in the virtual workspace root; no new dependencies/features/build scripts. Documentation vectors alone do not prove any implementation.
 
-## 2. Exact decimals, units и checked arithmetic
+## 2. Numeric baseline — D1/D2 retained
 
-| ID | Input (synthetic) | Expected assertion / rationale |
+| ID | Input | Expected |
 |---|---|---|
-| N01 | tick=0.05, price=100.10 | PriceTicks=2002; reverse canonical decimal `100.1`; проверяется count и unit/spec |
-| N02 | step=0.001, qty=1.234 | QuantitySteps=1234; exact reverse `1.234` |
-| N03 | `000100.1000`, increment `0.0500` | canonical (1001,1)/(5,2), 2002 ticks; insignificant zeros не меняют grid |
-| N04 | price=100.11, tick=0.05 | OffGrid, без rounded price |
-| N05 | qty=1.2345, step=0.001 | OffGrid, не 1234 и не 1235 |
-| N06 | empty, `.5`, `1.`, `1e2`, `NaN`, `inf`, `1,2`, space/tab/newline, Unicode digits | InvalidSyntax отдельно для каждого input |
-| N07 | `+1`, `-1`, `-0` | InvalidSign; нет permissive sign parsing |
-| N08 | 96 ASCII bytes незначащих нулей; затем 97 | первый input canonical zero (допустим численно); второй InputTooLong до разбора; ZeroPrice проверяется отдельно |
-| N09 | `1.0000000000000000000`; `0.0000000000000000001` | первый canonical (1,0), второй ScaleTooLarge (значащая scale=19) |
-| N10 | counts 1 и u64::MAX, increment=1 | min/max PriceTicks проходят; canonical обратное преобразование точное |
-| N11 | decimal 18446744073709551616, increment=1 | CountOutOfRange (u64::MAX+1), без narrowing |
-| N12 | u128::MAX coefficient; decimal u128::MAX+1 | MAX parsing проходит как ExactDecimal; +1 Overflow(CoefficientAdd); conversion в u64 отдельно может не пройти |
-| N13 | coefficient append, для которого acc*10 > u128::MAX | Overflow(CoefficientMultiply), не panic/wrap |
-| N14 | zero increment; coefficient с scale=19 в direct metadata constructor; noncanonical decimal | InvalidIncrement / ScaleTooLarge / noncanonical metadata error согласно месту validation; ни один не достигает деления на 0 |
-| N15 | X=u128::MAX scale0, increment=(1,18) | Overflow при alignment X*10^18; не saturation, не математическое сравнение через float |
-| N16 | count=u64::MAX, increment coefficient=u128::MAX | reverse conversion Overflow(Multiply), даже если count сам валиден |
-| N17 | positive quantity multiplier=0.01 base/contract, step=1 contract, steps=123 | exact base amount 1.23, сохранены units и SpecRef |
-| N18 | multiplier=None / zero / units mismatch / nonlinear conversion | UnknownMultiplier / InvalidMultiplier / UnitMismatch / UnsupportedConversion соответственно; None не 1 |
-| N19 | checked steps*increment*multiplier overflow; scale sum=36 без удаления до <=18 | точная ошибка operation/ScaleTooLarge, без rounding промежуточного значения |
-| N20 | quantity=0 в numeric value, SetLevel, snapshot level, Trade и DeleteLevel | numeric 0 допустим; Set/snapshot/trade отвергаются; Delete имеет price и вообще не несёт qty; parser не угадывает deletion |
-| N21 | InstrumentRef или SpecVersion отличается при том же count | IdentityMismatch / SpecMismatch до применения цены или размера |
+| N01 | tick0.05,price100.10 | PriceTicks2002,reverse100.1,correct SpecRef/units |
+| N02 | step0.001,qty1.234 | QuantitySteps1234,reverse1.234 |
+| N03 | 000100.1000 / increment0.0500 | canonical(1001,1)/(5,2),ticks2002 |
+| N04 | price100.11,tick0.05 | OffGrid,no rounding |
+| N05 | qty1.2345,step0.001 | OffGrid,not1234/1235 |
+| N06 | empty,.5,1.,1e2,NaN,inf,comma,whitespace,Unicode digits | InvalidSyntax for each separate case |
+| N07 | +1,-1,-0 | InvalidSign |
+| N08 | 96 then97 ASCII zero bytes | first canonical numeric0;second InputTooLong before parsing;price0 separately ZeroPrice |
+| N09 | 1.0000000000000000000 vs0.0000000000000000001 | canonical(1,0) vs ScaleTooLarge19 |
+| N10 | counts1/u64MAX,increment1 | both valid PriceTicks and exact reverse |
+| N11 | 18446744073709551616,increment1 | CountOutOfRange,no narrowing |
+| N12 | u128MAX coefficient vs MAX+1 | first parses;second Overflow(CoefficientAdd) |
+| N13 | append digit when acc*10>u128MAX | Overflow(CoefficientMultiply),no panic |
+| N14 | zero increment,direct scale19,noncanonical metadata | InvalidIncrement / ScaleTooLarge / constructor noncanonical error per types;never division by zero |
+| N15 | u128MAX atscale0,increment(1,18) | alignment Overflow,not saturation or big-integer workaround |
+| N16 | u64MAX count * u128MAX increment coefficient | reverse Overflow(Multiply) |
+| N17 | steps123,step1 contract,multiplier0.01 base/contract | exact base1.23 with units |
+| N18 | multiplierNone,zero,wrong units,nonlinear request | UnknownMultiplier / InvalidMultiplier / UnitMismatch / UnsupportedConversion;grid conversion remains independent |
+| N19 | intermediate product overflow;scale36 not reducible to<=18 | exact operation Overflow / ScaleTooLarge,no intermediate rounding |
+| N20 | qty0 in numeric,SetLevel,snapshot,Trade,Delete | numeric0 valid;live levels/trade reject;Delete has no quantity field |
+| N21 | same count under other identity/spec | IdentityMismatch/SpecMismatch before application |
 
-При реализации ошибки direct constructor должны быть согласованы с parser errors в types-v1; не объединять разные обязательные ошибки в assertion «is_err». Точная variant nomenclature подтверждается design review, не выдумывается тестом отдельно от API.
-Bounded exhaustive plan: coefficient 0..=200, scale 0..=3, положительные increment coefficients 1..=20, steps 0..=100. Для grid cases assert exact count/reverse; off-grid assert OffGrid. Отдельные ручные MAX/intermediate boundaries выше необходимы: малый loop не покрывает u128 overflow. Никаких proptest/dependency additions. Эти loops пока **не запускались**.
+Bounded exhaustive plan remains coefficient0..200,scale0..3,positive increments1..20,steps0..100,with exact count/reverse or OffGrid assertions; separate MAX/intermediate cases remain mandatory. These loops have NOT_RUN. Precise checked-constructor variant nomenclature must align with numeric API review, not an independent test-only naming scheme.
 
-## 3. Identities, order, time и UNKNOWN
+## 3. Identity / order / UNKNOWN baseline, aligned with revision2
 
-| ID | Input | Expected assertion |
+| ID | Input | Expected / exact expanded trace |
 |---|---|---|
-| E01 | одинаковый symbol, venue/namespace; Spot vs Perpetual | InstrumentRef различны; slots не сливаются по symbol |
-| E02 | Normal и Rpi BookRef одного instrument | разные BookId/epoch ownership, independent state; равный epoch integer не даёт equality |
-| E03 | чужой stream/BookId/spec при применении input | IdentityMismatch/SpecMismatch; ни чужая, ни текущая книга не становятся Usable |
-| E04 | RecordNo=10/exchange_ts=200, затем 11/100 | cursor order строго 10 -> 11; равные/Unknown timestamps тоже не меняют порядок |
-| E05 | один RawFrameId с двумя results | sub-index 0,1; два разных EventId; replay дважды даёт идентичный ordered result |
-| E06 | тот же EventId + identical canonical fields; затем conflicting payload | consumer duplicate no-op; conflict IdentityConflict, не второй event и не silent overwrite |
-| E07 | пропуск/повтор RecordNo в WAL; sub-index 0,2 или перестановка outputs | RecordOrderError / SubEventOrderError с точной первой ошибочной позицией |
-| E08 | current time/random отличаются между двумя test runs | canonical IDs/output не меняются: clock/random не inputs reducer; применение незаписанных inputs запрещено |
-| E09 | timer/config change между raw inputs | меняет только последующие outputs/availability; current ConfigDefinition Context отражает прежнюю config, новая действует со следующего RecordNo |
-| E10 | отсутствующий config/normalizer/feed profile либо version reused с иными bytes | UnknownConfiguration/MissingVerificationProfile/IdentityConflict; нет fallback на latest config |
-| E11 | monotonic values одинаковы, session или clock различаются | IncomparableClock, ни elapsed, ни fake continuation после restart |
-| E12 | receive time поздно доставленного input меньше evaluation time; Unix jump | RecordNo сохраняется; evaluation maximum не откатывается, freshness не становится свежей от одного late arrival |
-| E13 | as_of > available_at; future raw/config reference; future sub-index | FutureCausalReference/UnknownDefinition; no look-ahead |
-| E14 | unknown source timestamp / aggressor / trade-book link / RPI flag | сохраняются Unknown; не 0/local time/Buy/Sell/Proven по соседству timestamps |
-| E15 | новый live capture и replay прежнего capture | новый ArchiveId допустим; replay прежнего сохраняет IDs; EventId не выдаётся за exchange dedup key |
-| E16 | epoch next<=current; exhausted u64/u32 IDs | EpochRollback/Overflow с сохранением current state, никакого wrap-to-zero |
-| E17 | snapshot/update >4096 entries; duplicate(side,price) в update | EventTooLarge / duplicate-level validation error, не silent coalescing/last-write-wins |
+| E01 | same symbol Spot/Perpetual | distinct InstrumentRef |
+| E02 | Normal/RPI same instrument | independent BookRef/epochs/state |
+| E03 | foreign owner/spec | IdentityMismatch/SpecMismatch,no borrowed usability |
+| E04 | raw admission10/exchange_ts200 then11/100 | source order10->11;book effects may be later,NEVER timestamp-sorted;V-R1-REORDER |
+| E05 | two book outputs in one raw | distinct SOURCE indices;distinct APPLY indices at proof release;V-R1-MULTI-DUP |
+| E06 | identical/conflicting consumer EventId | no-op / IdentityConflict;proof duplicates separately use SourceApplicationKey |
+| E07 | RecordNo duplicate/hole;source/output index hole | RecordOrderError/SubEventOrderError at first bad position |
+| E08 | current clock/random varies outside inputs | canonical IDs/order unchanged;external clock is not a reducer input |
+| E09 | config1/norm1->config2/norm1->config3/norm2 | V-R4-TIMELINE exact Context,IDs,cursors;one canonical timeline |
+| E10 | missing/rebound config/profile/normalizer artifact | V-R4-MISSING/REBIND/PROFILE-NORM;Blocked,no latest |
+| E11 | same time value,other clock/session | IncomparableClock,no fake cross-restart duration |
+| E12 | late raw sample,Unix jump | original sample retained,evaluation max not rolled back;V-R3-LATE |
+| E13 | future record/effect/sub-index reference | FutureCausalReference;as_of now CausalBasis,not raw EventCursor |
+| E14 | missing timestamp/aggressor/link/RPI | Unknown retained,not local time/0/Buy/Sell/Proven |
+| E15 | new capture vs replay old capture | new archive IDs allowed;old canonical archive stable;not exchange dedup |
+| E16 | epoch next<=current or exhausted IDs | EpochRollback/Overflow,no wrap/current-scope transfer |
+| E17 | >4096 entries or duplicate level | EventTooLarge/DuplicateLevel,no partial failed frame;V-R1-ATOMIC |
 
-## 4. DataHealth transition vectors
+## 4. DataHealth baseline, aligned with A1–A3
 
-Все healthy witnesses ссылаются на существующий current-tag anchor и известный synthetic profile. Expected state проверяется по четырём осям и guards, а не только одному bool.
+Each row must assert all four health axes plus scoped barrier/anchor/progress and permit, not just one bool. H-A is an independent synthetic policy: StaleAfterDeadline,D10,min_updates2,min_elapsed5,quietfalse,two-sidedtrue,Durable. Verified means a resolved frame proof and actual apply step, not a raw snapshot accepted structurally.
 
-| ID | Sequence / starting state | Expected |
+| ID | Case | Expected / exact expanded trace |
 |---|---|---|
-| H01 | definition -> transport Up -> heartbeat, snapshot отсутствует | T=Up, B=NoSnapshot, F не Fresh из heartbeat, usable_data=false |
-| H02 | current verified two-sided snapshot t=0 -> verified updates t=2 и t=5 -> truthful WarmupEvidence | B=Warming до witness, затем Usable; H-A counters=2/elapsed=5; F Fresh; recording guard проверяется отдельно |
-| H03 | H02 + Healthy recording ack через causal frontier | capture_usable=true только при достаточном выбранном Durable frontier |
-| H04 | H02 + Gap/overflow | B=Invalid, F=Unknown, anchor/counters cleared; следующий delta/heartbeat не восстанавливает usable |
-| H05 | H04 -> новый current verified snapshot -> новый warm-up | восстановление возможно только от нового anchor и witness, не старых counters |
-| H06 | epoch advance из Usable -> old snapshot/warm-up evidence | новый tag остаётся NoSnapshot/not usable; old input даёт diagnostic, не rollback |
-| H07 | ConnEpoch advance при двух связанных streams и одном постороннем | оба связанных invalidated, посторонний сохраняется; Sub/BookEpoch advance затрагивает только свои dependencies |
-| H08 | Normal snapshot/warm-up при пустой Rpi generation | Normal может стать Usable; Rpi остаётся NoSnapshot |
-| H09 | t=16 после last_valid_data t=5 при H-A; только heartbeat | age=11>10, F=Stale, usable=false; heartbeat не reset last valid time |
-| H10 | silence с UnknownOnSilence и без применимого quiet proof | F=Unknown, не выдуманный disconnect/verified resync/QuietVerified |
-| H11 | allow_quiet=true + применимый current policy/profile quiet proof; затем missing/old proof | только первый случай допускает QuietVerified, второй не восстанавливает usable |
-| H12 | ложные warm-up count/elapsed, чужой anchor/config/tag/profile | witness отвергнут, B не Usable; проверяется конкретная violated guard |
-| H13 | SpecActivate/config/normalizer change из Usable | old evidence очищено; старые qualified ticks и policy не используются |
-| H14 | Transport Down -> Up | B остаётся Invalid до нового snapshot/warm-up; Up сам не лечит книгу |
-| H15 | recorder Failed, Gap невозможно записать | R=Failed, capture_usable=false, archive incomplete/unknown; никакого assertion «durable Gap exists» |
-| H16 | recording Healthy после Gap без book resync | R может стать Healthy, B остаётся Invalid |
-| H17 | recording ack собственного/будущего RecordNo, durable>written, неизвестный frontier | reference/watermark error, capture_usable=false |
-| H18 | startup/restart с новым ArchiveId/clock и старым state | NoSnapshot/Unknown; старые elapsed/usable не переносятся |
-| H19 | unverified real Bitget profile при структурно корректном snapshot | BLOCKED_BY_MD_001, не synthetic Verified; generic synthetic vectors независимы |
+| H01 | registered/Up/heartbeat without snapshot | FUnknown,BNoSnapshot,usablefalse;heartbeat not data |
+| H02 | H-A snapshot sample0,two applied updates samples2/5,truthful witness at evaluation5 | Warming until witness;then Usable,progress2,elapsed5,Fresh;frame/step IDs asserted explicitly in concrete fixture |
+| H03 | H02 plus recording receipt and final storage fence covering candidate | permit only after finite two-phase sequence,V-R2-FINITE/NO-FENCE;receipt alone is insufficient |
+| H04 | current critical GAP/overflow | invalid barrier,clear pending/anchor/warm-up;V-R1-BARRIER/PENDING-BOUNDS |
+| H05 | new post-barrier snapshot+new warm-up | V-R1-RESYNC;late old proof cannot substitute |
+| H06 | epoch advance then old proof/witness | no restoration/no poisoning of recovered scope |
+| H07 | shared connection fan-out,third unrelated stream | V-R6-SHARED/DOWN-FANOUT |
+| H08 | Normal proof with empty RPI state | RPI NoSnapshot,not borrowed usability |
+| H09 | sample5,D10,evaluation14/15/16 | Fresh/Stale/Stale exactly;V-R3-FRESH-BOUNDARY |
+| H10 | UnknownOnSilence,None or finite expiry | V-R3-NONE/UNKNOWN-BOUNDARY;None not infinity |
+| H11 | current bounded quiet proof,then expiry/obsolete scope | V-R3-QUIET/LATE/FUTURE/OLD;no automatic renewal |
+| H12 | false warm-up counts/elapsed/wrong scope | WitnessMismatch or obsolete diagnostic;no force-ready |
+| H13 | config/spec/normalizer activation | barrier/current-scope invalidation;V-R1-CONTEXT,V-R4-TIMELINE |
+| H14 | Down then Up with pending snapshot | V-R1-DOWN-UP;Up does not clear barrier |
+| H15 | Failed recorder cannot write GAP | RFailed,no permit,no fictitious durable GAP |
+| H16 | recorder Healthy after gap,book not resynced | RHealthy,B remains invalid |
+| H17 | self/future/None/regressing receipt | V-R2-SELF/FUTURE-ACK/NONE-ACK/REGRESSION,no permit |
+| H18 | new archive/session restart | no inherited ready/candidate/fence/clock |
+| H19 | unverified real Bitget profile | BLOCKED_BY_MD_001,not synthetic Verified;generic vectors independent |
 
-## 5. WAL golden, limits, corruption, recovery
+C2 progress requirements: V-C2-PROGRESS/MAX,applied BookUpdate outputs counted,threshold cap and freeze after Usable. R1 requires also reordered/duplicate/mixed/expired proofs and bounded pending failure; all exact traces are retained in review-vectors-v2.
 
-W01 bytes приведены независимо в [wal-v1](../recording/wal-v1.md), не производятся проверяемым codec в test runtime. W02 — план маленькой последовательности: ArchiveStart -> InstrumentSpec -> StreamDefinition -> ConfigDefinition -> RawInput -> Timer/Control -> Gap -> final SegmentSeal -> ArchiveSeal. Source bytes synthetic; нет network capture.
+## 5. WAL baseline — full golden/recovery obligations retained
 
-| ID | Input / mutation | Expected assertion |
+W01 is independently specified in WAL section8. W02 is STILL REQUIRED after approval: a small ArchiveStart/InstrumentSpec/StreamDefinition/ConfigDefinition/raw/control/GAP/final SegmentSeal/ArchiveSeal sequence WITH required artifact closure,plus a multiple-segment variant. Full bytes/offsets have not yet been produced; W01 and AF descriptor fixtures are not substitutes.
+
+| ID | Input / mutation | Required assertion |
 |---|---|---|
-| W00 | ASCII `123456789`; empty input в standalone CRC function | CRC 0xCBF43926 / 0x00000000, primary algorithm и независимая проверка описаны в WAL |
-| W01 | exact 74-byte ArchiveStart golden | header=32, payload=38, RecordNo=1, SegmentNo=0, CRC=0x9E02C413, bytes match; last_good_offset=74, ValidPrefixIncomplete, не Complete |
-| W02 | согласованная small raw/control/Gap/seal chain | все offsets/decoded fields/counts/CRCs совпадают с независимо записанными expected bytes; Complete + GapsRecorded, не NoKnownLoss |
-| W03 | schema/frame version/kind/control tag неизвестен | Unsupported на конкретном offset; suffix не применяется |
-| W04 | wrong magic/flags/reserved; bad option/bool tag; noncanonical decimal; лишние payload bytes | точная Corrupt/InvalidPayload ошибка, не permissive decode |
-| W05 | protected byte flip либо trailer byte flip у good frame | ChecksumMismatch; last_good_offset до повреждённого frame |
-| W06 | L=1_048_577 либо u32::MAX; nested raw_len/count > validated remaining | LengthError до allocation по указанной длине; allocation instrumentation не видит oversized reserve |
-| W07 | absolute offset near u64::MAX; checked count/length overflow | Overflow/LengthError до addition wrap/allocation; checked usize conversion тоже проверяется без зависимости от host usize |
-| W08 | W01[:k] для каждого k=0..73 | k=0 NoArchive, прочие TruncatedTail, last_good_offset=0; никакого частичного принятого ArchiveStart |
-| W09 | full W02 prefix cut на каждом byte offset каждого header/payload/trailer | точная предыдущая good boundary и RecordNo; EOF на frame boundary unsealed=Incomplete, не ошибка доказанной source sequence |
-| W10 | good frame A -> corrupted B -> good C с magic | stop перед B, C не применяется; запрещён magic rescan/skip |
-| W11 | удалить целый последний frame/ArchiveSeal/final segment | не Complete даже при корректном оставшемся frame boundary |
-| W12 | seal count/physical length/aggregate CRC/previous seal reference не совпадает; собственный frame CRC пересчитан | semantic seal/chain error; собственный CRC не отменяет неверный manifest |
-| W13 | nested segment start с чужими ArchiveId/session/clock или SegmentNo | OrderOrChainError/IdentityMismatch, archive Incomplete |
-| W14 | корректный SegmentSeal без ArchiveSeal; bytes после ArchiveSeal | SegmentSealedArchiveIncomplete / TrailingDataError соответственно |
-| W15 | loss_count=None, range=None; count=0; range overflow | Unknown сохраняется; known 0 запрещён; overflow отвергнут; None не zero |
-| W16 | RawInput attempt sequence 1,3 без Gap; та же последовательность с явным Gap attempt=2 | первая continuity diagnostic/error согласно input validation, вторая loss наблюдаема и health invalid; local attempt не exchange seq |
-| W17 | Accepted input потерян после присвоения RecordNo | продолжение с дыркой запрещено; архив Incomplete/Failed, не replacement payload с тем же ID |
-| W18 | модели partial write/flush/sync failure | соответствующий frontier не продвигается; ordering D<=F<=W<=A сохраняется (A здесь Appended; Accepted проверяется отдельным верхним frontier) |
-| W19 | mode Buffered/GroupSynced/SyncBeforePublish с разными watermarks | publication guard соответствует выбранной mode/policy; CRC/readback/flush не выдают durable guarantee |
-| W20 | aggregate CRC ошибочно включает готовые trailers | test oracle отклоняет этот метод; prefix CRC считается по header+payload каждого frame, individual trailers исключены |
+| W00 | CRC ASCII123456789/empty | 0xCBF43926 /0 |
+| W01 | literal unchanged ArchiveStart74 bytes | header32,payload38,CRC9E02C413,last_good_offset74,ValidPrefixIncomplete |
+| W02 | independently encoded full raw/control/Gap/seal chain plus multisegment variant | exact bytes,fields,offsets,counts/CRCs/chain;Complete+GapsRecorded only with accounted loss |
+| W03 | unsupported frame/schema/kind/control | Unsupported at exact offset,no suffix application |
+| W04 | bad magic/flags/reserved/options/bools/noncanonical payload/trailing bytes | specific Corrupt/InvalidPayload |
+| W05 | protected or checksum byte flip | ChecksumMismatch,last_good previous frame boundary |
+| W06 | L1048577/u32MAX or nested length/count over remaining | LengthError BEFORE unchecked allocation |
+| W07 | absolute offset/count arithmetic overflow | checked Overflow/LengthError before wrap;checked usize conversion |
+| W08 | W01 cut at every k0..73 | k0 NoArchive,otherwise TruncatedTail,last_good0 |
+| W09 | complete W02 cut at EVERY header/payload/trailer offset | exact previous accepted boundary/no partial record;boundary EOF alone not Complete |
+| W10 | corrupted middle frame then valid-looking later magic | stop at corruption;no magic scanning/suffix joining |
+| W11 | delete whole last raw/control/seal/final segment | never Complete merely because remaining EOF is a valid boundary |
+| W12 | wrong seal count/length/aggregate CRC/reference with recomputed own CRC | semantic seal/chain error;own CRC cannot authorize false counts |
+| W13 | SegmentStart wrong archive/session/clock/segment | OrderOrChainError/IdentityMismatch,Incomplete |
+| W14 | valid SegmentSeal only;extra bytes after ArchiveSeal | SegmentSealedArchiveIncomplete /TrailingDataError |
+| W15 | unknown/count0/range overflow | unknown staysNone,InvalidLossCount or checked overflow;V-R5-* |
+| W16 | local attempts1,3 without/with exact local Gap2 | UnaccountedAttemptGap / accounted loss;SourceGap cannot authorize it |
+| W17 | loss AFTER RecordNo assignment | Failed/Incomplete,no replacement payload or continued dense-looking lie |
+| W18 | partial write/flush/sync | corresponding watermark not advanced,continuous prefix ordering retained |
+| W19 | all mode×gate pairs,receipt/fence boundary | V-R2-*;GroupSynced/SyncBeforePublish weaker gates invalid |
+| W20 | aggregate CRC incorrectly includes ready trailers | reject wrong oracle method;aggregate header+payload ONLY |
 
-Для W02 нужны independent full golden bytes после согласования layout; на КП1 они **ещё не вычислены и не заявляются проверенными**. W01 не заменяет этот обязательный последующий набор. Model scenarios partial write не являются filesystem crash/power-loss tests.
-Обязательные assertions: конкретный error variant/field, consumed/last_good offsets, frontier/axis state, exact ID/order и запрет обработанного suffix. «Не упало»/round-trip alone недостаточны.
+R5 adds one-use unknown windows,initial boundary,overlap/count/scope-change/EOF cases with exact logical outcomes. Full binary offsets for those not-yet-encoded traces remain NOT_RUN,not fabricated. Framing-only success when artifacts are missing is not successful canonical replay.
 
-## 6. Реальная верификация и последующий gate
+## 6. Executed checks versus planned assertions
 
-КП1 offline arithmetic check: 10010/5=2002, off-grid remainder 10011%5=1 и quantity example; это integer calculation иллюстраций, не decimal parser test.
-W00/W01 calculations реально сверены Python 3.13.5, zlib 1.3.1 и отдельным reflected bit-loop; header/payload/frame lengths=32/38/74. Все будущие Rust rows выше остаются NOT_RUN.
-На final PR head применимы существующие build/fmt/clippy/workspace tests. Они пока проверяют BOOT-001 code (15 CLI tests на Linux, domain без новых tests), **не корректность предложенного wire format**. Финальные фактические результаты и exact SHA публикуются в PR после commit; base push-CI не подставляется вместо них.
-
-После явного design approval — реализация только согласованных value types/checked conversions/pure validators/reference models и перечисленных vectors в той же ветке/PR. Затем на точном head:
+Historical КП1 calculated numeric illustrations and W00/W01 CRC,not Rust parser execution. This revision checked W01 literal length/CRC unchanged and five AF descriptor/body digests with Python hashlib/OpenSSL. It does not implement/execute the transition or recording models above.
+Existing CI on a NEW final head must verify build/fmt/clippy/workspace tests/unchanged lockfile/clean checkout. At this stage those are the unchanged BOOT-001 baseline (15 Linux CLI tests,0 domain tests),NOT proof that the design traces are correct. Old head/base CI cannot substitute for the new run. Exact SHA and logs are post-commit PR evidence.
+After explicit design approval,allowed typed values/conversions/pure validators/test models and assertions are implemented in the same branch/PR. Required commands remain:
 
 ```text
 cargo build --workspace --locked
@@ -136,5 +134,8 @@ cargo test --workspace --locked
 cargo test -p domain --locked
 ```
 
-Каждая команда требует отдельного факта запуска/exit code; workspace test не выдаётся за выполненный standalone `cargo test -p domain`. Недоступные команды NOT_RUN, failed — FAIL. Проверить initial/final clean checkout и неизменный root Cargo.lock. Windows 11 x64/PowerShell 5.1 отдельно NOT_RUN до owner evidence; Linux CI не является Windows test.
-Независимый QA-001 review на том же SHA обязателен. Этот checkpoint не закрывает Issue #3 или #6 и не завершает acceptance SPEC-001.
+Each invocation needs its own evidence;workspace does not claim standalone domain command executed. Local Rust unavailable =>NOT_RUN;Windows11/PowerShell5.1 separately NOT_RUN until owner evidence. Physical crash/fsync/power-loss NOT_RUN and out of implementation scope. Independent QA on actual implementation head remains mandatory.
+
+## 7. Review ownership
+
+[Finding → section → named vector → remaining work](review-vectors-v2.md#8-finding-to-change-mapping-and-remaining-review) covers A1–A3,R1–R6,C1/C2/C3. All changes are submitted for review,not self-closed findings. D1/D2 isolated permission does not release event/health/WAL implementation. Issue3 is not DONE;Issue6 remains independent QA. No merge is requested by this matrix.
