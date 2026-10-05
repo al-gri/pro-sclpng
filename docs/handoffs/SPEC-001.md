@@ -180,3 +180,16 @@ Regression test: `artifact_wire.rs::af_markdown_wrapper_is_crlf_portable_without
 The other textual fixture readers in `binary_fixtures.rs` (`wal-frames-v1.txt` and `policy-variants-v1.txt`) parse through `str::lines()`, which accepts LF and CRLF line endings; no analogous exact-delimiter defect was found, so they are unchanged.
 
 This containing commit requires fresh exact-head Linux CI. The exact new final SHA and its CI evidence are recorded post-commit in PR #10 rather than self-referencing this file. After green Linux CI, the required next owner action is to repeat exactly `cargo test -p domain --locked` on Windows 11 x64 / PowerShell 5.1 / Rust 1.98.1. Until that succeeds, status remains **PARTIAL / WINDOWS_RETEST_REQUIRED**, not READY_FOR_QA.
+
+
+## Linux verification of the CRLF portability fix
+
+The portability-fix implementation head `0af9c882fb099ccf23e7e42c864b82c2ac40fb77` was checked by [Rust CI run 37378699179](https://github.com/al-gri/pro-sclpng/actions/runs/37378699179), event `pull_request`, attempt 1, **completed/success**. Every job checked out exactly `0af9c882fb099ccf23e7e42c864b82c2ac40fb77` on Ubuntu 24.04.5 LTS / Linux x86_64 with Rust/Cargo 1.98.1:
+
+- rust-fmt job `111994653056`: `cargo fmt --all -- --check` **PASS**;
+- rust-clippy job `111994652646`: `cargo clippy --workspace --all-targets --locked -- -D warnings` **PASS**;
+- rust-tests job `111994653029`: Cargo.lock regeneration/comparison, `cargo build --workspace --locked`, `cargo test --workspace --locked` and final clean-checkout checks **PASS**.
+
+Workspace test counts on that exact SHA: **127 domain tests passed** = 73 contracts + 9 identity + 18 numeric + 27 wire, zero failed/ignored; separately **15 BOOT-001 CLI tests passed**, zero failed/ignored. The new wire count includes `artifact_wire.rs::af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes`, which checks all five Markdown-backed AF fixtures under both LF and synthetic CRLF wrappers.
+
+This Linux PASS does not overwrite the historical Windows FAIL at `dc7af8369e9c30c6877aae1b13cd23901c765cb3` and is not Windows evidence. The required next verification is a repeated owner-side `cargo test -p domain --locked` on Windows 11 x64 / PowerShell 5.1 / Rust 1.98.1 against the new final PR head. The containing handoff-only commit receives its own exact-head CI before handoff; its SHA is recorded in the PR post-commit rather than self-referenced here.
