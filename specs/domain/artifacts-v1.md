@@ -1,7 +1,7 @@
 # Content-bound artifacts v1 — descriptor proposal
 
 Status: **PROPOSED**. Proposal revision **2**, Architecture A3 / R4 with A1/R3 scope and time bindings.
-Links: [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [AF fixtures](../../../tests/fixtures/domain/artifacts-v1.md), [review vectors](review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
+Links: [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [AF fixtures](../../tests/fixtures/domain/artifacts-v1.md), [review vectors](review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
 Formats and pure relations only;no production hash,loader,verifier,network fetch or event/health model is implemented.
 
 ## 1. References, identity and verification stages
@@ -69,6 +69,8 @@ allow_quiet_with_proof:bool,require_two_sided_snapshot:bool,recording_gate:u8
 pending_max_frames:u32,pending_max_raw_bytes:u64,pending_max_outputs:u32,pending_wait_ns:u64
 quiet_max_lifetime_ns:Opt<u64>
 ```
+
+The normative encodings and unsupported/mismatched-policy behavior for silence_rule and recording_gate are in [DataHealth section 2.1](../market-data/data-health-v1.md#21-policy-byte-tags), shared with WAL ConfigDefinition. RecordingEvidence.watermark_kind is a different enum, not an encoding alternative for this body. AF-C1 bytes, digests and all nine mode/gate decisions are unchanged.
 
 Mirrored fields MUST match ConfigDefinition. Its own evidence Token is deliberately excluded from this body,no self-reference. Common/body/WAL provenance_kind agree. normalizer_ref resolves exact declared revision. Dependencies:that normalizer_ref plus optional Basis refs for provenance. Extra pending/quiet fields are required external policy,not extra WAL bytes;health/events define their bounds. Descriptor must resolve before config activation. Preloaded future config does not activate early.
 

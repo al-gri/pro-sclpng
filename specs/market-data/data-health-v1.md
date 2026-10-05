@@ -31,6 +31,22 @@ Durations u64 nanoseconds. Present deadline>0;StaleAfterDeadline requires it,Unk
 
 Invalid cells fail BEFORE activation. New config cannot weaken immutable archive mode. GroupSynced batches actual sync,not early volatile publication. Unknown/None frontiers satisfy no gate. Trusted stronger completion covers its achieved weaker prefix,not an unattempted stronger operation.
 
+### 2.1 Policy byte tags
+
+This is the single normative policy-enum table for BOTH WAL ConfigDefinition and PSAD Config body. Each field is one u8; names and numeric encodings are not inferred from fixtures.
+
+| Enum / field | Allowed tag | Meaning |
+|---|---:|---|
+| SilenceRule / silence_rule | 1 | UnknownOnSilence |
+| SilenceRule / silence_rule | 2 | StaleAfterDeadline |
+| RecordingGate / recording_gate | 1 | Written |
+| RecordingGate / recording_gate | 2 | Flushed |
+| RecordingGate / recording_gate | 3 | Durable |
+
+Every other u8 value, including 0 and 255, is Unsupported(field=Config.silence_rule or Config.recording_gate,value). There is no Unknown/default policy variant and BootstrapContext does not relax these tags. Validate tags in each representation before comparing mirrored fields or applying the unchanged nine-cell mode/gate matrix above. A supported but unequal WAL/descriptor policy value is InvalidPayload(field=Config.silence_rule or Config.recording_gate,detail=PolicyRepresentationMismatch), not a choice of which representation to trust. Either failure blocks semantic processing before ConfigDefinition: retain the previous configuration/data state, create no candidate/effect, and grant no publication permit.
+
+RecordingGate is NOT RecordingEvidence.watermark_kind. The latter keeps its own existing [WAL Control enum](../recording/wal-v1.md#6--control): Accepted=1, Appended=2, Written=3, Flushed=4, Durable=5. Required semantic correspondence is Written gate -> achieved Written, Flushed gate -> achieved Flushed, Durable gate -> achieved Durable (or a trusted stronger completion), never equality/comparison of raw enum ordinals. In particular, recording_gate byte3 means Durable whereas watermark_kind byte3 means Written; a Written receipt/fence cannot satisfy a Durable gate. StorageFence uses its typed achieved level, not a new wire tag. [Targeted byte vectors](../domain/review-vectors-v2.md#9-targeted-wire-and-link-vectors) exercise the encodings without changing A2/A3 or any mode/gate decision.
+
 ## 3. Deterministic time, freshness and progress
 
 Only recorded inputs advance evaluation=max(previous,current valid Context/Timer sample) in the same session/clock. Expiries run BEFORE proof release. No Instant/SystemTime. Data sample is ORIGINAL raw,never proof receipt/release. last_valid_data_ns=max applied original samples in that clock domain;each effect also retains its own original sample. IncomparableClock=>FUnknown,no guessed duration/readiness.

@@ -11,6 +11,8 @@ One ArchiveId, one CaptureSessionId/ClockId, ordered segments and a dense author
 
 **Explicit changes from reviewed proposal:** existing provenance/evidence/proof Token128 fields now require typed content-bound ArtifactRef values; config descriptor carries pending/quiet policy and proposal_revision=2; frame-wide proof/delayed application, activation, local GAP accounting and publication gate/fence semantics are defined below/across linked contracts. These are semantic changes to a PROPOSED format, not an assertion that the prior bytes already guaranteed them. Header, RecordKind/Control tags, payload field order and CRC coverage are unchanged. W01 remains byte-identical. No wire field is added for ArtifactRef, StorageFence or GAP windows. A legacy prose proof token fails revised semantic validation. No accepted archive migration is claimed.
 
+Targeted correction V2-WIRE-01 restores the original scope-before-reason Gap order in section4. The reversed reason-before-scope line at `8758b3c2a8896146a14d397bd65dc18ac5a49415` was an error, not an intentional wire revision. V2-WIRE-02 restores explicit policy-tag definitions via DataHealth section2.1; A1–A3 and the nine mode/gate decisions are not redesigned.
+
 ## 2. Fixed framing — unchanged
 
 Frame = `header[32] || payload[L] || crc32[4]`, no padding. All multi-byte integers little-endian.
@@ -62,6 +64,7 @@ provenance is a FeedProfile descriptor matching stream/instrument/channel/versio
 ### 4 — ConfigDefinition
 
 After Context: `new_config_version:u32,new_normalizer_version:u32,provenance_kind:u8,evidence:Token128,silence_rule:u8,freshness_deadline_ns:Opt<u64>,warmup_min_updates:Opt<u32>,warmup_min_elapsed_ns:Opt<u64>,allow_quiet_with_proof:bool,require_two_sided_snapshot:bool,recording_gate:u8`.
+The single normative policy-tag table and unsupported/mismatched-policy behavior are in [DataHealth section 2.1](../market-data/data-health-v1.md#21-policy-byte-tags). It also governs the PSAD Config body; RecordingEvidence.watermark_kind is NOT the enum for recording_gate.
 Versions positive; new ConfigVersion defined once, NormalizerVersion may reference an existing identical artifact. Provenance Engineering=1,Synthetic=2,SourceVerified=3. evidence is a Config descriptor mirroring body fields, referencing exact normalizer and adding required pending/quiet policy. Descriptor format/proposal_revision and limits in artifacts-v1. Validate mode/gate before activation: Buffered admits Written/Flushed/Durable; GroupSynced and SyncBeforePublish ONLY Durable. Invalid pair => INVALID_CONFIGURATION, old config/state retained and semantic processing stops before this record.
 
 ### 5 — RawInput
@@ -92,8 +95,11 @@ RecordingEvidence is an observation about a strictly earlier prefix: through<own
 
 ### 7 — Gap
 
-After Context: `reason:u8,scope_kind:u8,target_count:u16,targets:[Target;target_count]`.
-Explicit=1: 1..256 distinct targets sorted by StreamId. AllDeclaredStreams=2: target_count=0; expand to all declared current stream/tag, unknown range/count. Empty explicit list invalid. `Target=stream_id:u32,EpochTag,first_lost_attempt:Opt<u64>,last_lost_attempt:Opt<u64>,loss_count:Opt<u64>`.
+After Context: `scope_kind:u8,reason:u8,target_count:u16,targets:[Target;target_count]`.
+ExplicitTargets (Explicit)=1: 1..256 distinct targets sorted by StreamId. AllDeclaredStreams=2: target_count=0; expand to all declared current stream/tag, unknown range/count. Empty explicit list invalid. `Target=stream_id:u32,EpochTag,first_lost_attempt:Opt<u64>,last_lost_attempt:Opt<u64>,loss_count:Opt<u64>`.
+
+Offsets from the beginning of the frame are fixed by header32 + Context24: scope_kind at56, reason at57, target_count little-endian at58..59, first target at60. ExplicitTargets1/QueueOverflow4/count1 encodes `01 04 01 00` at56..59. Reversed `04 01 01 00` is Unsupported(field=Gap.scope_kind,value=4,frame_offset=56), before target accounting or health changes; it is not an alternate layout. [V2-WIRE-GAP-ORDER / V2-WIRE-GAP-REVERSED](../domain/review-vectors-v2.md#9-targeted-wire-and-link-vectors) include complete frames with checksums appropriate to each byte sequence.
+
 Both range ends present together or absent; first>0,last>=first, known count>0. Known complete range requires Some(checked(last-first+1)). Unknown range permits None or known positive count ONLY for local QueueOverflow; source/unlocalized reasons require both range/count None. Unknown never becomes zero. NoFault prohibited. Validate every target/accounting change before applying this record atomically.
 
 GAP invalidates applicable current health and records loss, not compensation. Old-tag source GAP is diagnostic only. Local attempt accounting does not guess exchange sequence or fabricate lost RawFrameIds. Failed media may prevent even GAP: recorder Failed, archive Incomplete/Unknown; no durable GAP promise.

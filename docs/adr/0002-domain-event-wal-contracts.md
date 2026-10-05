@@ -11,6 +11,8 @@ Base `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; previously reviewed revision `9
 [Architecture review5416219284](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5416219284): ARCHITECTURE_DIRECTION_SET / DESIGN_REVISION_REQUIRED. A1–A3 plus R3/R5/R6/C1/C2 directions below are copied into coordinated proposals,not silently attributed to the old revision or real Bitget.
 Neither review approved the whole API/wire format. This docs-only revision requests renewed approval; it does not resolve/close findings itself. Numeric implementation has not started and no code was discarded. ADR-0001 and accepted baseline remain untouched.
 
+Targeted follow-up: [Integrator review5417294202](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5417294202), reviewed head `8758b3c2a8896146a14d397bd65dc18ac5a49415`, marked R1–R6/C1/C2 RESOLVED at design level. A1–A3 below are not redesigned. Only V2-WIRE-01/02 and V2-DOC-01 corrections are submitted here; they are not self-closed and general implementation approval remains pending.
+
 ## Context / retained D1–D6
 
 BOOT-001 supplies std-only Rust1.98.1 workspace; domain currently exports no market API. Before network/storage code,domain/event/health/WAL contracts must agree on exact units,identity/order,UNKNOWN,proof availability,loss accounting and publication durability.
@@ -74,7 +76,7 @@ C2: warm-up progress counts applied BookUpdate OUTPUTS,not proof records/frames/
 
 | Area | Reviewed revision | Revision2 proposal |
 |---|---|---|
-| Header/kinds/field order/CRC | 32-byte header,existing tags,CRC algorithm | UNCHANGED;W01 bytes/checksum remain identical |
+| Header/kinds/field order/CRC | 32-byte header,existing tags,CRC algorithm | UNCHANGED relative to the original layout; targeted V2-WIRE-01 restores Gap scope-before-reason after the erroneous reversal at8758b3c; W01 bytes/checksum remain identical |
 | Token128 provenance/evidence/proof | generic provenance/revision string | required typed ArtifactRef;legacy prose no longer semantically valid |
 | Policy | WAL fields only,undefined pending/quiet lifetime | same WAL fields;required matching config descriptor adds pending caps/wait and quiet maximum,proposal_revision2 |
 | Book proof | ambiguous raw_record_no scope | whole homogeneous frame,complete ordered PSCO commitment,current full scope/basis and temporal bounds |
@@ -85,6 +87,14 @@ C2: warm-up progress counts applied BookUpdate OUTPUTS,not proof records/frames/
 | Warm-up | unbounded update accumulation ambiguity | capped per-output progress,freeze after Usable |
 
 No accepted wire schema is being migrated;all these contracts were and remain PROPOSED. Proposal revision2 must be reviewed as a semantic change even where byte layout is unchanged. Pure diagnostics are named in the vector catalog and shared by the corresponding spec guards;their runtime Rust representation is not frozen by documentation alone.
+
+## Targeted correction V2-WIRE-01 / V2-WIRE-02 / V2-DOC-01
+
+This is restoration of documented bytes, not a new Architecture decision or schema. After Context, Gap is `scope_kind:u8,reason:u8,target_count:u16,targets:[Target;target_count]`. Header32+Context24 fixes scope at56, reason at57, count at58..59 and targets from60. ExplicitTargets1/QueueOverflow4/count1 is `01 04 01 00`; reversed `04 01 01 00` is Unsupported for Gap.scope_kind4, not an alternative. Named full-frame positive/negative vectors have their own valid CRCs (E5F41926/35EDEBF2) so the negative case reaches the scope error. Header, record/control tags, CRC coverage and W01 are not changed; R5 accounting is retained.
+
+[DataHealth section2.1](../../specs/market-data/data-health-v1.md#21-policy-byte-tags) is the single normative SilenceRule/RecordingGate byte table, referenced by WAL ConfigDefinition and PSAD Config. Unsupported values, including0/255, do not activate a config. Supported but mismatched mirrored policy values fail explicitly rather than selecting one representation. RecordingEvidence.watermark_kind is a separate, unrenumbered enum: gate Durable3 is not watermark Written3. All nine previously reviewed mode/gate decisions and AF-C1 bytes/hashes remain unchanged.
+
+The three AF links under specs/domain now use two parent traversals from that directory. [Targeted vectors and mapping](../../specs/domain/review-vectors-v2.md#9-targeted-wire-and-link-vectors) cover restored Gap order, all policy tags/invalid tags/matching and mismatched representations, semantic gate/receipt mapping, and actual relative fixture paths. Integrator targeted review on the new head is required; the worker does not close these findings or start dependent implementation.
 
 ## Mapping / evidence / remaining questions
 
@@ -97,4 +107,4 @@ Renewed review should confirm: source/effect/control projection and CausalBasis;
 Only permitted specs,new proposal ADR,small synthetic fixture documentation and own handoff change. Root Cargo.toml/lock,toolchain1.98.1,CI,apps/radar,PROJECT_STATE,specs registry and accepted ADR-0001 stay unchanged. No numeric code is mixed into this revision;std-only remains intact.
 No connector,production book/queues/supervisor/recorder/replay,strategy/TradePlan/Telegram/execution. No performance/profitability claim. Real feed semantics BLOCKED_BY_MD_001;physical durability/loader integration downstream,not proved by Linux bootstrap CI.
 
-Next bounded step: Architecture/Integrator SHA-bound re-review in the SAME Draft PR #10. Until explicit renewed approval,event/health/WAL implementation stays stopped. D1/D2 isolated permission remains separate. Full implementation acceptance still requires real tests/CI/independent QA/owner acceptance. Issue3 and Issue6 remain open;no self-approval,merge,auto-merge,force-push or settings changes.
+Next bounded step: Integrator targeted SHA-bound review of V2-WIRE-01/02 and V2-DOC-01 in the SAME Draft PR #10. The earlier A1–A3 review request above is historical; review5417294202 resolved R1–R6/C1/C2 at design level. Until explicit design approval,event/health/WAL implementation stays stopped. D1/D2 isolated permission remains separate. Full implementation acceptance still requires real tests/CI/independent QA/owner acceptance. Issue3 and Issue6 remain open;no self-approval,merge,auto-merge,force-push or settings changes.

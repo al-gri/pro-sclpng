@@ -3,7 +3,8 @@
 Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED; not a report of executed domain tests.
 Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
 Contracts: [types](types-v1.md), [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [artifacts](artifacts-v1.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
-**Exact review traces and finding mapping:** [review-vectors-v2](review-vectors-v2.md). **Independently specified descriptor bytes:** [AF fixtures](../../../tests/fixtures/domain/artifacts-v1.md).
+**Exact review traces and finding mapping:** [review-vectors-v2](review-vectors-v2.md). **Independently specified descriptor bytes:** [AF fixtures](../../tests/fixtures/domain/artifacts-v1.md).
+**Targeted V2-WIRE-01/02 and V2-DOC-01 checks:** [byte/link vectors and mapping](review-vectors-v2.md#9-targeted-wire-and-link-vectors); policy enum encoding is defined only in [DataHealth 2.1](../market-data/data-health-v1.md#21-policy-byte-tags). Existing A1–A3 semantics and nine mode/gate decisions below are unchanged.
 
 ## 1. Checkpoint and fixture protocol
 

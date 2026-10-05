@@ -1,100 +1,83 @@
-# Handoff: SPEC-001 — revised design checkpoint
+# Handoff: SPEC-001 — targeted wire and link correction
 
-Status: **PARTIAL / DESIGN_REVIEW_REQUIRED**. All new contracts and ADR: **PROPOSED**, proposal revision2.
+Status: **PARTIAL / TARGETED_DESIGN_REVIEW_REQUIRED**. All new contracts and ADR remain **PROPOSED**, proposal revision2.
 Issue: https://github.com/al-gri/pro-sclpng/issues/3
 Same Draft PR: https://github.com/al-gri/pro-sclpng/pull/10
 Existing claim: https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5995282901
 Packet: https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559
-Role/session: WORK — SPEC-001,continuation of the same worker/branch/PR,only al-gri/pro-sclpng.
+Role/session: WORK — SPEC-001, same worker, branch and PR; only al-gri/pro-sclpng.
 Base/main: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
-Reviewed/input head: `98ecd7484f8345d6c5f162a85ff3effbd6a46a68`.
+Reviewed/input head for this iteration: `8758b3c2a8896146a14d397bd65dc18ac5a49415`.
 Branch: `feat/SPEC-001-domain-contracts`.
-Final revision head / tested source: **post-commit evidence and renewed review request in PR #10**. Do not insert a future self-referential containing-commit SHA here.
+Final head / tested source: **post-commit evidence and targeted review request in PR #10**. The future containing-commit SHA is deliberately not written into this file.
 
-## Что сделано
+## Что сделано в этой итерации
 
-Перечитаны AGENTS,packet,оба полных review и обсуждение PR/Issue3. Проверены фактические main и PR head:совпали с указанными SHA,новой numeric implementation не обнаружено. Review sources: [Integrator5415922496](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5415922496) и [Architecture5416219284](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5416219284). Никакой новый claim/branch/PR не создан,работа поверх более новой ревизии не откатывалась.
+Перечитаны AGENTS.md, полный packet и [последний Integrator review5417294202](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5417294202), фактические main/head и обсуждение PR/Issue3. SHA совпали с ожидаемыми; более новой работы не найдено. Новый claim, ветка или PR не создаются. Подготовлен один ограниченный docs-only commit поверх reviewed/input head, без переписывания истории.
 
-Architecture direction ARCHITECTURE_DIRECTION_SET / DESIGN_REVISION_REQUIRED перенесена в согласуемые specs/ADR/matrix. D1/D2 сохраняют отдельное APPROVED_FOR_ISOLATED_IMPLEMENTATION;этот commit docs-only,код numeric slice НЕ НАЧАТ и не смешан с изменением дизайна. Полная event/DataHealth/WAL реализация не разрешена этими review и не выполнялась.
+Integrator уже отметил R1–R6/C1/C2 RESOLVED **на уровне дизайна**. Это решение reviewer, не worker и не результат Rust tests. A1–A3, artifact schemas, scope proof, activation timeline, loss accounting и девять mode/gate решений не перепроектированы. Исторические подробности revision2 и её проверки сохранены в [предыдущем checkpoint](https://github.com/al-gri/pro-sclpng/pull/10#issuecomment-5997558404) и Git history. Этот handoff заменяет прежний следующий шаг на targeted review трёх текущих findings.
 
-A1: source candidate отдельно от apply effect;whole-frame proof,ordered per-stream release,current availability,barrier,at-most-once source application,bounded pending и exact negative traces.
-A2: все mode/gate сочетания,детерминированный immutable candidate,receipt в causal prefix и конечный non-WAL StorageFence без ack-рекурсии;предикат не разрешает публикацию по одному receipt.
-A3: typed content-bound ArtifactRef,точные external PSAD/PSAM/PSCO schemas,descriptor/body hashes,полная dependency closure,namespace и fail-closed loader boundary;canonical activation timeline и BootstrapContext.
-R3/R5/R6/C1/C2: finite freshness/quiet intervals,None semantics,one-use local loss windows,source-vs-local loss,shared transport initialization/fan-out,no writer rebind,capped per-output progress.
+V2-WIRE-01: восстановлен нормативный Gap body после Context: scope_kind:u8, reason:u8, target_count:u16, targets. Ошибочная перестановка в8758b3c исправлена, а не объявлена намеренной новой wire schema. Header32 + Context24 дают offsets56/57/58..59; ExplicitTargets1/QueueOverflow4/count1 кодируется01 04 01 00. Положительный и переставленный отрицательный полные100-byte frames имеют каждый собственный корректный CRC, поэтому отрицательный вектор доходит до Unsupported Gap.scope_kind4 на offset56.
 
-Все изменения предъявлены на повторный review,НЕ объявлены закрытыми findings. Новых Rust types/validators/models/codec/production runtime нет. Матрица ожидаемых outcomes не названа выполненными tests.
+V2-WIRE-02: единая нормативная таблица policy tags восстановлена в DataHealth2.1, ссылки добавлены из WAL ConfigDefinition и PSAD Config. Unsupported, включая0/255, не становится default/bootstrap policy. Поддерживаемые, но несовпадающие WAL/descriptor values отклоняются до activation. RecordingGate и RecordingEvidence.watermark_kind явно различены: Durable gate3 не равен Written watermark3. watermark_kind не перенумерован; девять mode/gate решений не меняются.
 
-## Изменённые файлы
+V2-DOC-01: три ссылки из specs/domain исправлены на ../../tests/fixtures/domain/artifacts-v1.md. Разрешение проверяется от каталога каждого документа. Все новые named vectors — ожидаемые результаты design review, не новая исполнимая модель.
 
-Семь существующих proposal-документов обновлены и три Markdown-документа добавлены:
+## Finding → исправленный раздел → named vector
+
+| Finding | Исправленный раздел | Named vector |
+|---|---|---|
+| V2-WIRE-01 | [WAL Gap](../../specs/recording/wal-v1.md#7--gap), WAL1; [ADR-0002](../adr/0002-domain-event-wal-contracts.md) targeted correction; этот handoff | V2-WIRE-GAP-ORDER; V2-WIRE-GAP-REVERSED |
+| V2-WIRE-02 | [DataHealth2.1](../../specs/market-data/data-health-v1.md#21-policy-byte-tags), WAL ConfigDefinition; [PSAD Config](../../specs/domain/artifacts-v1.md#3-definition-bodies-and-mandatory-wal-bindings) | V2-POLICY-SILENCE-ALL; V2-POLICY-GATE-ALL; V2-POLICY-SILENCE-UNSUPPORTED; V2-POLICY-GATE-UNSUPPORTED; V2-POLICY-WAL-PSAD-MATCH; V2-POLICY-WAL-PSAD-MISMATCH; V2-POLICY-NO-ORDINAL-CAST |
+| V2-DOC-01 | AF fixture links in artifacts-v1, test-matrix-v1 and review-vectors-v2 | V2-DOC-AF-LINKS |
+
+Полные bytes, offsets, поля, ошибки, state/cursor/ID/available_at expectations: [targeted vectors and mapping](../../specs/domain/review-vectors-v2.md#9-targeted-wire-and-link-vectors). Статус текущих трёх findings — SUBMITTED_FOR_REVIEW, не CLOSED автором.
+
+## Scope / изменённые файлы
+
+Семь существующих Markdown-документов, без новых файлов или кода:
 
 ```text
-specs/domain/types-v1.md
-specs/domain/test-matrix-v1.md
-specs/domain/artifacts-v1.md                 # new
-specs/domain/review-vectors-v2.md            # new
-specs/market-data/events-v1.md
-specs/market-data/data-health-v1.md
 specs/recording/wal-v1.md
-tests/fixtures/domain/artifacts-v1.md        # new,hex fixtures as documentation
+specs/market-data/data-health-v1.md
+specs/domain/artifacts-v1.md
+specs/domain/review-vectors-v2.md
+specs/domain/test-matrix-v1.md
 docs/adr/0002-domain-event-wal-contracts.md
 docs/handoffs/SPEC-001.md
 ```
 
-Только allowed paths. Root Cargo.toml/Cargo.lock,toolchain1.98.1,CI,crates/domain,apps/radar,README,PROJECT_STATE,specs/README,accepted ADR-0001 и чужие handoffs не меняются. std-only сохранён. GitHub compare после commit фиксирует окончательный scope и parentage;API objects/staging не выдаются за checkout.
+Только allowed paths. Root Cargo.toml/Cargo.lock, Rust1.98.1/toolchain, CI, crates/domain, apps/radar, README, PROJECT_STATE, specs/README, accepted ADR-0001 и чужие handoffs не изменяются. Types/events и [AF fixture bytes](../../tests/fixtures/domain/artifacts-v1.md) также не меняются в этой итерации. std-only сохранён. D1/D2 permission остаётся отдельным; numeric code не начат, зависимые event/DataHealth/WAL types/validators/models не реализованы.
 
-## Finding mapping
+WAL header, record/control tags, CRC coverage и W01 bytes/checksum сохранены. PSAD/PSAM/PSCO schemas и AF-C1 bytes/hashes не меняются. Новые полный Gap positive/negative примеры используют уже существующую раскладку, а policy table восстанавливает исчезнувшие определения, не добавляет новых вариантов enum.
 
-Подробная таблица и точные варианты: [mapping](../../specs/domain/review-vectors-v2.md#8-finding-to-change-mapping-and-remaining-review).
-
-| Finding | Изменённые разделы | Векторы | Остаётся |
-|---|---|---|---|
-| A1/R1 | events1–4;health1/3/4;WAL Control;artifacts4;ADR A1 | V-R1-* | Повторный review application/proof/frontier semantics;исполнение NOT_RUN |
-| A2/R2 | health2/5;WAL6/RecordingEvidence;ADR A2 | V-R2-* | Review candidate/fence pure boundary;реальная storage completion REC-001 |
-| R3 | health2–4;artifacts4;events7 | V-R3-* | Review exact lifetime/error rules;real-feed bounds MD-001 |
-| A3/R4 | artifacts1–5;events1/2/6;types2/3;WAL1/3/4 | V-R4-*,AF-N1/B1/C1/F1/V1 | Review exact descriptor/PSCO formats/caps;production verifier absent |
-| R5 | WAL Gap/4.1/5/ArchiveSeal;events4 | V-R5-* | Review one-window/block-on-scope-change restriction;no queue implementation |
-| R6 | health1/4;types1;WAL StreamDefinition | V-R6-* | Model execution NOT_RUN |
-| C1/C2 | types1;health1/3;events3;WAL warm-up | V-C1-WRITER,V-C2-PROGRESS/MAX | Review explicit one-writer/progress limits |
-| C3 | retained N/E/H/W matrix plus named catalog | baseline + all new named vectors | Full multi-frame/segment golden and executable assertions still pending |
-
-## Явные semantic / wire changes
-
-WAL header/kinds/field order/CRC и W01 golden НЕ изменены. Изменён смысл Token128 provenance/evidence/proof:теперь обязательные typed ArtifactRefs,не прежний prose token. Required pending/quiet fields находятся в Config descriptor,без новых WAL полей;его proposal_revision=2. Новые external PSAD descriptor,optional PSAM manifest и PSCO whole-frame output commitment описаны побайтово.
-SourceCandidateKey не EventId;effects получают apply cursor,available_at не переносится назад;as_of=CausalBasis с conservative recorded prefix. Administrative inputs имеют RecordRef,не фиктивный market EventCursor. Activation использует old Context/new-next и единый timeline через norm revisions.
-StorageFence не WAL input и не clock tick. Scope proof включает owners через immutable mappings,tag/config/norm/profile/barrier,anchor/basis и temporal bounds. GAP accounting explicit,без новых wire fields;консервативные ограничения вынесены в ADR для review,не спрятаны в codec.
-
-## Реальные проверки этой revision-сессии
+## Реальные проверки и границы evidence
 
 | Check / command | Status | Evidence / environment |
 |---|---|---|
-| AGENTS,packet,both full reviews,new discussion,main/head reads | PASS (read) | GitHub connector;не исполнение кода/тестов |
-| Shell/Git/Python availability | PASS | Linux x86_64,Python3.13.5,Bash5.2.37,Git2.47.3;Cargo/rustc/rustup отсутствуют |
-| git ls-remote только разрешённого repo/main/work branch | FAIL | exit128:Could not resolve host github.com;локального checkout нет |
-| Ручная междокументная сверка правил,links,status/provenance | PERFORMED | Найденные неоднозначности dependency list/candidate creation уточнены;не независимый QA и не автоматический link checker |
-| AF descriptor/body byte lengths + hashlib/OpenSSL SHA256 | PASS (calculation) | 5 descriptor+5 body digests согласились;Python3.13.5/OpenSSL3.5.5,native exit0;вне будущего Rust codec |
-| W01 literal bytes/length/zlib CRC | PASS (calculation) | 74bytes,header32/payload38,CRC9E02C413,без изменения golden;не recovery test |
-| Локальные cargo build/fmt/clippy/workspace test/domain test | NOT_RUN | Нет Cargo/Rust/checkout;API authoring не локальная сборка |
-| New final-head CI | NOT_RUN на момент написания handoff | Итоговые run/checks/steps/actual SHA/logs публикуются ПОСЛЕ commit в PR,не подменяются прежним run |
-| Новые numeric/event/health/WAL contract assertions/models | NOT_IMPLEMENTED / NOT_RUN | Только design revision;нет runtime approvals для зависимой реализации |
-| Windows11 x64 / PowerShell5.1 | NOT_RUN | Нет owner evidence;Linux CI не Windows |
-| Filesystem fsync/crash/power-loss,production artifact loader | NOT_RUN / OUT_OF_SCOPE | Семантика описана,но реализация/доказательства downstream |
+| AGENTS, packet, latest full review, discussion and main/head reads | PASS (read) | GitHub connector, не запуск кода |
+| Shell/Git/Python availability | PASS | Linux x86_64, Python3.13.5, Bash5.2.37, Git2.47.3; Cargo/rustc/rustup отсутствуют |
+| git ls-remote permitted repository refs | FAIL | exit128, Could not resolve host github.com; локального checkout нет |
+| Gap literal layout/length/CRC calculations | PASS (calculation), exit0 | Python struct/zlib1.3.1 плюс отдельный reflected bit-loop; оба frames100 bytes, payload64; positive CRC E5F41926, negative35EDEBF2 |
+| Policy tag/mirror/offset calculations | PASS (calculation), exit0 | 512 single-u8 membership checks, включая0/255; шесть matching field-pairs, два supported-tag mismatch примера, semantic gate/watermark mapping и девять mode/gate cells; не parser/model tests |
+| AF-C1 body and W01 | PASS (calculation), exit0 | AF-C1 body135 bytes/hash неизменен; body policy offsets83/109, соответствующие WAL offsets137/163; W01 length74/CRC9E02C413 |
+| Relative-link path resolution | PASS (path calculation), exit0 | 61 distinct document/href pairs из ручного inventory семи подготовленных документов нормализованы Python posixpath до API-read repository paths; три исправленных AF links не выходят из repo. Fragment headings сверены отдельно по тексту |
+| Local cargo build/fmt/clippy/workspace test/standalone domain test | NOT_RUN | Нет Rust/Cargo/checkout; API objects/staging не являются checkout |
+| Fresh final-head CI | NOT_RUN на момент записи этого handoff | После commit в PR публикуются новый SHA, run/check/job/step/actual checkout evidence; прежний CI не подставляется |
+| New Rust contract assertions/models/codec/resolver | NOT_IMPLEMENTED / NOT_RUN | Только documentary byte/link correction, не общее разрешение реализации |
+| Windows11 x64 / PowerShell5.1 | NOT_RUN | Owner evidence не получено; Linux CI не Windows |
+| Full multi-frame/multi-segment/all-offset recovery assertions | NOT_IMPLEMENTED / NOT_RUN | Остаются обязательны после design approval; два Gap frames не заменяют W02 |
+| Production loader/verifier, filesystem fsync/crash/power-loss/delivery | NOT_RUN / OUT_OF_SCOPE | Нет production integration и доказательств физической durability |
 
-AF descriptor/body lengths:86/23,91/27,154/135,228/172,307/245;PSCO snapshot commitment49bytes. [Fixture document](../../tests/fixtures/domain/artifacts-v1.md) сохраняет literal hex,refs,hashes и ограничения. Hashlib/OpenSSL cross-tool agreement не выдаётся за независимые криптографические реализации или proof of resolver correctness. Synthetic artifact label не нормализует production data.
+Byte calculations используют буквальные documentary bytes и обычные integer/CRC операции. Они не доказывают выполнение отсутствующего Rust decoder/state model. В частности, ожидаемые Unsupported/PolicyRepresentationMismatch и отсутствие activation — специфицированные assertions для будущих tests, а не уже исполненный repository validator. Для отрицательного полного Gap checksum действительно пересчитан и согласован двумя методами; он не маскирует scope error.
 
-Исторический КП1 CI:run37319070087 на reviewed98ecd748...,15 BOOT-001 CLI tests/domain0,Ubuntu24.04.5/Rust1.98.1. Это прежнее evidence,НЕ новый run этой ревизии. Push-run37307781420 относится только к base. Новые фактические проверки/точный SHA фиксируются в PR после последнего commit,без self-hash в handoff.
+Link-check inventory составлен по прочитанным и подготовленным текстам; это не автоматический Markdown parser, не checkout и не crawler внешних URL. Существование target paths сверено с GitHub reads/tree, fragment headings — с соответствующими разделами. Попытка files.materialize для GitHub response не дала файл; отсутствующий container copy не выдан за скачанный checkout.
 
-## Deviations / ограничения / открытые вопросы
-
-Локальный GitHub DNS недоступен;authoring через GitHub objects и обычное fast-forward обновление ТОЛЬКО рабочей ветки. Отдельный clean checkout и Rust execution предоставляет existing CI. Никаких изменений workflow ради docs-only check. Недоступные локальные/Windows проверки не заменяются чтением CI metadata.
-
-Review нужен по точной новой поверхности,а не только по совпадению терминов A1–A3:projection/control identities,CausalBasis,frame-release atomicity/equivalence/pending caps;детерминированное создание/supersession candidates и final-fence diagnostics;binary descriptor/PSCO schemas/implicit scoped dependencies;one unresolved loss window и ошибка при scope change до правой границы. Findings не закрыты самостоятельно.
-
-MD-001(#4):real Bitget identity/units/increments/sequence/zero/aggressor/RPI/time/resync/quiet/timeout proofs остаются UNKNOWN/BLOCKED_BY_MD_001. Это не блокирует независимые generic contracts. QA-001(#6):independent review/implementation acceptance ещё впереди;не закрывать. Required-check/settings concern из packet остаётся owner/integration responsibility,настройки не менялись.
+Исторический CI на reviewed/input8758b3c: run37332206907, 15 BOOT-001 CLI tests/domain0. Он НЕ проверяет новый commit. Новое CI evidence фиксируется только после последнего commit в PR, без self-referential hash в handoff. Existing workspace CI проверяет bootstrap, а не корректность новых документированных контрактов.
 
 ## PowerShell 5.1 — owner commands, NOT_RUN
 
-Из отдельного чистого checkout final SHA из PR,с установленными Git/Rustup1.98.1,rustfmt/clippy и linker. $LASTEXITCODE проверяется сразу после каждой native-команды;Bash export/&& не используются.
+Из отдельного чистого checkout final SHA из PR, с установленными Git/Rustup1.98.1,rustfmt/clippy и linker. $LASTEXITCODE проверяется сразу после каждой native-команды; Bash export/&& не используются.
 
 ```powershell
 $ErrorActionPreference = 'Stop'
@@ -141,12 +124,12 @@ if ($LASTEXITCODE -ne 0) { throw 'Final status failed' }
 if ($status) { throw 'Final checkout dirty' }
 ```
 
-Команды не запускались на Windows. Нужны exact SHA/OS/target/toolchain/exit codes/logs,а не отсутствие сообщения об ошибке.
+Команды не запускались на Windows. Нужны exact SHA/OS/target/toolchain/exit codes/logs, а не отсутствие сообщения об ошибке.
 
-## Артефакты / следующий один шаг / замена чата
+## Открытые вопросы / следующий один шаг / замена чата
 
-Все design decisions,точные vectors/fixture bytes и remaining questions находятся в перечисленных Git-docs и PR10. Локальный каталог расчётов не считается checkout и не является единственным источником fixture bytes. Никаких секретов или иных репозиториев.
+Требуется targeted SHA-bound review Integrator только по V2-WIRE-01, V2-WIRE-02 и V2-DOC-01 в том же Draft PR10. Нового межмодульного вопроса A1–A3 не предлагается. До явного design approval зависимая реализация остановлена. D1/D2 permission не расширять на остальной API.
 
-**Следующий bounded шаг: Architecture/Integrator повторно проверяет revision2 на новом head PR10 и явно разрешает согласованный дизайн либо задаёт дальнейшие исправления. До этого event/DataHealth/WAL implementation остановлена.** Merge не запрошен/не выполнен,Issue3/6 остаются open.
+MD-001(#4) по-прежнему отвечает за реальные Bitget meanings/profiles; непроверенное UNKNOWN/BLOCKED_BY_MD_001 не заменено synthetic evidence. Полный QA конкретной будущей реализации и owner acceptance остаются отдельными gates. Настройки/required-check concern из packet — owner/integration responsibility, не задача этого commit.
 
-Новый worker читает AGENTS,packet,оба review,final-head PR evidence,ADR,specs,matrix/review-vectors и этот handoff. D1/D2 разрешение не расширять на остальной API. Handoff принимает Integrator/owner,не его автор. Отдельного numeric code/незакоммиченной реализации для переноса нет.
+Все нужные literal vectors, schema corrections, mapping и результаты сохранены в Git/PR; локальные расчёты не единственный источник bytes. Новый worker читает AGENTS,packet,review5417294202,последний targeted request/final-head CI,ADR/specs и этот handoff. Никаких секретов, иных репозиториев, production loader/recorder/connector/book/replay/strategy/execution. Issues3/6 не закрываются; merge,auto-merge,force-push и изменение настроек не выполняются. Handoff принимает Integrator/owner, не его автор.

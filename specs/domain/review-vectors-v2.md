@@ -133,7 +133,7 @@ V-R4-TIMELINE: independent valid prefix establishes a trade stream3 whose synthe
 | V-R4-GRAMMAR | uppercase digest, wrong prefix,63/65 hex digits,whitespace/nonhex | InvalidArtifactRef, no resolution attempt |
 | V-R4-CLOSURE | missing dependency,cycle,duplicate/unsorted refs or cap overflow | MissingArtifact / ArtifactDependencyCycle / InvalidArtifactDependencies / ArtifactTooLarge respectively; no partial canonical success |
 
-[AF fixtures](../../../tests/fixtures/domain/artifacts-v1.md) supply exact descriptor/body lengths/refs; they are not complete archive golden bytes. A digest-valid artifact with wrong scope still fails the applicable proof guard. The fixture resolver cannot confer real SHA computation or Bitget verification on production code.
+[AF fixtures](../../tests/fixtures/domain/artifacts-v1.md) supply exact descriptor/body lengths/refs; they are not complete archive golden bytes. A digest-valid artifact with wrong scope still fails the applicable proof guard. The fixture resolver cannot confer real SHA computation or Bitget verification on production code.
 
 ## 6. R5 — one-use local loss accounting
 
@@ -175,7 +175,7 @@ V-C2-MAX: min_updates=u32::MAX,progress=MAX-1,Warming,valid anchor/witness prere
 
 ## 8. Finding-to-change mapping and remaining review
 
-All rows are **SUBMITTED_FOR_REVIEW**, not closed by the worker.
+Historical revision2 submission mapping follows. [Integrator review5417294202](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5417294202) subsequently marked R1–R6/C1/C2 RESOLVED at design level, not as executed Rust tests. Those semantics and vectors are unchanged in this targeted correction. Current V2-WIRE-01/02 and V2-DOC-01 remain SUBMITTED_FOR_REVIEW in section9; the worker does not close them.
 
 | Finding | Changed sections | Named vectors | What remains unresolved / unproved |
 |---|---|---|---|
@@ -190,3 +190,72 @@ All rows are **SUBMITTED_FOR_REVIEW**, not closed by the worker.
 | C3 | matrix retained baseline plus this exact outcome catalog | N/E/H/W baseline;all named vectors here | Independent multi-frame/multi-segment golden, all byte cuts and full Rust assertions still required after approval |
 
 This catalog supplies exact logical state/cursor/ID expectations; byte offsets for not-yet-encoded full traces are intentionally NOT fabricated. Descriptor bytes are independently frozen in AF fixtures; W01 alone is not a full replay/recovery golden. Renewed review must be SHA-bound in the SAME Draft PR #10 before dependent implementation.
+
+## 9. Targeted wire and link vectors
+
+Scope: V2-WIRE-01, V2-WIRE-02 and V2-DOC-01 only, based on review5417294202 at `8758b3c2a8896146a14d397bd65dc18ac5a49415`. Status PROPOSED / SUBMITTED_FOR_REVIEW. These documentary vectors add no codec, schema or function. A1–A3/R1–R6/C1/C2 semantics are retained. All byte offsets below are zero-based; hex dump row labels are hexadecimal, prose offsets decimal.
+
+### V2-WIRE-GAP-ORDER
+
+Use I/P1 after valid r10 RawSnapshot(attempt1,sample10): semantic prefix10, evaluation10, f=1,window=None,pending=[10],BInvalid(SourceGap),FUnknown,RHealthy,barrier9,anchor=None,progress0,witness=None,last_data=None,L=None. All definitions/artifacts are resolved as the synthetic precondition; their prefix bytes are NOT claimed below. This is one complete Gap frame r11 in segment0, not a complete archive.
+
+Expected header: frame_version1,record_schema_version1,record_kind7,flags0,payload_len64,RecordNo11,SegmentNo0,reserved0. Context=(unix_ns11,monotonic_ns11,config1,norm1). Gap.scope_kind at56=1 (ExplicitTargets),reason at57=4 (QueueOverflow),count at58..59=1 LE; first Target at60: StreamId1,tag(spec1,connection_epoch1,subscription_epoch1,book_epochSome1),first/last/count all None. Target36 bytes; payload24+4+36=64; total32+64+4=100. Exact bytes:
+
+```text
+0000: 50 53 52 57 01 00 01 00 07 00 00 00 40 00 00 00
+0010: 0b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0020: 0b 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00
+0030: 01 00 00 00 01 00 00 00 01 04 01 00 01 00 00 00
+0040: 01 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00
+0050: 00 00 00 00 01 01 00 00 00 00 00 00 00 00 00 00
+0060: 26 19 f4 e5
+```
+
+CRC(header+payload)=0xE5F41926, trailer at96..99=`26 19 f4 e5`. Expected no parse/accounting error; semantic InputCursor11,evaluation11,barrier11,BInvalid(QueueOverflow),FUnknown,RDegraded(QueueOverflow),pending=[],anchor=None,progress0,witness=None,last_data=None,f1,window=(gap11,left1,tag1,countNone). TUp and ordinary versions unchanged. Market IDs/cursors/available_at=[],L=None,publication_permit=false. The administrative identity is RecordRef(A,11), not a market EventId. If frame start is O, last_good_offset becomes O+100; no absolute prefix length is fabricated. EOF here is not Complete and the open loss window remains unresolved.
+
+### V2-WIRE-GAP-REVERSED
+
+Same independent initial state/header/target, but swap ONLY bytes56/57 and recompute the trailer for the changed protected bytes. Exact negative frame:
+
+```text
+0000: 50 53 52 57 01 00 01 00 07 00 00 00 40 00 00 00
+0010: 0b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0020: 0b 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00
+0030: 01 00 00 00 01 00 00 00 04 01 01 00 01 00 00 00
+0040: 01 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00
+0050: 00 00 00 00 01 01 00 00 00 00 00 00 00 00 00 00
+0060: f2 eb ed 35
+```
+
+CRC=0x35EDEBF2, correct trailer=`f2 eb ed 35`; checksum validation succeeds. Prefix56..59=`04 01 01 00` would read scope4,reason1,count1, but scope4 is rejected immediately: **Unsupported(field=Gap.scope_kind,value=4,frame_offset=56)**, NOT ChecksumMismatch. No target/accounting/health transition is committed: f1/windowNone,pending[10],barrier9,BInvalid(SourceGap),FUnknown,RHealthy,anchorNone,progress0,witnessNone,last_dataNone retained; semantic prefix/evaluation stay10 and interpretation becomes Blocked(Unsupported). Market IDs/cursors/available_at=[],L=None,permit=false. last_good_offset=O, not O+100. Invalid scope is not a SourceGap or a local-loss authorization.
+
+### Policy field-view vectors
+
+Normative table: [DataHealth 2.1](../market-data/data-health-v1.md#21-policy-byte-tags). Each row below is an independent synthetic fixture with valid enclosing grammar, matching other fields and resolved dependencies. These are policy field views, NOT complete encoded config frames/descriptor variants. For later full mutation fixtures, frame CRC and descriptor/body lengths, hashes and refs must correspond to changed bytes so failures reach the stated policy guard; never mutate AF-C1 while keeping its old digest. The original AF-C1 remains unchanged.
+
+Initial policy-test prefix10 is administrative with BootstrapContext, no active config and no pending/data/candidate. First ConfigDefinition r11 uses BootstrapContext and defines Config1/Norm1; required normalizer/spec/profile prerequisites are supplied as appropriate. Use Buffered mode to avoid masking tag/mirror tests with a mode/gate incompatibility. All other policy values match AF-C1, including finite deadlineSome100. A successful config applies from12, after processing11, and still creates no market event/candidate; no data resync has occurred. Invalid config leaves the active configuration absent and semantic prefix/evaluation at10, blocks interpretation, and emits no IDs/cursors/available_at or permit.
+
+| Named vector | Field bytes / variants | Exact expected |
+|---|---|---|
+| V2-POLICY-SILENCE-ALL | silence_rule=01 then02 in separate matched WAL/Config body fixtures | Decode UnknownOnSilence then StaleAfterDeadline; finite deadline100 satisfies both. Config1/Norm1 active for12, semantic cursor11; no error or market effects |
+| V2-POLICY-GATE-ALL | recording_gate=01,02,03 in separate matched fixtures | Decode Written,Flushed,Durable; all valid under Buffered, config active for12, semantic cursor11; no error or market effects |
+| V2-POLICY-SILENCE-UNSUPPORTED | every u8 outside {1,2}, explicitly00/ff; mutate WAL only, body only, or both equally | Unsupported(field=Config.silence_rule,value=x) in offending representation, no activation. Equal unsupported bytes in both do not become valid |
+| V2-POLICY-GATE-UNSUPPORTED | every u8 outside {1,2,3}, explicitly00/ff; same three mutation locations | Unsupported(field=Config.recording_gate,value=x), no activation; no Unknown/bootstrap/default coercion |
+| V2-POLICY-WAL-PSAD-MATCH | all six pairs (silence,gate)=(01,01),(01,02),(01,03),(02,01),(02,02),(02,03), mirrored exactly | Both representations decode identically; Config activates for12 under Buffered. Pair notation names two separate fields, not two adjacent bytes. Original AF-C1 specifically uses (01,03) |
+| V2-POLICY-WAL-PSAD-MISMATCH | WAL silence02 vs body01, gate03 in both; separately WAL gate01 vs body03, silence01 in both | InvalidPayload(field=Config.silence_rule or Config.recording_gate respectively,detail=PolicyRepresentationMismatch); each tag individually supported and mode-compatible, but no activation or fallback to either representation |
+
+For the literal AF-C1 layout: normalizer_ref and ConfigDefinition.evidence are each71 ASCII bytes plus one length byte. PSAD Config BODY offsets are silence_rule83 and recording_gate109 (body length135); WAL Config frame offsets are silence_rule137 and recording_gate163 (header32+Context24 included). These offsets are specific to the stated Some-valued option layout, not universal offsets for variable-length Config bodies. Expected field bytes at both pairs of offsets are01/03. The body SHA256 stays `d3827df81929780ebd89539b091c14a2873f9934743947c080d01a7211544546`. Offending policy-tag errors identify the corresponding field/representation/offset from this layout; body offsets are NOT PSAD descriptor-header offsets.
+
+V2-POLICY-NO-ORDINAL-CAST: decoded gate byte03 is Durable; decoded RecordingEvidence.watermark_kind byte03 is Written. With baseline P's current candidate PC(A,21,1) requiring Durable, a known Written receipt through20 and final typed Written fence through21 cannot satisfy Durable: permit=false,FenceTooWeak. Candidate ID/content/frontier/availability remain unchanged; no new analytical input or effect. The required semantic pairs are gate Written1 -> watermark Written3, Flushed2 -> Flushed4, Durable3 -> Durable5. Compare achieved semantic levels, never raw ordinal equality. V-R2-MODE-GATE's nine cells and all receipt/fence semantics remain unchanged.
+
+### V2-DOC-AF-LINKS and finding mapping
+
+From each actual directory of specs/domain/artifacts-v1.md, specs/domain/test-matrix-v1.md and this file, `../../tests/fixtures/domain/artifacts-v1.md` resolves to exactly the existing repository path `tests/fixtures/domain/artifacts-v1.md`. The former three-parent form escapes the repository root and is not used as a link. Resolve each relative target against its containing document, not against the repository root or the current shell directory.
+
+| Finding | Corrected section | Named vector |
+|---|---|---|
+| V2-WIRE-01 | WAL1 and4 Gap; ADR targeted correction; handoff current checkpoint | V2-WIRE-GAP-ORDER, V2-WIRE-GAP-REVERSED |
+| V2-WIRE-02 | health2.1 normative tags; WAL4 ConfigDefinition and artifacts3 references; ADR/handoff | V2-POLICY-SILENCE-ALL, V2-POLICY-GATE-ALL, V2-POLICY-SILENCE-UNSUPPORTED, V2-POLICY-GATE-UNSUPPORTED, V2-POLICY-WAL-PSAD-MATCH, V2-POLICY-WAL-PSAD-MISMATCH, V2-POLICY-NO-ORDINAL-CAST |
+| V2-DOC-01 | AF fixture links in artifacts-v1, test-matrix-v1, review-vectors-v2 | V2-DOC-AF-LINKS |
+
+Documentary byte calculations (Python struct/zlib plus reflected CRC loop) checked both100-byte frames, their independent trailers, and the AF-C1 field offsets/body hash; no Rust parser/model was executed. Relative-link checks and CI evidence for the final containing commit are recorded in the PR after commit. Targeted findings await Integrator review; all contracts remain PROPOSED. Full archive/multisegment recovery goldens, executable contract tests and real verifier/storage checks remain NOT_IMPLEMENTED/NOT_RUN as previously scoped.
