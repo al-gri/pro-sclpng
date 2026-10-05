@@ -50,10 +50,10 @@ impl HealthModel {
                 spec.numeric.fields().reference.ensure_same(&definition.binding.spec)?;
                 let body = env.profile(definition.provenance, self.start.archive)?;
                 Self::match_profile(&definition.binding, &body)?;
-                if let Some((_, config)) = &self.config {
-                    if !body.supported_normalizers.contains(&config.normalizer_ref) {
-                        return Err(ArtifactError::UnsupportedNormalizerBinding.into());
-                    }
+                if let Some((_, config)) = &self.config
+                    && !body.supported_normalizers.contains(&config.normalizer_ref)
+                {
+                    return Err(ArtifactError::UnsupportedNormalizerBinding.into());
                 }
             }
             Record::ConfigDefinition(definition) => {

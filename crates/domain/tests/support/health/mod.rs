@@ -369,11 +369,11 @@ impl HealthModel {
     }
 
     fn refresh_freshness(&self, state: &mut StreamState, policy: HealthPolicy, at: RecordNo, out: &mut StepResult) {
-        if let Some(quiet) = &state.quiet {
-            if self.evaluation_ns < quiet.expires_ns {
-                state.freshness = Freshness::QuietVerified;
-                return;
-            }
+        if let Some(quiet) = &state.quiet
+            && self.evaluation_ns < quiet.expires_ns
+        {
+            state.freshness = Freshness::QuietVerified;
+            return;
         }
         state.quiet = None;
         let (value, diagnostic) = ordinary_freshness(

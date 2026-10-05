@@ -78,10 +78,10 @@ impl Recovery {
         };
         // Preserve the last accepted data/prefix while explicitly disabling
         // canonical use. Detailed byte diagnostics live in failure, not a GAP.
-        if let Some(model) = &mut self.model {
-            if model.blocked.is_none() {
-                model.blocked = Some(ModelError::Record(RecordError::InvalidPayload("WAL.input")));
-            }
+        if let Some(model) = &mut self.model
+            && model.blocked.is_none()
+        {
+            model.blocked = Some(ModelError::Record(RecordError::InvalidPayload("WAL.input")));
         }
         self.failure = Some(Failure {
             segment,
@@ -185,8 +185,11 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
             }
             let chain_ok = match &frame.value {
                 Record::ArchiveStart(_) => global_count == 0 && absolute == 0,
-                Record::SegmentStart(start) => {
-                    let valid = out.model.as_ref().zip(seal.as_ref()).is_some_and(|(m, s)| {
+                Record::SegmentStart(start) => out
+                    .model
+                    .as_ref()
+                    .zip(seal.as_ref())
+                    .is_some_and(|(m, s)| {
                         start.archive == m.start.archive
                             && start.session == m.start.session
                             && start.clock == m.start.clock
@@ -196,9 +199,7 @@ pub fn recover(segments: &[&[u8]], env: ModelEnv) -> Recovery {
                             && start.previous_seal_crc32 == s.checksum
                             && !s.final_segment
                             && local == 0
-                    });
-                    valid
-                }
+                    }),
                 Record::SegmentSeal(value) => {
                     value.prefix_frame_count == local_count
                         && u64::try_from(local).ok() == Some(value.prefix_physical_len)

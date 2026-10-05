@@ -2,7 +2,6 @@
 //! fixture dictionary, NOT a SHA algorithm or production artifact loader.
 
 use domain::artifact::{ArtifactError, ArtifactKind, ArtifactRef};
-use domain::event::*;
 use domain::identity::*;
 
 use super::artifact_bodies::{Body, decode_body};
