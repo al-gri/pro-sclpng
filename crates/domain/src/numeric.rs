@@ -72,9 +72,7 @@ impl ExactDecimal {
         if scale > MAX_DECIMAL_SCALE {
             return Err(NumericError::ScaleTooLarge);
         }
-        if (coefficient == 0 && scale != 0)
-            || (scale > 0 && coefficient.is_multiple_of(10))
-        {
+        if (coefficient == 0 && scale != 0) || (scale > 0 && coefficient.is_multiple_of(10)) {
             return Err(NumericError::NonCanonicalDecimal);
         }
         Ok(Self { coefficient, scale })
@@ -264,9 +262,17 @@ impl QuantitySteps {
         Ok(self)
     }
 
-    pub fn to_base(self, step: ExactDecimal, multiplier: Option<ExactDecimal>) -> Result<ExactDecimal> {
+    pub fn to_base(
+        self,
+        step: ExactDecimal,
+        multiplier: Option<ExactDecimal>,
+    ) -> Result<ExactDecimal> {
         let multiplier = checked_multiplier(step, multiplier)?;
-        let a = multiply(u128::from(self.0), step.coefficient, Operation::QuantityMultiply)?;
+        let a = multiply(
+            u128::from(self.0),
+            step.coefficient,
+            Operation::QuantityMultiply,
+        )?;
         let b = multiply(a, multiplier.coefficient, Operation::MultiplierMultiply)?;
         let scale = step
             .scale

@@ -5,4 +5,6 @@
 
 #![forbid(unsafe_code)]
 
+pub mod identity;
 pub mod numeric;
+pub mod qualified;
