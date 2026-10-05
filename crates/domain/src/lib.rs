@@ -5,6 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod artifact;
+pub mod event;
 pub mod identity;
 pub mod numeric;
+pub mod policy;
 pub mod qualified;
