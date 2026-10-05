@@ -45,8 +45,7 @@ fn af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes() {
     let crlf = lf.replace('\n', "\r\n");
 
     for id in ["AF-N1", "AF-B1", "AF-C1", "AF-F1", "AF-V1"] {
-        let (native_descriptor, native_body) =
-            frozen::markdown_artifact_bytes(frozen::AF_MD, id);
+        let (native_descriptor, native_body) = frozen::markdown_artifact_bytes(frozen::AF_MD, id);
         let (lf_descriptor, lf_body) = frozen::markdown_artifact_bytes(&lf, id);
         let (crlf_descriptor, crlf_body) = frozen::markdown_artifact_bytes(&crlf, id);
         let original = frozen::original(id);
