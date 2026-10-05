@@ -3,6 +3,8 @@
 
 pub mod support;
 
+#[path = "cases/accounting.rs"]
+mod accounting;
 #[path = "cases/artifacts.rs"]
 mod artifacts;
 #[path = "cases/events.rs"]
@@ -11,3 +13,7 @@ mod events;
 mod health;
 #[path = "cases/policy.rs"]
 mod policy;
+#[path = "cases/publication.rs"]
+mod publication;
+#[path = "cases/shared.rs"]
+mod shared;

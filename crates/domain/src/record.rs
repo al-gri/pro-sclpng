@@ -222,17 +222,41 @@ pub struct RawInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EpochChange {
-    Connection { owner: ConnectionId, expected: ConnectionEpoch, next: ConnectionEpoch },
-    Subscription { owner: StreamId, expected: SubscriptionEpoch, next: SubscriptionEpoch },
-    Book { owner: BookId, expected: BookEpoch, next: BookEpoch },
+    Connection {
+        owner: ConnectionId,
+        expected: ConnectionEpoch,
+        next: ConnectionEpoch,
+    },
+    Subscription {
+        owner: StreamId,
+        expected: SubscriptionEpoch,
+        next: SubscriptionEpoch,
+    },
+    Book {
+        owner: BookId,
+        expected: BookEpoch,
+        next: BookEpoch,
+    },
 }
 
 impl EpochChange {
     pub fn wire_parts(&self) -> (u8, u32, u64, u64) {
         match *self {
-            Self::Connection { owner, expected, next } => (1, owner.get(), expected.get(), next.get()),
-            Self::Subscription { owner, expected, next } => (2, owner.get(), expected.get(), next.get()),
-            Self::Book { owner, expected, next } => (3, owner.get(), expected.get(), next.get()),
+            Self::Connection {
+                owner,
+                expected,
+                next,
+            } => (1, owner.get(), expected.get(), next.get()),
+            Self::Subscription {
+                owner,
+                expected,
+                next,
+            } => (2, owner.get(), expected.get(), next.get()),
+            Self::Book {
+                owner,
+                expected,
+                next,
+            } => (3, owner.get(), expected.get(), next.get()),
         }
     }
 }
@@ -276,10 +300,25 @@ pub struct RecordingEvidence {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Control {
-    Timer { stream: StreamId, timer_id: u64, deadline_ns: u64 },
-    Transport { connection: ConnectionId, epoch: ConnectionEpoch, value: Transport },
-    EpochAdvance { change: EpochChange, reason: Reason },
-    SpecActivate { slot: InstrumentSlot, expected: SpecVersion, next: SpecVersion },
+    Timer {
+        stream: StreamId,
+        timer_id: u64,
+        deadline_ns: u64,
+    },
+    Transport {
+        connection: ConnectionId,
+        epoch: ConnectionEpoch,
+        value: Transport,
+    },
+    EpochAdvance {
+        change: EpochChange,
+        reason: Reason,
+    },
+    SpecActivate {
+        slot: InstrumentSlot,
+        expected: SpecVersion,
+        next: SpecVersion,
+    },
     Verification(VerificationEvidence),
     Warmup(WarmupEvidence),
     Freshness(FreshnessEvidence),
@@ -324,7 +363,10 @@ impl GapTarget {
             return Err(RecordError::InvalidLossScope);
         }
         if let Some((first, last)) = self.range {
-            let count = last.get().checked_sub(first.get()).and_then(|n| n.checked_add(1));
+            let count = last
+                .get()
+                .checked_sub(first.get())
+                .and_then(|n| n.checked_add(1));
             let count = count.ok_or(RecordError::InvalidLossCount)?;
             if self.loss_count != Some(count) {
                 return Err(RecordError::LossCountMismatch);
@@ -365,7 +407,10 @@ impl Gap {
             if targets.is_empty() || targets.len() > 256 {
                 return Err(RecordError::InvalidPayload("Gap.target_count"));
             }
-            if targets.windows(2).any(|pair| pair[0].stream >= pair[1].stream) {
+            if targets
+                .windows(2)
+                .any(|pair| pair[0].stream >= pair[1].stream)
+            {
                 return Err(RecordError::InvalidPayload("Gap.targets_order"));
             }
             for target in targets {
@@ -458,10 +503,12 @@ pub struct RecordFrame {
 
 impl RecordFrame {
     pub fn validate_shape(&self) -> Result<()> {
-        if let Some(context) = self.value.context() {
-            if context.context == InputContext::Bootstrap && !(2..=4).contains(&self.value.kind().tag()) {
-                return Err(EventError::InvalidBootstrapContext.into());
-            }
+        let bootstrap = self
+            .value
+            .context()
+            .is_some_and(|context| context.context == InputContext::Bootstrap);
+        if bootstrap && !(2..=4).contains(&self.value.kind().tag()) {
+            return Err(EventError::InvalidBootstrapContext.into());
         }
         match &self.value {
             Record::ArchiveStart(start) => {
@@ -480,7 +527,11 @@ impl RecordFrame {
                 }
             }
             Record::Control(value) => match &value.value {
-                Control::Timer { timer_id, deadline_ns, .. } => {
+                Control::Timer {
+                    timer_id,
+                    deadline_ns,
+                    ..
+                } => {
                     if *timer_id == 0 || value.context.monotonic_ns.get() < *deadline_ns {
                         return Err(RecordError::InvalidPayload("TimerFired.deadline"));
                     }
@@ -499,10 +550,11 @@ impl RecordFrame {
                         return Err(IdentityError::SpecMismatch.into());
                     }
                 }
-                Control::Recording(evidence) => {
-                    if evidence.reason == Reason::NoFault && evidence.health != RecordingHealth::Healthy {
-                        return Err(RecordError::InvalidPayload("RecordingEvidence.reason"));
-                    }
+                Control::Recording(evidence)
+                    if evidence.reason == Reason::NoFault
+                        && evidence.health != RecordingHealth::Healthy =>
+                {
+                    return Err(RecordError::InvalidPayload("RecordingEvidence.reason"));
                 }
                 _ => {}
             },

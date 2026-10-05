@@ -37,10 +37,18 @@ impl Watermarks {
     }
 
     pub fn validate(&self) -> Result<(), ReceiptError> {
-        let ordered = [self.accepted, self.appended, self.written, self.flushed, self.durable];
+        let ordered = [
+            self.accepted,
+            self.appended,
+            self.written,
+            self.flushed,
+            self.durable,
+        ];
         for pair in ordered.windows(2) {
             match (pair[0], pair[1]) {
-                (Some(weak), Some(strong)) if strong > weak => return Err(ReceiptError::WatermarkOrderError),
+                (Some(weak), Some(strong)) if strong > weak => {
+                    return Err(ReceiptError::WatermarkOrderError);
+                }
                 (None, Some(_)) => return Err(ReceiptError::WatermarkOrderError),
                 _ => {}
             }
@@ -73,7 +81,7 @@ impl Watermarks {
         let mut next = self.clone();
         // These are trusted synthetic observations. A stronger success includes
         // its weaker prefix; no weaker observation invents stronger completion.
-        let mut raise = |slot: &mut Option<RecordNo>| {
+        let raise = |slot: &mut Option<RecordNo>| {
             *slot = Some(slot.map_or(through, |old| old.max(through)));
         };
         raise(&mut next.accepted);
@@ -216,7 +224,10 @@ pub fn publication_permit(
     if state.recording != RecordingHealth::Healthy {
         return Err(PermitError::RecordingNotHealthy);
     }
-    state.mode.validate_gate(requested.projection.gate).map_err(PermitError::Configuration)?;
+    state
+        .mode
+        .validate_gate(requested.projection.gate)
+        .map_err(PermitError::Configuration)?;
     let fence = completion.ok_or(PermitError::FenceMissing)?;
     if fence.archive != requested.id.archive || fence.session != state.scope.clock.session {
         return Err(PermitError::FenceScopeMismatch);
@@ -225,14 +236,19 @@ pub fn publication_permit(
         return Err(PermitError::FenceTooWeak);
     }
     let (Some(through), Some(achieved), Some(accepted)) = (
-        fence.through, fence.known_achieved_prefix, fence.known_accepted_prefix,
+        fence.through,
+        fence.known_achieved_prefix,
+        fence.known_accepted_prefix,
     ) else {
         return Err(PermitError::UnverifiedStorageCompletion);
     };
     if !fence.explicitly_attested || !fence.continuous_prefix {
         return Err(PermitError::UnverifiedStorageCompletion);
     }
-    if fence.previous_reported_prefix.is_some_and(|previous| through < previous) {
+    if fence
+        .previous_reported_prefix
+        .is_some_and(|previous| through < previous)
+    {
         return Err(PermitError::WatermarkRegression);
     }
     if through > achieved || achieved > accepted {
