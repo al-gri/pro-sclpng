@@ -60,7 +60,11 @@ fn main() -> ExitCode {
 
     // Validate the entire command line before emitting any success output.
     // Neither supported mode creates connections, signals, or background work.
-    match writeln!(io::stdout().lock(), "mode={} execution=disabled", mode.label()) {
+    match writeln!(
+        io::stdout().lock(),
+        "mode={} execution=disabled",
+        mode.label()
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             report_error(&format!("cannot write status: {error}"));
