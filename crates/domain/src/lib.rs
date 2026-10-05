@@ -11,3 +11,4 @@ pub mod identity;
 pub mod numeric;
 pub mod policy;
 pub mod qualified;
+pub mod record;

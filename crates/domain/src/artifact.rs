@@ -61,7 +61,8 @@ impl FromStr for ArtifactRef {
             return Err(ArtifactError::InvalidArtifactRef);
         }
         let mut digest = [0_u8; 32];
-        for (slot, pair) in digest.iter_mut().zip(bytes[7..].chunks_exact(2)) {
+        let (pairs, _) = bytes[7..].as_chunks::<2>();
+        for (slot, pair) in digest.iter_mut().zip(pairs) {
             let high = hex_digit(pair[0])?;
             let low = hex_digit(pair[1])?;
             *slot = high * 16 + low;
@@ -209,10 +210,16 @@ impl ArtifactMetadata {
         optional_basis: &[ArtifactRef],
     ) -> Result<()> {
         self.validate()?;
+        if required.len() > MAX_DEPENDENCIES || optional_basis.len() > MAX_DEPENDENCIES {
+            return Err(ArtifactError::ArtifactTooLarge);
+        }
         let mut expected = required.to_vec();
         expected.extend_from_slice(optional_basis);
         expected.sort_unstable();
         expected.dedup();
+        if expected.len() > MAX_DEPENDENCIES {
+            return Err(ArtifactError::ArtifactTooLarge);
+        }
         if expected != self.dependencies {
             return Err(ArtifactError::InvalidArtifactDependencies);
         }

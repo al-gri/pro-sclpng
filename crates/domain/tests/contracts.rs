@@ -3,9 +3,11 @@
 
 pub mod support;
 
-#[path = "cases/events.rs"]
-mod events;
 #[path = "cases/artifacts.rs"]
 mod artifacts;
+#[path = "cases/events.rs"]
+mod events;
+#[path = "cases/health.rs"]
+mod health;
 #[path = "cases/policy.rs"]
 mod policy;
