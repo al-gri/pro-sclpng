@@ -1,124 +1,158 @@
-# Handoff: SPEC-001 — implementation in progress
+# Handoff: SPEC-001 — implementation continuation
 
-Status: **PARTIAL / NOT_READY_FOR_QA**. All new contracts and ADR remain **PROPOSED**.
-Repository: al-gri/pro-sclpng only. Same worker, Issue3, branch and Draft PR10.
-[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Existing claim](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5995282901) · [PR10](https://github.com/al-gri/pro-sclpng/pull/10).
-Base/main: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
-Branch: `feat/SPEC-001-domain-contracts`.
-[Implementation approval5418412674](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674) applies to design `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
-Input implementation head of this continuation: `c393439dc90ec381479889303f415d8725da68d8`.
-The containing/final head and its actual CI evidence are recorded POST-COMMIT in PR10, not self-referentially in this file.
+Status: **PARTIAL / FINAL_VERIFICATION_PENDING**. All new contracts and ADR remain **PROPOSED**.
+Repository: `al-gri/pro-sclpng` only. Same Issue #3, branch `feat/SPEC-001-domain-contracts`, Draft PR #10.
+[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674).
+Base/main remains `6c520237d35865c79dba9e74fa64bd4c2c9e419f`. Approved design revision: `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
+This file deliberately does not embed its own containing commit SHA; exact final head and CI are recorded post-commit in PR #10.
 
-## Current implementation, not a design-only checkpoint
+## Evidence correction retained
 
-Five implementation commits are preserved after design approval: numeric4a7ab227, qualified/identity a57752f6, envelope/artifact/policy4478454a, DataHealth e99ab818, accounting/publication/shared tests c393439d. No rollback or history rewriting.
+The earlier PARTIAL report incorrectly cited run `37363552027`; a fresh API read returned 404. The historical report remains visible. The corrected exact-`c393439d...` run is [37363320459](https://github.com/al-gri/pro-sclpng/actions/runs/37363320459): workflow conclusion `failure`; rust-tests job `111953533746` completed/success; rust-clippy `111953532296` and rust-fmt `111953532573` were cancelled with `steps=null`. Cancelled is **NOT_RUN**, neither PASS nor demonstrated lint failure.
 
-Public `crates/domain/src/` modules: numeric, identity, qualified, artifact, event, policy and record DTOs. Exact arithmetic and unit/reference constructors; source/application/control IDs and causal guards; UNKNOWN; artifact-ref grammar and identity/dependency metadata; policy tags; recorded-input shapes. No byte codec or production storage/hash/verifier in the library.
+The full rust-tests log was re-read in this continuation and confirms Expected SHA = Checked out SHA = `c393439dc90ec381479889303f415d8725da68d8`, Ubuntu 24.04.5 LTS/Linux x86_64, Rust/Cargo 1.98.1. `cargo build --workspace --locked` and `cargo test --workspace --locked` succeeded; 68 contracts + 9 identity + 18 numeric = **95 domain integration tests passed**, separately **15 BOOT-001 CLI tests passed**, zero failed/ignored. Cargo.lock comparison and final checkout cleanliness passed. This is historical input-head evidence, not final-head lint/test evidence.
 
-`crates/domain/tests/support/` contains the explicitly synthetic resolver, caller-owned immutable prefix, bounded pending DataHealth reference transitions, barriers, proof dedup/reorder, original-sample freshness, warm-up cap/freeze, local loss accounting and candidate/fence guards. These test-local relations do not establish real Bitget or physical storage facts.
+At preflight for this continuation, PR head was newer than c393: `9b3ee661b81a035c7acbfaf7ca2e463b0cf407f5`, parented by `f1f1209dd180ecc69bd69fc923929308d4ff0aec`. It already contained the memory-only WAL/recovery implementation and independent binary fixtures; no rollback was performed.
 
-At input c393, executable source inventory is 95 domain test functions: numeric18, identity9, contracts68. They all actually ran in the verified input-head test job below. Counting functions is NOT a complete vector-coverage audit. No ignored tests are used.
+Fresh local environment: Linux x86_64, Git 2.47.3, Python 3.13.5; rustc/cargo/rustup/rustfmt/clippy unavailable. `git ls-remote https://github.com/al-gri/pro-sclpng.git HEAD` failed DNS with exit 128. There is no local checkout; API authoring is not reported as one. Local Rust commands and Windows 11/PowerShell 5.1 remain **NOT_RUN**.
 
-## Evidence correction — historical error remains visible
+## Implemented scope
 
-The preceding [PARTIAL report6001682147](https://github.com/al-gri/pro-sclpng/pull/10#issuecomment-6001682147) and PR description incorrectly cited run37363552027. A fresh GET returned HTTP404. This was an error in my report; the historical comment is retained, not silently rewritten.
-[Correction6001945991](https://github.com/al-gri/pro-sclpng/pull/10#issuecomment-6001945991) records the independent recheck.
+Production `crates/domain/src/**` remains limited to approved value types/DTOs/pure guards: exact numeric conversions, qualified identities/versions/epochs, event/source/application/control identity and causal guards, UNKNOWN, policy tags, ArtifactRef parsing/identity metadata, and recorded-input shapes. No production byte codec, filesystem storage, hash implementation, loader/verifier, connector, book engine, queues, publisher, replay engine, strategy or execution was added.
 
-The actual exact-c393 run is [37363320459](https://github.com/al-gri/pro-sclpng/actions/runs/37363320459), completed/failure:
+Test-local `crates/domain/tests/support/**` now additionally contains:
+- bounded memory-only WAL framing/payload codec, exact CRC-32/ISO-HDLC, checked lengths/caps/offsets and exact EOF;
+- definitions/reference/order validation, local/source GAP accounting, segment/archive seal checks and recovery classification;
+- frozen independent single- and multi-segment raw/control/GAP/seal fixtures under `tests/fixtures/domain/wal-frames-v1.txt`;
+- PSAD/PSAM typed memory encodings, typed artifact bodies and PSCO commitment bytes; no SHA-256 implementation or production verifier;
+- frozen six policy variants with valid descriptor/body claims and WAL CRCs;
+- every-byte truncation, middle corruption, whole-frame/seal loss and trailing-data recovery assertions;
+- V2 positive/reversed GAP frames with independent literal CRCs and exact scope offset 56.
 
-| Job | Actual result | Evidence limit |
+This continuation also adds executable AF/PSAM/PSCO/policy-byte assertions and direct E15/H13/H16/H18 matrix coverage. These are synthetic tests only.
+
+## Matrix / vector → executable test mapping
+
+Execution result for rows added or changed by the containing commit is **NOT_RUN on the containing head until exact-head CI completes**. Rows already present at c393 have historical PASS on c393 only; final-head status must come from the post-commit evidence.
+
+### Numeric N01–N21
+
+| Vector IDs | Test file → function | Checked outcome |
 |---|---|---|
-| rust-tests111942752010 | completed/success | Full decoded log read; source checkout c393 verified |
-| rust-clippy111942752173 | cancelled; no steps | NOT_RUN/no lint verdict from this job; cancellation cause not established |
-| rust-fmt111942752247 | cancelled; no steps | NOT_RUN/no formatting verdict from this job; cancellation cause not established |
+| N01,N03 | `numeric.rs::n01_n03_price_grid_and_canonical_reverse`; `identity.rs::n01_n17_qualified_conversions_preserve_reference_and_units` | exact ticks/canonical reverse/reference |
+| N02 | `numeric.rs::n02_quantity_grid_and_reverse` | exact steps/reverse |
+| N04,N05 | `numeric.rs::n04_n05_off_grid_never_rounds` | exact OffGrid, no rounding |
+| N06 | `numeric.rs::n06_invalid_ascii_grammar` | InvalidSyntax cases |
+| N07 | `numeric.rs::n07_signs_are_rejected` | InvalidSign |
+| N08 | `numeric.rs::n08_input_bound_and_error_priority` | 96/97-byte priority, ZeroPrice |
+| N09 | `numeric.rs::n09_significant_scale_only` | canonical zeros / ScaleTooLarge |
+| N10,N11 | `numeric.rs::n10_n11_count_boundaries` | u64 MAX / CountOutOfRange |
+| N12 | `numeric.rs::n12_coefficient_max_and_add_overflow` | u128 boundary/add overflow |
+| N13 | `numeric.rs::n13_coefficient_multiply_overflow` | multiply overflow |
+| N14 | `numeric.rs::n14_metadata_does_not_repair_noncanonical_values` | invalid increment/noncanonical |
+| N15 | `numeric.rs::n15_alignment_overflow_is_not_cancelled` | checked alignment overflow |
+| N16 | `numeric.rs::n16_reverse_multiply_overflow` | reverse multiply overflow |
+| N17 | `numeric.rs::n17_constant_multiplier_round_trip`; qualified identity test | exact base conversion |
+| N18 | `numeric.rs::n18_unknown_and_invalid_multiplier`; `identity.rs::n18_units_unknown_nonlinear_and_metadata_guards` | Unknown/Invalid/Unit/Unsupported |
+| N19 | `numeric.rs::n19_intermediate_overflow_and_final_scale` | intermediate overflow / final scale |
+| N20 | `numeric.rs::n20_numerical_zero_is_not_trade_or_level`; `events.rs::e17_n20_level_structure_and_zero_deletion_distinction` | numeric zero vs event zero/delete |
+| N21 | `identity.rs::n21_identity_and_spec_mismatch_precede_parsing_and_comparison` | IdentityMismatch/SpecMismatch |
+| bounded exhaustive | `numeric.rs::n_exhaustive_small_grids_and_reverse` | coefficient/scale/increment/step loops |
 
-The [rust-tests log](https://github.com/al-gri/pro-sclpng/actions/runs/37363320459/job/111942752010) confirms Expected SHA=Checked out SHA=`c393439dc90ec381479889303f415d8725da68d8`, Ubuntu24.04.5 LTS/Linux x86_64, Rust/Cargo1.98.1. `cargo build --workspace --locked` and `cargo test --workspace --locked` succeeded (exit0); contracts68+identity9+numeric18=95 domain passed, separately15 CLI passed, zero failed/ignored. Cargo-generated lockfile comparison and initial/final clean checkout succeeded. Domain unit/doc binaries contain0 tests; integration binaries contain the actual contract tests.
+### Event/order E01–E17
 
-Earlier e99 run37360972282 had real fmt/Clippy failures; that must NOT be transferred as a lint verdict to c393. Conversely successful c393 tests must NOT be used as final-head or lint evidence.
-
-## Fresh local preflight
-
-AGENTS, full approval, last PARTIAL comment and current main/head/discussion were read; main/head matched expected and no newer branch work was found. Shell/Git checked afresh: Linux x86_64, Git2.47.3, Python3.13.5; rustc/cargo/rustfmt/clippy-driver/rustup absent. `git ls-remote` on the permitted repository failed DNS github.com, exit128. No local checkout. API authoring/staging is not one.
-
-All local Rust checks are **NOT_RUN**. Existing CI can execute pinned checks; standalone `cargo test -p domain --locked` is not in its workflow and remains a separate **verification blocker / NOT_RUN** until an authorized environment runs it. Windows11/PowerShell5.1 is **NOT_RUN**. Linux success is not Windows success. No empty commits, lint weakening or workflow changes are authorized.
-
-## Current vector mapping and concrete gaps
-
-All paths below are relative to crates/domain/tests. These groups describe inspected input-head coverage; final per-vector audit is still required.
-
-| Group | Test files | Input-head execution / remaining gap |
+| IDs | File → function | Checked outcome |
 |---|---|---|
-| N01–N21 and bounded grids | numeric.rs; identity.rs | PASS on c393; full scalar/unit/reference assertions |
-| E identities/order/UNKNOWN/causality | identity.rs; cases/events.rs | PASS on c393; audit every normative subcase before claiming full coverage |
-| R4 parsing/metadata/dependency guards | cases/artifacts.rs; cases/events.rs | PASS on c393; binary descriptors/commitments and AF fixtures still incomplete |
-| R1 delayed/current/old/duplicate proofs; R3 time/quiet; C2 | cases/health.rs | PASS on c393; not production feed verification |
-| R5 accounting | cases/accounting.rs | PASS on c393; must also exercise through WAL byte recovery |
-| R2 mode/receipt/candidate/fence | cases/policy.rs; cases/publication.rs | PASS on c393; completion explicitly synthetic |
-| R6 shared transport | cases/shared.rs | PASS on c393; expanded recorded setup; exact trace mapping retained in PR |
-| W00–W20, full WAL/rotation/recovery | tests/support codec and binary test cases not complete | **NOT_IMPLEMENTED / NOT_RUN** for missing byte-level parts, not fulfilled by DTOs |
-| V2 Gap/order/reversed/policy binary vectors | typed-policy tests exist; complete frame/descriptor tests missing | **PARTIAL**; correct negative CRC/digests and exact offsets still required |
+| E01,E02 | `identity.rs::e01_e02_market_and_book_identities_are_distinct` | spot/futures, Normal/RPI separation |
+| E03 | `identity.rs::e03_channel_scope_and_slot_conflicts`; `events.rs::e03_missing_raw_source_index_and_epoch_are_rejected` | owner/spec/scope failures |
+| E04,E05,E08 | `events.rs::e04_e05_e08_source_application_ids_and_replay_are_distinct` | recorded order, source/apply IDs, deterministic replay |
+| E06 | `events.rs::e06_redelivery_checks_all_canonical_fields` | no-op vs IdentityConflict |
+| E07 | `events.rs::e07_record_and_output_order_retain_prefix_on_error` | exact order/sub-index failure |
+| E09 | `events.rs::e09_v_r4_timeline_same_normalizer_then_new_revision` | activation timeline/cursors |
+| E10 | `artifacts.rs::v_r4_missing_dependency_has_no_partial_success`; `v_r4_same_norm_reuse_early_loading_and_rebinding` | missing/rebind/profile closure |
+| E11,E12 | `events.rs::e11_e12_clocks_units_and_unix_jumps_are_not_order` | incomparable clock / original time |
+| E13 | `events.rs::e13_causal_frontiers_references_and_availability`; `same_step_earlier_effect_is_available_but_later_is_not` | future refs, cursor/available_at |
+| E14 | `events.rs::e14_unknown_is_preserved_and_payload_reinterpretation_rejected` | UNKNOWN preservation |
+| E15 | `events.rs::e15_new_capture_namespace_changes_ids_while_same_archive_replay_is_stable` | same archive stable; new ArchiveId distinct |
+| E16 | `identity.rs::e16_positive_ids_and_checked_exhaustion`; `e16_epoch_expected_and_rollback` | rollback/exhaustion |
+| E17 | `events.rs::e17_n20_level_structure_and_zero_deletion_distinction`; `v_r1_mixed_and_invalid_whole_frame_have_no_partial_acceptance` | caps/duplicate/atomic rejection |
 
-## Remaining implementation work / exact continuation
+### DataHealth H01–H19 and named R/C vectors
 
-1. Finish test-local memory-only encoding/decoding for all agreed records; caps/checked offsets, canonical primitive tags and exact EOF. Compose reference/order/definition/GAP/seal checks without filesystem I/O.
-2. Freeze independent multi-frame and multi-segment raw/control/GAP/seal goldens outside the tested encoder. Assert every byte cut, corrupted middle, removed whole frame/seal/final segment and trailing data. Round-trip alone is insufficient.
-3. Complete PSAD/PSAM/PSCO memory helpers and literal AF assertions. No SHA implementation/dependency: synthetic digest observations remain explicitly test evidence, ParsedRef remains unverified without supplied byte/applicability facts.
-4. Add actual positive/reversed Gap bytes, own valid negative CRC, exact scope error at56, policy tag sets/mirrored mismatch and no ordinal cast tests.
-5. Finish a committed vector ID -> file -> function -> checked outcome -> result/gap inventory. Do not invent coverage for unimplemented vectors. Run real final-head checks and record diagnostics; only repair demonstrated fmt/Clippy issues, without suppression or changing expected semantics.
+| IDs / named vectors | File → function(s) | Checked outcome |
+|---|---|---|
+| H01,H12 | `health.rs::h01_h12_snapshot_warmup_and_false_witness_guards` | no snapshot / truthful vs false witness |
+| H02,C2 | `v_c2_progress_caps_per_output_and_freezes_after_usable`; `v_c2_max_is_a_supplied_boundary_state_not_billions_of_updates` | warm-up count/cap/freeze |
+| H03,R2-FINITE/NO-FENCE | `publication.rs::v_r2_finite_receipt_then_final_fence_includes_receipt_in_basis`; `v_r2_missing_behind_weak_wrong_scope_future_and_unverified_fences` | candidate/fence boundary |
+| H04,H05,R1-BARRIER/RESYNC | `health.rs::v_r1_barrier_and_post_barrier_resync`; pending bounds test | invalidation/new resync |
+| H06 | `shared.rs::v_r6_shared_registration_down_and_epoch_preserve_other_connection`; `health.rs::v_r1_down_up_and_config_change_do_not_reuse_pending_snapshot` | epoch/barrier old proof does not restore |
+| H07,R6 | `shared.rs::v_r6_shared_registration_down_and_epoch_preserve_other_connection` | connection fan-out isolation |
+| H08 | same R6 test | RPI new stream remains NoSnapshot while Normal stays usable |
+| H09,H10 | `health.rs::v_r3_freshness_before_equal_after_none_and_overflow` | exact expiry/None |
+| H11 | `v_r3_quiet_original_observation_bounds_and_expiry`; `v_r3_quiet_future_is_not_automatically_activated_by_timer`; `v_r3_old_quiet_proof_does_not_poison_new_scope` | bounded quiet rules |
+| H13 | `v_r1_down_up_and_config_change_do_not_reuse_pending_snapshot`; `h13_spec_activation_invalidates_only_after_declared_new_spec` | config/normalizer/spec activation invalidation |
+| H14 | `v_r1_down_up_and_config_change_do_not_reuse_pending_snapshot` | Up does not clear barrier |
+| H15 | `publication.rs::v_r2_revoked_candidates_cannot_be_resurrected_by_late_fence`; recording-order test | Failed recording revokes permit; no production GAP write is simulated |
+| H16 | `health.rs::h16_recording_health_recovery_does_not_resync_invalid_book` | recorder Healthy does not resync book |
+| H17 | `publication.rs::v_r2_self_future_none_and_regressing_receipts_retain_prefix`; `v_r2_recording_order_partial_failure_and_weaker_evidence` | invalid acknowledgements retain prefix |
+| H18 | `health.rs::h18_restart_has_new_archive_clock_and_no_inherited_ready_state` | no inherited definitions/readiness/candidate |
+| H19 | `health.rs::h19_missing_current_artifact_blocks_without_advancing_state` | BLOCKED, no synthetic-as-live fallback |
+| R1 reorder/dup/conflict/atomic/deadline | corresponding `health.rs::v_r1_*` functions | exact IDs/cursors/retained state |
+| R2 mode/gate/revoked/superseded | `policy.rs::v_r2_mode_gate_all_nine_cells`; `publication.rs::v_r2_*` | nine cells + permit diagnostics |
+| R3 | all `health.rs::v_r3_*` | freshness/quiet boundaries |
+| R4 | `artifacts.rs::v_r4_*`; event timeline | parse/missing/rebind/caps/activation |
+| R5 | `accounting.rs::v_r5_*` plus WAL W15/W16 | local/source loss semantics |
+| C1 | `identity.rs::v_c1_writer_and_shared_connection_guards` | one writer/book/archive |
+| C2 | C2 tests above | progress semantics |
 
-No new A1–A3 design review is needed within the approved scope. A real contradiction needs a minimal counterexample to Integrator and blocks only the dependent part.
+### WAL W00–W20 and targeted binary vectors
 
-## Final verification requirements
+| IDs | File → function | Checked outcome |
+|---|---|---|
+| W00 | `wal.rs::w00_crc_independent_known_vectors_and_streaming` | independent CRC constants |
+| W01 | `w01_encoder_and_decoder_match_independent_start_golden` | 74-byte W01, checksum, prefix |
+| W02 | `w02_full_single_golden_exact_dtos_seals_and_quality`; `w02_full_multi_segment_golden_chain_and_inherited_state` | independent full single/multi-segment goldens |
+| W03 | `w03_unknown_header_control_and_encoding_tags_report_exact_offsets` | unsupported versions/kinds/tags/offsets |
+| W04 | `w04_magic_flags_reserved_options_bools_tokens_and_trailing_bytes` | canonical payload failures |
+| W05,W10 | `w05_w10_middle_corruption_does_not_scan_for_following_magic` | checksum/middle stop/no magic rejoin |
+| W06,W07 | `w06_w07_caps_and_checked_offsets_precede_allocation` | cap/overflow before allocation |
+| W08 | `w08_every_start_byte_cut_is_incomplete_at_zero` | every W01 byte cut |
+| W09 | both `w09_every_byte_cut_*` | every byte cut across complete and segment boundary |
+| W11,W17 | `w11_whole_raw_final_seal_or_segment_loss_never_means_complete` | missing assigned frame/seal/final segment cannot look complete |
+| W12,W20 | `w12_w20_forged_seal_fields_and_wrong_aggregate_exclude_no_checks` | recomputed own CRC cannot authorize false chain/aggregate |
+| W13 | `w13_wrong_segment_link_or_detached_segment_fails_at_boundary` | identity/link/segment boundary |
+| W14 | `w14_trailing_bytes_after_archive_seal_are_not_ignored` | exact EOF / trailing data |
+| W15 | `w15_unresolved_local_loss_requires_unknown_quality_even_when_sealed` | unresolved count not zero; quality Unknown |
+| W16 | `w16_local_gap_covers_attempts_but_source_gap_does_not` | local/source GAP separation |
+| W18 | `publication.rs::v_r2_recording_order_partial_failure_and_weaker_evidence` | partial/weak watermark does not advance stronger completion |
+| W19 | `policy.rs::v_r2_mode_gate_all_nine_cells`; publication fence tests | mode×gate and receipt/fence |
+| V2-WIRE-GAP-ORDER | `wal.rs::v2_gap_order_bytes_and_exact_decode_before_transition` | bytes 56..59, CRC, state/cursors |
+| V2-WIRE-GAP-REVERSED | `wal.rs::v2_gap_reversed_has_own_valid_crc_and_preserves_prefix_and_state` | valid own CRC, Unsupported scope at 56, retained state |
+| AF/PSAD/PSAM | `artifact_wire.rs::af_psad_bodies_and_psam_match_frozen_bytes_without_hashing` | exact frozen bytes/lengths; no hashing claim |
+| PSCO | `artifact_wire.rs::psco_snapshot_and_update_goldens_decode_to_exact_outputs` | exact commitment bytes and operation error |
+| warm-up/quiet artifact bodies | `artifact_wire.rs::warmup_and_quiet_body_goldens_bind_scope_time_and_basis_records` | scope/time/basis bytes |
+| V2 policy all tags/match | `artifact_wire.rs::v2_policy_binary_all_tags_match_wal_and_descriptor` | all six valid tag pairs and exact offsets |
+| V2 policy unsupported/mismatch/no ordinal cast | `artifact_wire.rs::v2_policy_binary_unsupported_and_supported_mismatch_reach_target_guards` | 0/255, supported mismatch, gate3 != watermark3 |
 
-On the containing final implementation head: `cargo build --workspace --locked`; `cargo fmt --all -- --check`; `cargo clippy --workspace --all-targets --locked -- -D warnings`; `cargo test --workspace --locked`; separately `cargo test -p domain --locked`.
-Record exact checkout SHA, OS/target/toolchain, command exit codes, each binary count, run/job URLs, required steps, lockfile/index cleanliness. No final PASS is claimed in this in-progress handoff. Implementation acceptance still requires independent QA and owner acceptance.
+## Current verification state
 
-## PowerShell5.1 owner commands — NOT_RUN
+The first current-head run for `9b3ee661...`, [37369820809](https://github.com/al-gri/pro-sclpng/actions/runs/37369820809), initially completed/failure with all three jobs cancelled and `steps=null`; therefore it supplied **no** fmt/Clippy/test verdict. A rerun request was accepted for rust-clippy and the run became queued; additional per-job rerun requests were refused while the run was active. No PASS is inferred from this.
 
-Use a separate clean checkout of the exact final SHA recorded in PR, with Rust1.98.1/linker/rustfmt/Clippy installed. These commands have NOT been run on Windows.
+The containing commit adds substantive tests/handoff work rather than an empty CI trigger. Its exact-head CI results are intentionally not guessed here and must be attached to PR #10 after publication. If actual fmt/Clippy diagnostics appear, fix them without allows/ignored tests or semantic changes. Existing workflow is not modified.
 
-```powershell
-$ErrorActionPreference = 'Stop'
-$env:RUSTUP_TOOLCHAIN = '1.98.1'
-$env:CARGO_NET_OFFLINE = 'true'
-$ExpectedHead = 'COPY_FINAL_HEAD_FROM_PR'
-if ($ExpectedHead -notmatch '^[0-9a-f]{40}$') { throw 'Set exact PR SHA' }
-$actual = git rev-parse HEAD
-if ($LASTEXITCODE -ne 0) { throw 'git rev-parse failed' }
-if ($actual -ne $ExpectedHead) { throw 'Wrong SHA' }
-$status = git status --porcelain
-if ($LASTEXITCODE -ne 0) { throw 'git status failed' }
-if ($status) { throw 'Dirty checkout' }
-$active = rustup show active-toolchain
-if ($LASTEXITCODE -ne 0) { throw 'rustup failed' }
-Write-Output $active
-if ($active -notmatch '^1\.98\.1-') { throw 'Wrong toolchain' }
-rustc --version --verbose
-if ($LASTEXITCODE -ne 0) { throw 'rustc failed' }
-cargo --version
-if ($LASTEXITCODE -ne 0) { throw 'cargo version failed' }
-cargo build --workspace --locked
-if ($LASTEXITCODE -ne 0) { throw 'build failed' }
-cargo fmt --all -- --check
-if ($LASTEXITCODE -ne 0) { throw 'fmt failed' }
-cargo clippy --workspace --all-targets --locked -- -D warnings
-if ($LASTEXITCODE -ne 0) { throw 'clippy failed' }
-cargo test --workspace --locked
-if ($LASTEXITCODE -ne 0) { throw 'workspace tests failed' }
-cargo test -p domain --locked
-if ($LASTEXITCODE -ne 0) { throw 'domain tests failed' }
-git diff --exit-code -- Cargo.lock
-if ($LASTEXITCODE -ne 0) { throw 'Lockfile changed' }
-git diff --exit-code
-if ($LASTEXITCODE -ne 0) { throw 'Tracked files changed' }
-git diff --cached --exit-code
-if ($LASTEXITCODE -ne 0) { throw 'Index changed' }
-$status = git status --porcelain
-if ($LASTEXITCODE -ne 0) { throw 'Final git status failed' }
-if ($status) { throw 'Final checkout dirty' }
-```
+Required final commands remain:
+`cargo build --workspace --locked`;
+`cargo fmt --all -- --check`;
+`cargo clippy --workspace --all-targets --locked -- -D warnings`;
+`cargo test --workspace --locked`;
+and separately `cargo test -p domain --locked`.
 
-## Boundaries and transfer
+The existing workflow executes the first four through three jobs but does **not** execute the separate `cargo test -p domain --locked`. With no local Rust checkout, that standalone command is currently **NOT_RUN / verification blocker** unless another authorized environment executes it. Linux CI is not Windows evidence.
 
-Allowed paths and std-only/Rust1.98.1 retained; no new dependencies/crates/features/build scripts. Root Cargo.toml/lock/toolchain/CI/apps/radar/PROJECT_STATE/specs registry/accepted ADR-0001/other handoffs unchanged. No production connector/book/queues/recorder/replay/loader/hash/verifier/real fence/publisher/strategy/TradePlan/Telegram/execution.
-Real feed facts remain UNKNOWN/BLOCKED_BY_MD_001; physical durability and external delivery remain NOT_RUN/OUT_OF_SCOPE. These do not block independent synthetic tests. Issues3/6 remain open. No merge/auto-merge/force-push/settings changes or self-acceptance. This file supersedes the obsolete docs-only handoff; earlier history and the reporting error remain auditable in Git/PR.
+## Boundaries / next action
+
+std-only and Rust 1.98.1 retained; no dependency/crate/feature/build-script changes. Root Cargo.toml/Cargo.lock/toolchain/CI, apps/radar, PROJECT_STATE, specs registry, accepted ADR-0001 and other handoffs remain unchanged.
+No production connector/book/queues/supervisor/publisher/filesystem recorder/replay/artifact loader/hash/verifier/storage-fence producer/strategy/TradePlan/Telegram/execution.
+Real Bitget feed semantics remain UNKNOWN/BLOCKED_BY_MD_001. Physical fsync/crash/power-loss and external delivery remain OUT_OF_SCOPE/NOT_RUN.
+
+Next: obtain exact-head CI for this implementation, repair only demonstrated formatting/Clippy/test failures, then update this handoff once more with actual results. Final exact SHA remains a post-commit PR comment. No merge/auto-merge/force-push/settings changes or Issue #3/#6 closure.

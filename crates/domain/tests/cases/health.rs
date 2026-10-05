@@ -473,3 +473,113 @@ fn proof_forward_basis_is_rejected_before_scope_transition() {
     assert_eq!(s.model.last_record, old.last_record);
     assert_eq!(s.model.streams, old.streams);
 }
+
+
+#[test]
+fn h13_spec_activation_invalidates_only_after_declared_new_spec() {
+    let mut s = Scenario::recovered();
+    let binding = s.stream().binding.clone();
+    assert!(s.model.usable_data(binding.id));
+
+    let mut fields = crate::support::scenario::numeric_spec().fields().clone();
+    fields.reference.version = SpecVersion::new(2).unwrap();
+    fields.price_increment = "0.10".parse().unwrap();
+    let numeric = domain::qualified::NumericSpec::new(fields).unwrap();
+    let node = crate::support::scenario::mock_node(
+        900,
+        domain::artifact::ArtifactKind::InstrumentSpec,
+        "instrument/1",
+        2,
+        vec![],
+    );
+    s.env
+        .instruments
+        .insert(node.reference, (binding.instrument_slot, numeric.clone()));
+    s.env.resolver.supplied.insert(node.reference, node.clone());
+
+    s.submit(Record::InstrumentSpec(InstrumentSpecRecord {
+        context: s.context(15),
+        slot: binding.instrument_slot,
+        numeric,
+        provenance: node.reference,
+    }))
+    .unwrap();
+    let definition_record = s.model.last_record;
+    assert!(s.model.usable_data(binding.id));
+
+    let activation_record = s.next_record();
+    s.submit(Record::Control(ControlRecord {
+        context: s.context(16),
+        value: Control::SpecActivate {
+            slot: binding.instrument_slot,
+            expected: SpecVersion::new(1).unwrap(),
+            next: SpecVersion::new(2).unwrap(),
+        },
+    }))
+    .unwrap();
+    let state = s.stream();
+    assert_eq!(definition_record.get() + 1, activation_record.get());
+    assert_eq!(state.binding.tag.spec, SpecVersion::new(2).unwrap());
+    assert_eq!(state.binding.spec.version, SpecVersion::new(2).unwrap());
+    assert_eq!(state.barrier, activation_record.get());
+    assert_eq!(state.book, Some(BookValidity::Invalid(Fault::ContextChanged)));
+    assert_eq!(state.freshness, Freshness::Unknown);
+    assert_eq!(state.anchor, None);
+    assert_eq!(state.witness, None);
+    assert!(!s.model.usable_data(binding.id));
+}
+
+#[test]
+fn h16_recording_health_recovery_does_not_resync_invalid_book() {
+    let mut s = Scenario::initial(fixtures::policy());
+    s.raw(vec![snapshot()], 10).unwrap();
+    s.gap(Reason::QueueOverflow, None, None, 11).unwrap();
+    assert_eq!(s.model.recording.health, RecordingHealth::Degraded);
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::Gap(Reason::QueueOverflow)))
+    );
+
+    s.receipt(
+        RecordingHealth::Healthy,
+        WatermarkKind::Durable,
+        Some(11),
+        12,
+    )
+    .unwrap();
+    assert_eq!(s.model.recording.health, RecordingHealth::Healthy);
+    assert_eq!(
+        s.stream().book,
+        Some(BookValidity::Invalid(Fault::Gap(Reason::QueueOverflow)))
+    );
+    assert_eq!(s.stream().anchor, None);
+    assert!(!s.model.usable_data(s.stream().binding.id));
+}
+
+#[test]
+fn h18_restart_has_new_archive_clock_and_no_inherited_ready_state() {
+    let old = Scenario::recovered();
+    assert!(old.model.usable_data(old.stream().binding.id));
+    assert!(old.stream().candidate.is_some());
+
+    let mut env = crate::support::model_env::ModelEnv::default();
+    let start = ArchiveStart {
+        archive: ArchiveId::new([3; 16]).unwrap(),
+        session: CaptureSessionId::new([4; 16]).unwrap(),
+        clock: ClockId::new(2).unwrap(),
+        mode: old.model.start.mode,
+        previous_archive: Some(old.model.start.archive),
+    };
+    let restarted = HealthModel::new(start.clone(), &mut env).unwrap();
+    assert_eq!(restarted.start, start);
+    assert_eq!(restarted.last_record, RecordNo::new(1).unwrap());
+    assert_eq!(restarted.evaluation_ns, 0);
+    assert!(restarted.timeline.active().is_none());
+    assert!(restarted.config.is_none());
+    assert!(restarted.active_specs.is_empty());
+    assert!(restarted.streams.is_empty());
+    assert!(restarted.transport.is_empty());
+    assert_eq!(restarted.recording.health, RecordingHealth::Unknown);
+    assert_eq!(restarted.recording.last_receipt, None);
+    assert!(restarted.blocked.is_none());
+}

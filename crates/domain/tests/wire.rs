@@ -4,3 +4,6 @@ pub mod support;
 
 #[path = "cases/wal.rs"]
 mod wal;
+
+#[path = "cases/artifact_wire.rs"]
+mod artifact_wire;

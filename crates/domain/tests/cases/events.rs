@@ -292,3 +292,35 @@ fn e03_missing_raw_source_index_and_epoch_are_rejected() {
     bad.received.monotonic.ns = MonotonicNs::new(11);
     assert_eq!(check(&bad, &raw, &prefix, 13, &[]), Err(EventError::SourceMismatch));
 }
+
+
+#[test]
+fn e15_new_capture_namespace_changes_ids_while_same_archive_replay_is_stable() {
+    let first = EventId {
+        archive: archive(),
+        cursor: cursor(21, 0),
+        normalizer: NormalizerVersion::new(1).unwrap(),
+    };
+    let replay = EventId {
+        archive: archive(),
+        cursor: cursor(21, 0),
+        normalizer: NormalizerVersion::new(1).unwrap(),
+    };
+    let other_archive = EventId {
+        archive: ArchiveId::new([3; 16]).unwrap(),
+        cursor: cursor(21, 0),
+        normalizer: NormalizerVersion::new(1).unwrap(),
+    };
+    assert_eq!(first, replay);
+    assert_ne!(first, other_archive);
+
+    let raw = RawFrameId {
+        archive: archive(),
+        record: record(21),
+    };
+    let other_raw = RawFrameId {
+        archive: ArchiveId::new([3; 16]).unwrap(),
+        record: record(21),
+    };
+    assert_ne!(raw, other_raw);
+}
