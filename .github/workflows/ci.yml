@@ -1,0 +1,183 @@
+name: Rust CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_NET_OFFLINE: "true"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  rust-fmt:
+    name: rust-fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact event head
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "al-gri/pro-sclpng" ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin https://github.com/al-gri/pro-sclpng.git
+          git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'Expected SHA: %s\nChecked out SHA: %s\n' "$EXPECTED_SHA" "$actual_sha"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+          cat /etc/os-release
+          uname -sm
+          git --version
+      - name: Install and verify pinned Rust
+        run: |
+          set -euo pipefail
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          export RUSTUP_TOOLCHAIN="$toolchain"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          active="$(rustup show active-toolchain)"
+          printf '%s\n' "$active"
+          [[ "$active" == "$toolchain-"* ]]
+          rustc --version --verbose
+          [[ "$(rustc --version | cut -d ' ' -f 2)" == "$toolchain" ]]
+          cargo --version
+          rustup which cargo
+          rustfmt --version
+          cargo clippy --version
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+      - name: Verify clean checkout after checks
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+
+  rust-clippy:
+    name: rust-clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact event head
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "al-gri/pro-sclpng" ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin https://github.com/al-gri/pro-sclpng.git
+          git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'Expected SHA: %s\nChecked out SHA: %s\n' "$EXPECTED_SHA" "$actual_sha"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+          cat /etc/os-release
+          uname -sm
+          git --version
+      - name: Install and verify pinned Rust
+        run: |
+          set -euo pipefail
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          export RUSTUP_TOOLCHAIN="$toolchain"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          active="$(rustup show active-toolchain)"
+          printf '%s\n' "$active"
+          [[ "$active" == "$toolchain-"* ]]
+          rustc --version --verbose
+          [[ "$(rustc --version | cut -d ' ' -f 2)" == "$toolchain" ]]
+          cargo --version
+          rustup which cargo
+          rustfmt --version
+          cargo clippy --version
+      - name: Run Clippy
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify clean checkout after checks
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+
+  rust-tests:
+    name: rust-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact event head
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "al-gri/pro-sclpng" ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git init .
+          git remote add origin https://github.com/al-gri/pro-sclpng.git
+          git fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git checkout --detach FETCH_HEAD
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'Expected SHA: %s\nChecked out SHA: %s\n' "$EXPECTED_SHA" "$actual_sha"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+          cat /etc/os-release
+          uname -sm
+          git --version
+      - name: Install and verify pinned Rust
+        run: |
+          set -euo pipefail
+          toolchain="$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')"
+          [[ "$toolchain" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          rustup toolchain install "$toolchain" --profile minimal --component rustfmt --component clippy
+          export RUSTUP_TOOLCHAIN="$toolchain"
+          printf 'RUSTUP_TOOLCHAIN=%s\n' "$toolchain" >> "$GITHUB_ENV"
+          active="$(rustup show active-toolchain)"
+          printf '%s\n' "$active"
+          [[ "$active" == "$toolchain-"* ]]
+          rustc --version --verbose
+          [[ "$(rustc --version | cut -d ' ' -f 2)" == "$toolchain" ]]
+          cargo --version
+          rustup which cargo
+          rustfmt --version
+          cargo clippy --version
+      - name: Verify Cargo-generated lockfile
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile --offline
+          printf '\n--- Cargo-generated lockfile ---\n'
+          cat Cargo.lock
+          printf '\n--- End lockfile ---\n'
+          git ls-files --error-unmatch Cargo.lock
+          git diff --exit-code -- Cargo.lock
+      - name: Build workspace
+        run: |
+          cargo build --workspace --locked
+      - name: Test workspace and real CLI
+        run: |
+          cargo test --workspace --locked
+      - name: Verify clean checkout after checks
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          git status --porcelain
+          [[ -z "$(git status --porcelain)" ]]
+
