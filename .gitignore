@@ -1,0 +1,18 @@
+/target/
+/.cache/
+/data/
+/recordings/
+/secrets/
+/private_sources/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+/.venv/
+# Small explicitly reviewed fixtures belong in tests/fixtures, not data/.
+# .gitignore is not a secret scanner; inspect every diff before commit.
