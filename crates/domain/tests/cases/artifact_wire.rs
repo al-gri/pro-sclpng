@@ -40,6 +40,21 @@ fn config_body(bytes: &[u8]) -> crate::support::bodies::ConfigBody {
 }
 
 #[test]
+fn af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes() {
+    let crlf = frozen::AF_MD.replace('\n', "\r\n");
+    for id in ["AF-N1", "AF-B1", "AF-C1", "AF-F1", "AF-V1"] {
+        let (lf_descriptor, lf_body) = frozen::markdown_artifact_bytes(frozen::AF_MD, id);
+        let (crlf_descriptor, crlf_body) = frozen::markdown_artifact_bytes(&crlf, id);
+        let original = frozen::original(id);
+
+        assert_eq!(crlf_descriptor, lf_descriptor, "{id} descriptor");
+        assert_eq!(crlf_body, lf_body, "{id} body");
+        assert_eq!(lf_descriptor, original.descriptor, "{id} frozen descriptor");
+        assert_eq!(lf_body, original.body, "{id} frozen body");
+    }
+}
+
+#[test]
 fn af_psad_bodies_and_psam_match_frozen_bytes_without_hashing() {
     let names = ["AF-N1", "AF-B1", "AF-C1", "AF-F1", "AF-V1", "AF-I1"];
     let artifacts: Vec<_> = names.iter().map(|name| frozen::original(name)).collect();

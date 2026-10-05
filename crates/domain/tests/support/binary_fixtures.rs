@@ -176,6 +176,21 @@ impl FrozenArtifact {
     }
 }
 
+pub(crate) fn markdown_artifact_bytes(markdown: &str, id: &str) -> (Vec<u8>, Vec<u8>) {
+    // Git may materialize this Markdown fixture with CRLF on Windows. Normalize
+    // only the textual wrapper used to locate headings/fences; literal hex is
+    // decoded afterwards, so descriptor/body bytes remain platform-invariant.
+    let normalized = markdown.replace("\r\n", "\n");
+    let header = format!("\n## {id}\n");
+    let section = normalized.split_once(&header).expect("AF heading").1;
+    let descriptor = section.split_once("Descriptor:\n```text\n").unwrap().1;
+    let body = section.split_once("\nBody:\n```text\n").unwrap().1;
+    (
+        literal_hex(descriptor.split_once("```").unwrap().0),
+        literal_hex(body.split_once("```").unwrap().0),
+    )
+}
+
 pub fn original(id: &str) -> FrozenArtifact {
     let (reference, body_digest) = match id {
         "AF-N1" => (
@@ -207,14 +222,7 @@ pub fn original(id: &str) -> FrozenArtifact {
     let (descriptor, body) = if id == "AF-I1" {
         (golden("AF-I1-DESC"), golden("AF-I1-BODY"))
     } else {
-        let header = format!("\n## {id}\n");
-        let section = AF_MD.split_once(&header).expect("AF heading").1;
-        let descriptor = section.split_once("Descriptor:\n```text\n").unwrap().1;
-        let body = section.split_once("\nBody:\n```text\n").unwrap().1;
-        (
-            literal_hex(descriptor.split_once("```").unwrap().0),
-            literal_hex(body.split_once("```").unwrap().0),
-        )
+        markdown_artifact_bytes(AF_MD, id)
     };
     FrozenArtifact {
         reference: format!("sha256:{reference}").parse().unwrap(),

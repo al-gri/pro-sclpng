@@ -1,6 +1,6 @@
 # Handoff: SPEC-001 — implementation continuation
 
-Status: **PARTIAL / FINAL_VERIFICATION_PENDING**. All new contracts and ADR remain **PROPOSED**.
+Status: **PARTIAL / WINDOWS_RETEST_REQUIRED**. All new contracts and ADR remain **PROPOSED**.
 Repository: `al-gri/pro-sclpng` only. Same Issue #3, branch `feat/SPEC-001-domain-contracts`, Draft PR #10.
 [Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674).
 Base/main remains `6c520237d35865c79dba9e74fa64bd4c2c9e419f`. Approved design revision: `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
@@ -14,7 +14,7 @@ The full rust-tests log was re-read in this continuation and confirms Expected S
 
 At preflight for this continuation, PR head was newer than c393: `9b3ee661b81a035c7acbfaf7ca2e463b0cf407f5`, parented by `f1f1209dd180ecc69bd69fc923929308d4ff0aec`. It already contained the memory-only WAL/recovery implementation and independent binary fixtures; no rollback was performed.
 
-Fresh local environment: Linux x86_64, Git 2.47.3, Python 3.13.5; rustc/cargo/rustup/rustfmt/clippy unavailable. `git ls-remote https://github.com/al-gri/pro-sclpng.git HEAD` failed DNS with exit 128. There is no local checkout; API authoring is not reported as one. Local Rust commands and Windows 11/PowerShell 5.1 remain **NOT_RUN**.
+Fresh local environment: Linux x86_64, Git 2.47.3, Python 3.13.5; rustc/cargo/rustup/rustfmt/clippy unavailable. `git ls-remote https://github.com/al-gri/pro-sclpng.git HEAD` failed DNS with exit 128. There is no local checkout; API authoring is not reported as one. Worker-local Rust commands remain **NOT_RUN**; the later owner Windows standalone result is recorded below.
 
 ## Implemented scope
 
@@ -165,3 +165,18 @@ Exact-head CI on `a38d5dcf24e04bdcd7766e4cfc33e557bfab9039`: [run 37374378766](h
 - rust-fmt job `111979126135`: **FAIL**, with actual `cargo fmt --all -- --check` diff. This is a demonstrated formatting defect, not a cancelled/queued inference. The containing commit applies that exact formatter output across the allowed `crates/domain/**` files without semantic changes.
 
 The containing commit therefore requires fresh exact-head CI before any QA-ready claim. Its final SHA is intentionally recorded only in the PR after commit. The existing workflow still does not execute the separate mandatory `cargo test -p domain --locked`; with no local Rust toolchain or checkout, that command remains **NOT_RUN / verification blocker** unless an authorized environment runs it. Linux CI is not Windows evidence.
+
+
+## Windows standalone portability failure and fix
+
+Owner verification on exact SHA `dc7af8369e9c30c6877aae1b13cd23901c765cb3`, Windows 11 x64 / PowerShell 5.1 / `1.98.1-x86_64-pc-windows-msvc`, executed the mandatory standalone command `cargo test -p domain --locked` and **FAILED**. The `wire` binary reported **10 passed, 16 failed, 0 ignored**. The shown failures converged at `crates/domain/tests/support/binary_fixtures.rs:211:49` while locating an AF Markdown heading.
+
+The confirmed cause is test-fixture portability, not contract semantics: `AF_MD` is loaded with `include_str!`, while the frozen artifact parser searched LF-only delimiters such as `"\\n## {id}\\n"`, `"Descriptor:\\n\`\`\`text\\n"` and `"\\nBody:\\n\`\`\`text\\n"`. A Windows checkout may materialize the Markdown wrapper with CRLF, so the parser could not find the heading.
+
+The containing fix normalizes only CRLF→LF in the **textual Markdown wrapper before heading/fence lookup**. Literal hex is decoded only after that normalization; descriptor bytes, body bytes, claimed digests, WAL bytes, CRCs and contract semantics are unchanged. No production API/dependency/hash/verifier is added and no normative golden is rewritten for Windows.
+
+Regression test: `artifact_wire.rs::af_markdown_wrapper_is_crlf_portable_without_changing_fixture_bytes` constructs a synthetic CRLF wrapper and proves identical descriptor/body bytes versus the LF wrapper for every Markdown-backed frozen AF ID used by the helper: AF-N1, AF-B1, AF-C1, AF-F1 and AF-V1. AF-I1 is sourced from the line-oriented WAL fixture and does not use the Markdown parser.
+
+The other textual fixture readers in `binary_fixtures.rs` (`wal-frames-v1.txt` and `policy-variants-v1.txt`) parse through `str::lines()`, which accepts LF and CRLF line endings; no analogous exact-delimiter defect was found, so they are unchanged.
+
+This containing commit requires fresh exact-head Linux CI. The exact new final SHA and its CI evidence are recorded post-commit in PR #10 rather than self-referencing this file. After green Linux CI, the required next owner action is to repeat exactly `cargo test -p domain --locked` on Windows 11 x64 / PowerShell 5.1 / Rust 1.98.1. Until that succeeds, status remains **PARTIAL / WINDOWS_RETEST_REQUIRED**, not READY_FOR_QA.
