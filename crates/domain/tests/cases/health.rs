@@ -1,6 +1,6 @@
 //! R1/R3/C2 recorded-input model assertions; all source/evidence facts synthetic.
 
-use crate::support::bodies::{FreshnessBody, VerificationBody, WarmupBody};
+use crate::support::bodies::{EvidenceScope, FreshnessBody, VerificationBody, WarmupBody};
 use crate::support::fixtures::{self, cursor, raw_id, snapshot, update};
 use crate::support::health::*;
 use crate::support::scenario::{Scenario, mock_node};
@@ -696,7 +696,6 @@ fn v_r3_old_quiet_proof_does_not_poison_new_scope() {
     assert!(out.effects.is_empty());
 }
 
-
 #[test]
 fn qa_p2_verification_resolution_precedes_body_obsolete_scope() {
     for (resolution, expected) in [
@@ -707,12 +706,7 @@ fn qa_p2_verification_resolution_precedes_body_obsolete_scope() {
         ),
     ] {
         let (mut scenario, wire) = obsolete_verification_case(resolution);
-        assert_artifact_blocked(
-            &mut scenario,
-            Control::Verification(wire),
-            11,
-            expected,
-        );
+        assert_artifact_blocked(&mut scenario, Control::Verification(wire), 11, expected);
     }
 
     let (mut scenario, wire) = obsolete_verification_case(DynamicResolution::Resolved);
