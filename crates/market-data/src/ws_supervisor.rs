@@ -68,9 +68,9 @@ impl QueuePolicy {
     }
 
     fn validate(self, stream_count: usize) -> Result<Self, SupervisorError> {
-        let control_reserve = stream_count
-            .checked_mul(CONTROL_RESERVE_PER_STREAM)
-            .ok_or(SupervisorError::InvalidConfiguration("control reserve overflow"))?;
+        let control_reserve = stream_count.checked_mul(CONTROL_RESERVE_PER_STREAM).ok_or(
+            SupervisorError::InvalidConfiguration("control reserve overflow"),
+        )?;
         if !(1..=HARD_MAX_RAW_FRAMES_PER_STREAM).contains(&self.max_raw_frames_per_stream) {
             return Err(SupervisorError::InvalidConfiguration(
                 "max_raw_frames_per_stream",
@@ -88,9 +88,7 @@ impl QueuePolicy {
                 "max_raw_message_bytes",
             ));
         }
-        if self.max_total_items > HARD_MAX_TOTAL_ITEMS
-            || self.max_total_items <= control_reserve
-        {
+        if self.max_total_items > HARD_MAX_TOTAL_ITEMS || self.max_total_items <= control_reserve {
             return Err(SupervisorError::InvalidConfiguration("max_total_items"));
         }
         Ok(self)
@@ -391,6 +389,12 @@ enum Ingress {
     },
 }
 
+#[derive(Clone, Copy)]
+struct GapLoss {
+    range: Option<(CaptureAttemptNo, CaptureAttemptNo)>,
+    loss_count: Option<u64>,
+}
+
 pub struct PublicWsSupervisor {
     active_context: ActiveContext,
     recording_gate: RecordingGate,
@@ -415,7 +419,9 @@ impl PublicWsSupervisor {
             .streams
             .len()
             .checked_mul(CONTROL_RESERVE_PER_STREAM)
-            .ok_or(SupervisorError::InvalidConfiguration("control reserve overflow"))?;
+            .ok_or(SupervisorError::InvalidConfiguration(
+                "control reserve overflow",
+            ))?;
         let raw_item_limit = queue_policy
             .max_total_items
             .checked_sub(control_reserve)
@@ -542,7 +548,14 @@ impl PublicWsSupervisor {
                 observed_ns: stamp.monotonic_ns,
             });
         }
-        self.push_ingress(stream, Ingress::Connected { stream, epoch, stamp })
+        self.push_ingress(
+            stream,
+            Ingress::Connected {
+                stream,
+                epoch,
+                stamp,
+            },
+        )
     }
 
     pub fn queue_disconnected(
@@ -591,7 +604,14 @@ impl PublicWsSupervisor {
             if known.is_none() || !known.is_some_and(|(_, current)| current) {
                 return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
             }
-            return self.push_ingress(stream, Ingress::Pong { stream, epoch, stamp });
+            return self.push_ingress(
+                stream,
+                Ingress::Pong {
+                    stream,
+                    epoch,
+                    stamp,
+                },
+            );
         }
 
         let queue_len = self.queue.len();
@@ -612,8 +632,10 @@ impl PublicWsSupervisor {
             runtime.capture_attempt_frontier = attempt_value;
 
             let next_bytes = runtime.queued_raw_bytes.checked_add(bytes.len());
-            let per_stream_room = runtime.queued_raw_frames < self.queue_policy.max_raw_frames_per_stream
-                && next_bytes.is_some_and(|value| value <= self.queue_policy.max_raw_bytes_per_stream)
+            let per_stream_room = runtime.queued_raw_frames
+                < self.queue_policy.max_raw_frames_per_stream
+                && next_bytes
+                    .is_some_and(|value| value <= self.queue_policy.max_raw_bytes_per_stream)
                 && bytes.len() <= self.queue_policy.max_raw_message_bytes;
             (tag, current, attempt, per_stream_room)
         };
@@ -640,10 +662,9 @@ impl PublicWsSupervisor {
                 .get_mut(&stream)
                 .ok_or(SupervisorError::UnknownConnection(connection))?;
             runtime.queued_raw_frames += 1;
-            runtime.queued_raw_bytes = runtime
-                .queued_raw_bytes
-                .checked_add(bytes.len())
-                .ok_or(SupervisorError::InvalidConfiguration("queued raw bytes overflow"))?;
+            runtime.queued_raw_bytes = runtime.queued_raw_bytes.checked_add(bytes.len()).ok_or(
+                SupervisorError::InvalidConfiguration("queued raw bytes overflow"),
+            )?;
             self.queue.push_back(Ingress::Raw {
                 stream,
                 tag,
@@ -794,12 +815,21 @@ impl PublicWsSupervisor {
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
         let (connection, symbol, current_epoch) = {
-            let runtime = self.streams.get(&stream).ok_or(
-                SupervisorError::InvalidConfiguration("missing connected stream"),
-            )?;
+            let runtime =
+                self.streams
+                    .get(&stream)
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing connected stream",
+                    ))?;
             (
                 runtime.binding.connection_id,
-                runtime.binding.spec.instrument.native_symbol.as_str().to_owned(),
+                runtime
+                    .binding
+                    .spec
+                    .instrument
+                    .native_symbol
+                    .as_str()
+                    .to_owned(),
                 runtime.binding.tag.connection,
             )
         };
@@ -824,10 +854,12 @@ impl PublicWsSupervisor {
             .monotonic_ns
             .checked_add(HEARTBEAT_INTERVAL_NS)
             .ok_or(SupervisorError::TimeOverflow)?;
-        let runtime = self
-            .streams
-            .get_mut(&stream)
-            .ok_or(SupervisorError::InvalidConfiguration("missing connected stream"))?;
+        let runtime =
+            self.streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing connected stream",
+                ))?;
         runtime.transport = Transport::Up;
         runtime.subscription = SubscriptionState::AwaitingAck;
         runtime.reconnect_failures = 0;
@@ -874,7 +906,10 @@ impl PublicWsSupervisor {
                 .streams
                 .get(&stream)
                 .ok_or(SupervisorError::InvalidConfiguration("missing pong stream"))?;
-            (runtime.binding.connection_id, runtime.binding.tag.connection)
+            (
+                runtime.binding.connection_id,
+                runtime.binding.tag.connection,
+            )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
@@ -930,11 +965,16 @@ impl PublicWsSupervisor {
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
         let (connection, current_epoch) = {
-            let runtime = self
-                .streams
-                .get(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration("missing timer stream"))?;
-            (runtime.binding.connection_id, runtime.binding.tag.connection)
+            let runtime =
+                self.streams
+                    .get(&stream)
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing timer stream",
+                    ))?;
+            (
+                runtime.binding.connection_id,
+                runtime.binding.tag.connection,
+            )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
@@ -956,10 +996,12 @@ impl PublicWsSupervisor {
             .monotonic_ns
             .checked_add(PONG_TIMEOUT_NS_V1)
             .ok_or(SupervisorError::TimeOverflow)?;
-        let runtime = self
-            .streams
-            .get_mut(&stream)
-            .ok_or(SupervisorError::InvalidConfiguration("missing timer stream"))?;
+        let runtime =
+            self.streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing timer stream",
+                ))?;
         runtime.ping_timer_queued = false;
         runtime.next_ping_due_ns = None;
         runtime.pong_deadline_ns = Some(pong_deadline_ns);
@@ -1041,8 +1083,10 @@ impl PublicWsSupervisor {
             tag,
             stamp,
             Reason::QueueOverflow,
-            Some((attempt, attempt)),
-            Some(1),
+            Some(GapLoss {
+                range: Some((attempt, attempt)),
+                loss_count: Some(1),
+            }),
             sink,
         )?;
         let runtime = self
@@ -1211,7 +1255,6 @@ impl PublicWsSupervisor {
                             stamp,
                             Reason::SourceGap,
                             None,
-                            None,
                             sink,
                         )?;
                         let runtime = self
@@ -1251,14 +1294,18 @@ impl PublicWsSupervisor {
         let tag = self
             .streams
             .get(&stream)
-            .ok_or(SupervisorError::InvalidConfiguration("missing failed stream"))?
+            .ok_or(SupervisorError::InvalidConfiguration(
+                "missing failed stream",
+            ))?
             .binding
             .tag;
-        let gap_record = self.persist_gap(stream, tag, stamp, reason, None, None, sink)?;
-        let runtime = self
-            .streams
-            .get_mut(&stream)
-            .ok_or(SupervisorError::InvalidConfiguration("missing failed stream"))?;
+        let gap_record = self.persist_gap(stream, tag, stamp, reason, None, sink)?;
+        let runtime =
+            self.streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing failed stream",
+                ))?;
         runtime.subscription = SubscriptionState::Degraded;
         runtime.continuity.clear_for_new_generation();
         runtime.last_market_record = None;
@@ -1281,10 +1328,12 @@ impl PublicWsSupervisor {
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
         let (connection, old_tag, book_id) = {
-            let runtime = self
-                .streams
-                .get(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration("missing disconnected stream"))?;
+            let runtime =
+                self.streams
+                    .get(&stream)
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing disconnected stream",
+                    ))?;
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag,
@@ -1373,10 +1422,12 @@ impl PublicWsSupervisor {
         )?;
 
         let (new_tag, delay_ns) = {
-            let runtime = self
-                .streams
-                .get_mut(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration("missing disconnected stream"))?;
+            let runtime =
+                self.streams
+                    .get_mut(&stream)
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing disconnected stream",
+                    ))?;
             runtime.previous_tag = Some(old_tag);
             runtime.binding.tag.book = Some(next_book);
             runtime.transport = Transport::Unknown;
@@ -1434,8 +1485,7 @@ impl PublicWsSupervisor {
         tag: EpochTag,
         stamp: ReceiveStamp,
         reason: Reason,
-        range: Option<(CaptureAttemptNo, CaptureAttemptNo)>,
-        loss_count: Option<u64>,
+        loss: Option<GapLoss>,
         sink: &mut impl RecordSink,
     ) -> Result<RecordNo, SupervisorError> {
         self.persist_record(
@@ -1445,8 +1495,8 @@ impl PublicWsSupervisor {
                 scope: GapScope::ExplicitTargets(vec![GapTarget {
                     stream,
                     tag,
-                    range,
-                    loss_count,
+                    range: loss.and_then(|loss| loss.range),
+                    loss_count: loss.and_then(|loss| loss.loss_count),
                 }]),
                 reason,
             }),
@@ -1493,21 +1543,14 @@ impl PublicWsSupervisor {
         Ok(record_no)
     }
 
-    fn stream_for_connection(
-        &self,
-        connection: ConnectionId,
-    ) -> Result<StreamId, SupervisorError> {
+    fn stream_for_connection(&self, connection: ConnectionId) -> Result<StreamId, SupervisorError> {
         self.by_connection
             .get(&connection)
             .copied()
             .ok_or(SupervisorError::UnknownConnection(connection))
     }
 
-    fn push_ingress(
-        &mut self,
-        stream: StreamId,
-        ingress: Ingress,
-    ) -> Result<(), SupervisorError> {
+    fn push_ingress(&mut self, stream: StreamId, ingress: Ingress) -> Result<(), SupervisorError> {
         if self.queue.len() >= self.queue_policy.max_total_items {
             self.halted = true;
             return Err(SupervisorError::QueueExhausted { stream });
