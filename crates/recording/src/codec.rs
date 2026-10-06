@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use domain::identity::*;
 use domain::record::*;
 
-use crate::binary::{checked, crc32, CodecError, CodecErrorKind, Reader, Result, Writer};
+use crate::binary::{CodecError, CodecErrorKind, Reader, Result, Writer, checked, crc32};
 
 pub const MAX_PAYLOAD: usize = 1_048_576;
 pub const HEADER_LEN: usize = 32;
@@ -33,10 +33,7 @@ impl<'a> FrameView<'a> {
     }
 }
 
-pub(crate) fn parse_header(
-    bytes: &[u8; HEADER_LEN],
-    absolute_offset: u64,
-) -> Result<FrameHeader> {
+pub(crate) fn parse_header(bytes: &[u8; HEADER_LEN], absolute_offset: u64) -> Result<FrameHeader> {
     let mut reader = Reader::new(bytes, 0)?;
     if reader.take(4)? != b"PSRW" {
         return Err(CodecError::new(0, CodecErrorKind::Corrupt("magic")));
@@ -75,10 +72,7 @@ pub(crate) fn parse_header(
     let record_no = reader.record_no()?;
     let segment_no = SegmentNo::new(reader.u32()?);
     if reader.u32()? != 0 {
-        return Err(CodecError::new(
-            28,
-            CodecErrorKind::Corrupt("reserved"),
-        ));
+        return Err(CodecError::new(28, CodecErrorKind::Corrupt("reserved")));
     }
     let frame_len = payload_len
         .checked_add(HEADER_LEN + 4)
@@ -159,9 +153,7 @@ pub fn decode_frame(
             let version = reader.spec_version()?;
             let known = specs
                 .get(&(instrument_slot, version))
-                .ok_or_else(|| {
-                    CodecError::new(spec_offset, CodecErrorKind::UnknownDefinition)
-                })?;
+                .ok_or_else(|| CodecError::new(spec_offset, CodecErrorKind::UnknownDefinition))?;
             let connection_id = reader.connection()?;
             let connection = reader.connection_epoch()?;
             let subscription = reader.subscription_epoch()?;
@@ -274,11 +266,7 @@ pub fn decode_frame(
     Ok(frame)
 }
 
-pub fn decode_exact(
-    bytes: &[u8],
-    has_active: bool,
-    specs: &Definitions,
-) -> Result<RecordFrame> {
+pub fn decode_exact(bytes: &[u8], has_active: bool, specs: &Definitions) -> Result<RecordFrame> {
     let view = scan_frame(bytes, 0)?;
     if view.length() != bytes.len() {
         return Err(CodecError::new(
