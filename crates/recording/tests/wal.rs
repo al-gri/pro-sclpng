@@ -226,12 +226,7 @@ fn raw_frame(number: u64, attempt: u64, bytes: Vec<u8>) -> RecordFrame {
     }
 }
 
-fn raw_frame_in_segment(
-    number: u64,
-    segment_no: u32,
-    attempt: u64,
-    bytes: Vec<u8>,
-) -> RecordFrame {
+fn raw_frame_in_segment(number: u64, segment_no: u32, attempt: u64, bytes: Vec<u8>) -> RecordFrame {
     let mut frame = raw_frame(number, attempt, bytes);
     frame.segment_no = segment(segment_no);
     frame
@@ -343,8 +338,7 @@ fn complete_frames() -> Vec<RecordFrame> {
     ];
     let seal = seal_frame(9, 0, &frames, true, true);
     frames.push(seal);
-    let archive_seal =
-        archive_seal_frame(10, 0, &frames, 1, InputQuality::GapsRecorded);
+    let archive_seal = archive_seal_frame(10, 0, &frames, 1, InputQuality::GapsRecorded);
     frames.push(archive_seal);
     frames
 }
@@ -359,8 +353,9 @@ fn multi_segment_frames() -> (Vec<RecordFrame>, Vec<RecordFrame>) {
     ];
     let first_seal = seal_frame(6, 0, &first, false, false);
     let first_seal_bytes = encode_frame(&first_seal).expect("encode seal");
-    let first_seal_crc =
-        scan_frame(&first_seal_bytes, 0).expect("scan seal").checksum;
+    let first_seal_crc = scan_frame(&first_seal_bytes, 0)
+        .expect("scan seal")
+        .checksum;
     first.push(first_seal);
 
     let segment_start = RecordFrame {
@@ -384,8 +379,7 @@ fn multi_segment_frames() -> (Vec<RecordFrame>, Vec<RecordFrame>) {
 
     let mut global = first.clone();
     global.extend(second.iter().cloned());
-    let archive_seal =
-        archive_seal_frame(10, 1, &global, 2, InputQuality::NoKnownLoss);
+    let archive_seal = archive_seal_frame(10, 1, &global, 2, InputQuality::NoKnownLoss);
     second.push(archive_seal);
     (first, second)
 }
@@ -412,20 +406,17 @@ fn hex(text: &str) -> Vec<u8> {
 }
 
 fn w01() -> Vec<u8> {
-    hex(
-        "
+    hex("
         50 53 52 57 01 00 01 00 01 00 00 00 26 00 00 00
         01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
         01 01 01 01 01 01 01 01 01 01 01 01 01 01 01 01
         02 02 02 02 02 02 02 02 02 02 02 02 02 02 02 02
         01 00 00 00 03 00 13 c4 02 9e
-        ",
-    )
+        ")
 }
 
 fn gap_positive_vector() -> Vec<u8> {
-    hex(
-        "
+    hex("
         50 53 52 57 01 00 01 00 07 00 00 00 40 00 00 00
         0b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
         0b 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00
@@ -433,13 +424,11 @@ fn gap_positive_vector() -> Vec<u8> {
         01 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00
         00 00 00 00 01 01 00 00 00 00 00 00 00 00 00 00
         26 19 f4 e5
-        ",
-    )
+        ")
 }
 
 fn gap_reversed_vector() -> Vec<u8> {
-    hex(
-        "
+    hex("
         50 53 52 57 01 00 01 00 07 00 00 00 40 00 00 00
         0b 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
         0b 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00
@@ -447,8 +436,7 @@ fn gap_reversed_vector() -> Vec<u8> {
         01 00 00 00 01 00 00 00 00 00 00 00 01 00 00 00
         00 00 00 00 01 01 00 00 00 00 00 00 00 00 00 00
         f2 eb ed 35
-        ",
-    )
+        ")
 }
 
 fn rewrite_crc(bytes: &mut [u8]) {
@@ -563,7 +551,9 @@ fn maximum_bounded_record_is_accepted_without_unbounded_length_trust() {
 
     let empty = raw_frame(5, 1, Vec::new());
     let fixed_payload = encode_frame(&empty).expect("encode empty").len() - 36;
-    let raw_len = MAX_PAYLOAD.checked_sub(fixed_payload).expect("fixed below cap");
+    let raw_len = MAX_PAYLOAD
+        .checked_sub(fixed_payload)
+        .expect("fixed below cap");
     let maximum = raw_frame(5, 1, vec![0x5a; raw_len]);
     let encoded = encode_frame(&maximum).expect("encode max");
     assert_eq!(encoded.len(), MAX_FRAME_LEN);
@@ -723,10 +713,7 @@ fn unsupported_versions_kinds_control_and_gap_scope_are_typed() {
         let mut bytes = w01();
         bytes[offset..offset + 2].copy_from_slice(&2_u16.to_le_bytes());
         let error = scan_frame(&bytes, 0).expect_err("unsupported version");
-        assert_eq!(
-            error.kind,
-            CodecErrorKind::Unsupported { field, value: 2 }
-        );
+        assert_eq!(error.kind, CodecErrorKind::Unsupported { field, value: 2 });
     }
 
     let mut unknown_kind = w01();
@@ -743,8 +730,7 @@ fn unsupported_versions_kinds_control_and_gap_scope_are_typed() {
     let mut control = encode_frame(&timer_frame(6, 0)).expect("control");
     control[56] = 255;
     rewrite_crc(&mut control);
-    let error = decode_exact(&control, true, &Definitions::new())
-        .expect_err("unsupported control");
+    let error = decode_exact(&control, true, &Definitions::new()).expect_err("unsupported control");
     assert_eq!(
         error.kind,
         CodecErrorKind::Unsupported {
@@ -755,15 +741,14 @@ fn unsupported_versions_kinds_control_and_gap_scope_are_typed() {
 
     let positive = gap_positive_vector();
     assert_eq!(crc32(&positive[..96]), 0xe5f4_1926);
-    let decoded =
-        decode_exact(&positive, true, &Definitions::new()).expect("accepted GAP vector");
+    let decoded = decode_exact(&positive, true, &Definitions::new()).expect("accepted GAP vector");
     assert_eq!(decoded.record_no, record(11));
     assert!(matches!(decoded.value, Record::Gap(_)));
 
     let reversed = gap_reversed_vector();
     assert_eq!(crc32(&reversed[..96]), 0x35ed_ebf2);
-    let error = decode_exact(&reversed, true, &Definitions::new())
-        .expect_err("reversed GAP fields");
+    let error =
+        decode_exact(&reversed, true, &Definitions::new()).expect_err("reversed GAP fields");
     assert_eq!(error.offset, 56);
     assert_eq!(
         error.kind,
@@ -792,8 +777,8 @@ fn malformed_structural_fields_are_not_defaulted() {
     let mut bad_option = w01();
     bad_option[69] = 2;
     rewrite_crc(&mut bad_option);
-    let error = decode_exact(&bad_option, false, &Definitions::new())
-        .expect_err("malformed option");
+    let error =
+        decode_exact(&bad_option, false, &Definitions::new()).expect_err("malformed option");
     assert_eq!(error.kind, CodecErrorKind::InvalidPayload("option"));
 }
 
@@ -856,7 +841,6 @@ fn reader_never_sorts_opaque_raw_inputs_by_timestamp_like_payloads() {
         raws,
         vec![b"exchange_ts=200".to_vec(), b"exchange_ts=100".to_vec()]
     );
-
 }
 
 #[test]
@@ -924,10 +908,7 @@ fn deleting_final_seals_never_promotes_a_valid_boundary_to_complete() {
 
     write_bytes(&path, &encode_sequence(&frames[..frames.len() - 2]));
     let no_seals = read_archive(&[&path]);
-    assert_eq!(
-        no_seals.report.status,
-        ArchiveStatus::ValidPrefixIncomplete
-    );
+    assert_eq!(no_seals.report.status, ArchiveStatus::ValidPrefixIncomplete);
 }
 
 #[test]
@@ -1028,9 +1009,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
         .expect_err("permit cannot be reused");
     assert!(matches!(
         error,
-        WriterError::Validation(ValidationError::Loss(
-            LossError::UnaccountedAttemptGap
-        ))
+        WriterError::Validation(ValidationError::Loss(LossError::UnaccountedAttemptGap))
     ));
 
     let path = temp.path("loss-count");
@@ -1046,9 +1025,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
         .expect_err("claimed two but inferred one");
     assert!(matches!(
         error,
-        WriterError::Validation(ValidationError::Loss(
-            LossError::LossCountMismatch
-        ))
+        WriterError::Validation(ValidationError::Loss(LossError::LossCountMismatch))
     ));
 
     let path = temp.path("gap-scope");
@@ -1079,9 +1056,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
         .expect_err("open window cannot cross epoch");
     assert!(matches!(
         error,
-        WriterError::Validation(ValidationError::Loss(
-            LossError::GapScopeTransition
-        ))
+        WriterError::Validation(ValidationError::Loss(LossError::GapScopeTransition))
     ));
 }
 
