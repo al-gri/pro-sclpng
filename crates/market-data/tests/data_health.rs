@@ -295,11 +295,7 @@ fn source_gap_and_reset_discontinuity_fail_closed() {
             .step(recorded(5, 2, frame(&binding, books(UPDATE))))
             .expect("update");
         runtime
-            .step(recorded(
-                6,
-                2,
-                verify(&binding, 5, BookEvidenceKind::Delta),
-            ))
+            .step(recorded(6, 2, verify(&binding, 5, BookEvidenceKind::Delta)))
             .expect("update proof");
 
         runtime
