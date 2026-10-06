@@ -1,3 +1,9 @@
+use super::{VerifiedFrameProof, VerifiedProofConflict, VerifiedWarmupProof};
+use crate::{
+    BitgetMessage, BookFrameObservation, BookInvalidReason, BookValidity, ContinuityOutcome,
+    ContinuityRule, DataHealthReducer, HealthDiagnostic, HealthEffect, HealthError,
+    HealthObservation, PendingLimit, RecordedHealthObservation, StepResult, decode_message,
+};
 use domain::artifact::ArtifactRef;
 use domain::event::{ClockScope, MonotonicSample};
 use domain::identity::{
@@ -6,12 +12,6 @@ use domain::identity::{
     RecordNo, SpecRef, SpecVersion, StreamBinding, StreamId, SubscriptionEpoch, Token,
 };
 use domain::policy::{DurabilityMode, HealthPolicy, PolicyFields, RecordingGate, SilenceRule};
-use super::{VerifiedFrameProof, VerifiedProofConflict, VerifiedWarmupProof};
-use crate::{
-    BitgetMessage, BookFrameObservation, BookInvalidReason, BookValidity, ContinuityOutcome,
-    ContinuityRule, DataHealthReducer, HealthDiagnostic, HealthEffect, HealthError,
-    HealthObservation, PendingLimit, RecordedHealthObservation, StepResult, decode_message,
-};
 use domain::record::{
     BookEvidenceKind, EpochChange, Freshness, GapScope, GapTarget, Reason, Transport,
     VerificationEvidence, WarmupEvidence,
