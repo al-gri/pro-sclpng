@@ -268,12 +268,14 @@ fn supervisor_rejects_bindings_outside_exact_bitget_usdt_futures_profile() {
 
     let mut dated = base;
     dated.spec.instrument.market = MarketKind::DatedFuture;
-    assert!(PublicWsSupervisor::new(supervisor_config(
-        vec![dated],
-        QueuePolicy::default(),
-        RecordingGate::Written,
-    ))
-    .is_ok());
+    assert!(
+        PublicWsSupervisor::new(supervisor_config(
+            vec![dated],
+            QueuePolicy::default(),
+            RecordingGate::Written,
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
@@ -409,7 +411,12 @@ fn sustained_overflow_coalesces_loss_and_does_not_halt_neighbor_stream() {
     assert!(!supervisor.is_halted());
 
     supervisor
-        .queue_text(b.connection_id, b.tag.connection, stamp(100), ack("ETHUSDT"))
+        .queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(100),
+            ack("ETHUSDT"),
+        )
         .expect("neighbor raw remains admissible");
     assert_eq!(supervisor.queued_items(), 3);
 
@@ -498,10 +505,11 @@ fn queued_overflow_before_disconnect_drains_before_epoch_advance() {
         .expect("drain loss")
         .expect("loss result");
     assert_eq!(loss.records.len(), 4);
-    assert!(loss.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::QueueGapRecorded { .. }
-    )));
+    assert!(
+        loss.events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::QueueGapRecorded { .. }))
+    );
     assert!(loss.events.iter().any(|event| matches!(
         event,
         SupervisorEvent::EpochAdvanced { tag, .. } if tag.connection.get() == 2

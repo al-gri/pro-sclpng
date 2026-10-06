@@ -705,8 +705,20 @@ impl PublicWsSupervisor {
             (tag, current, attempt, per_stream_room)
         };
 
-        let global_raw_room = self.queued_raw_items < self.raw_item_limit
-            && self.queue.len() < self.queue_policy.max_total_items;
+        let loss_reserve = self
+            .streams
+            .len()
+            .checked_mul(LOSS_RESERVE_PER_STREAM)
+            .ok_or(SupervisorError::InvalidConfiguration(
+                "loss reserve overflow",
+            ))?;
+        let loss_safe_limit = self
+            .queue_policy
+            .max_total_items
+            .checked_sub(loss_reserve)
+            .ok_or(SupervisorError::InvalidConfiguration("max_total_items"))?;
+        let global_raw_room =
+            self.queued_raw_items < self.raw_item_limit && self.queue.len() < loss_safe_limit;
 
         if global_raw_room && per_stream_room {
             let runtime = self
@@ -855,9 +867,10 @@ impl PublicWsSupervisor {
             } => self.handle_queue_gap(
                 stream,
                 tag,
-                first_attempt,
-                last_attempt,
-                loss_count,
+                GapLoss {
+                    range: Some((first_attempt, last_attempt)),
+                    loss_count: Some(loss_count),
+                },
                 stamp,
                 sink,
             )?,
@@ -1140,23 +1153,18 @@ impl PublicWsSupervisor {
         &mut self,
         stream: StreamId,
         tag: EpochTag,
-        first_attempt: CaptureAttemptNo,
-        last_attempt: CaptureAttemptNo,
-        loss_count: u64,
+        loss: GapLoss,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let record = self.persist_gap(
-            stream,
-            tag,
-            stamp,
-            Reason::QueueOverflow,
-            Some(GapLoss {
-                range: Some((first_attempt, last_attempt)),
-                loss_count: Some(loss_count),
-            }),
-            sink,
-        )?;
+        let first_attempt = loss
+            .range
+            .map(|(first, _)| first)
+            .ok_or(SupervisorError::InvalidConfiguration(
+                "queue gap missing attempt range",
+            ))?;
+        let record =
+            self.persist_gap(stream, tag, stamp, Reason::QueueOverflow, Some(loss), sink)?;
 
         let current_tag = self
             .streams
@@ -1536,11 +1544,12 @@ impl PublicWsSupervisor {
                     .ok_or(SupervisorError::InvalidConfiguration(
                         "missing disconnected stream",
                     ))?;
-            let pending = runtime
-                .pending_disconnect
-                .ok_or(SupervisorError::InvalidConfiguration(
-                    "missing pending disconnect",
-                ))?;
+            let pending =
+                runtime
+                    .pending_disconnect
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing pending disconnect",
+                    ))?;
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag,
