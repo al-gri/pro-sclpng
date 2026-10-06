@@ -41,7 +41,11 @@ impl CodecError {
 
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WAL codec error at byte {}: {:?}", self.offset, self.kind)
+        write!(
+            f,
+            "WAL codec error at byte {}: {:?}",
+            self.offset, self.kind
+        )
     }
 }
 
@@ -169,10 +173,7 @@ impl<'a> Reader<'a> {
             .checked_mul(minimum)
             .ok_or_else(|| CodecError::new(self.offset(), CodecErrorKind::LengthError))?;
         if count > cap || needed > self.remaining() {
-            return Err(CodecError::new(
-                self.offset(),
-                CodecErrorKind::LengthError,
-            ));
+            return Err(CodecError::new(self.offset(), CodecErrorKind::LengthError));
         }
         Ok(())
     }
@@ -264,12 +265,7 @@ impl Crc32 {
         for byte in bytes {
             self.0 ^= u32::from(*byte);
             for _ in 0..8 {
-                self.0 = (self.0 >> 1)
-                    ^ if self.0 & 1 == 1 {
-                        0xedb8_8320
-                    } else {
-                        0
-                    };
+                self.0 = (self.0 >> 1) ^ if self.0 & 1 == 1 { 0xedb8_8320 } else { 0 };
             }
         }
     }
