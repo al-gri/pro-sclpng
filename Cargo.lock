@@ -13,3 +13,10 @@ version = "0.1.0"
 [[package]]
 name = "radar"
 version = "0.1.0"
+
+[[package]]
+name = "recording"
+version = "0.1.0"
+dependencies = [
+ "domain",
+]
