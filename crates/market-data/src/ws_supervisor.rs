@@ -1157,12 +1157,12 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let first_attempt = loss
-            .range
-            .map(|(first, _)| first)
-            .ok_or(SupervisorError::InvalidConfiguration(
-                "queue gap missing attempt range",
-            ))?;
+        let first_attempt =
+            loss.range
+                .map(|(first, _)| first)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "queue gap missing attempt range",
+                ))?;
         let record =
             self.persist_gap(stream, tag, stamp, Reason::QueueOverflow, Some(loss), sink)?;
 

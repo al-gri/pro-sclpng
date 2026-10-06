@@ -296,7 +296,7 @@ fn supervisor_rejects_second_writer_for_same_canonical_normal_book() {
 }
 
 #[test]
-fn previous_epoch_oversized_raw_is_bounded_as_empty_diagnostic() {
+fn previous_epoch_raw_exceeding_wal_capacity_is_bounded_as_empty_diagnostic() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let old_epoch = binding.tag.connection;
     let queue = QueuePolicy {
@@ -332,7 +332,7 @@ fn previous_epoch_oversized_raw_is_bounded_as_empty_diagnostic() {
             binding.connection_id,
             old_epoch,
             stamp(3),
-            vec![b'x'; 1_000_001],
+            vec![b'x'; 1_100_000],
         )
         .expect("bounded stale rejection");
     let queued = supervisor.snapshot(binding.id).expect("queued");
