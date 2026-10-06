@@ -484,3 +484,237 @@ repaired head.
 Target worker stop state after the fresh containing-head CI succeeds:
 **READY_FOR_INDEPENDENT_QA**. It is not READY_FOR_OWNER_REVIEW.
 
+## Second independent-QA CHANGES_REQUIRED remediation
+
+The second full independent QA reviewed exact immutable head
+`cd02f7c0e3aaa70b31546ad548ab48f46f268a9c` and returned
+**CHANGES_REQUIRED** for one remaining liveness defect in the
+`pending_disconnect` state machine.
+
+QA explicitly confirmed the prior remediation findings as fixed:
+
+- F1 stale/previous-generation raw bounds — **FIXED**;
+- F2 sustained overflow/global halt — **FIXED**;
+- F3 exact Bitget profile binding — **FIXED**;
+- F4 canonical single writer — **FIXED**;
+- original F5 QueueOverflow-before-epoch-advance ordering — **FIXED**;
+- F6 architecture namespace/alias anti-bypass guard — **FIXED**.
+
+This second repair preserves those code paths and their regressions. It continues
+the same Issue #20 / claim / branch / PR #34 lineage with fast-forward commits
+only. No replacement claim, branch, Issue, PR, force-push, merge or auto-merge
+was created/performed.
+
+### Blocking finding — repeated same-generation disconnect liveness
+
+Disposition: **FIXED**.
+
+Previously, once the first same-epoch disconnect had been drained,
+`pending_disconnect = Some(epoch)`; a second already-queued same-epoch
+disconnect called `begin_disconnect()` and returned
+`InvalidConfiguration("disconnect already pending")`. Because the ingress had
+already been popped, normal post-handler completion was skipped and the pending
+transition could remain permanently stranded.
+
+The repaired semantics are:
+
+1. the first loss observation for the current connection epoch records
+   `Transport::Down`, moves the stream to Down/Degraded, installs exactly one
+   bounded `PendingDisconnect`, and emits one Close command;
+2. a repeated loss observation for that same still-current pending epoch is
+   **idempotent for transition ownership** but is not silently discarded:
+   another existing-contract `Transport::Down` control record is persisted
+   with its own receive timestamp;
+3. the duplicate observation does **not** install a second pending transition,
+   does not emit a second Close, does not create a second generation advance,
+   and does not schedule a second reconnect;
+4. after every successfully handled ingress, `finish_ready_disconnects()`
+   checks whether any already-admitted ingress for the pending connection epoch
+   still remains;
+5. after the last such ingress reaches the configured RecordingGate, the
+   connection/subscription/book epochs advance exactly once and one
+   `ReconnectAfter` is emitted;
+6. the empty-queue branch of `drain_one()` now also runs
+   `finish_ready_disconnects()` before returning `None`, so a ready pending
+   transition cannot require a future unrelated packet/tick to make progress;
+7. persistence/gate failures still return through the existing fail-closed path
+   and keep the supervisor halted rather than publishing unpersisted progress.
+
+The original pending transition timestamp remains the causal stamp for the
+single epoch-advance/reconnect transition. Repeated Down observations are
+recorded as observations, not reinterpreted as additional transitions.
+
+No Record/WAL/domain contract was added or weakened. In particular, accepted
+QueueOverflow/GAP scope and `GapScopeTransition` semantics remain unchanged.
+
+### Targeted regression A — repeated same-epoch disconnect
+
+`repeated_same_epoch_disconnect_records_duplicate_down_and_finishes_once`
+
+Queues two `Disconnected(epoch=1)` observations before the first drain and
+proves:
+
+- the first drain records Down and leaves the transition pending while the
+  second epoch-1 ingress remains;
+- the second Down is persisted without a fatal configuration error;
+- exactly two Down observations are recorded;
+- exactly three epoch-advance control records exist (connection/subscription/book,
+  one transition only);
+- exactly one `ReconnectAfter` is emitted across both drains;
+- connection/subscription/book reach generation 2;
+- final state is `Transport::Unknown / SubscriptionState::Backoff`;
+- no market state is revived;
+- the queue is empty and a further drain returns `None`.
+
+### Targeted regression B — heartbeat timeout + queued disconnect
+
+`heartbeat_timeout_then_same_epoch_disconnect_finishes_one_transition`
+
+Queues the accepted heartbeat `PongTimeout(epoch=1)`, then queues a normal
+`Disconnected(epoch=1)` before draining the timeout.
+
+It proves:
+
+- timer controls are recorded;
+- timeout Down is recorded;
+- the subsequent same-epoch disconnect records another Down instead of failing;
+- no epoch advance occurs while that second old-generation ingress remains;
+- exactly one connection/subscription/book generation advance occurs;
+- exactly one reconnect schedule is emitted;
+- final state is generation 2 Backoff/Unknown with no stranded pending state.
+
+### Targeted regression C — duplicate disconnect with old-generation raw queued
+
+`repeated_disconnect_waits_for_queued_old_generation_raw_before_advancing`
+
+Queues:
+
+`Disconnected(epoch=1) -> admissible raw(epoch=1) -> Disconnected(epoch=1)`.
+
+It proves:
+
+- the first Down does not advance the generation while old-generation ingress is
+  still admitted;
+- the raw bytes are persisted with the original epoch before the connection
+  epoch-advance record;
+- draining the raw still does not advance while the second disconnect remains;
+- the final duplicate Down is non-fatal and completion then advances to
+  generation 2;
+- no global halt or permanent Down state remains.
+
+### Targeted regression D — completion when the last blocker empties the queue
+
+`pending_disconnect_finishes_when_last_blocker_drain_empties_queue`
+
+Queues a disconnect followed by one admitted old-generation raw frame. The first
+drain installs the pending transition; the second drain consumes the last
+generation-1 blocker and simultaneously returns the epoch advance/reconnect
+completion. The queue is empty afterward and no future unrelated ingress is
+required. A subsequent empty drain is `None`.
+
+The production empty-queue branch also attempts ready pending completion as a
+defense-in-depth liveness guard.
+
+### Targeted regression E — stale post-transition disconnect
+
+`stale_disconnect_after_epoch_advance_cannot_start_another_transition`
+
+After a normal generation-1 -> generation-2 disconnect transition, a new
+`queue_disconnected(epoch=1)` is rejected by the existing
+`UnknownConnectionEpoch` contract. It does not enqueue work, create another
+epoch advance, or mutate generation 2.
+
+### Previously fixed regressions retained
+
+The second remediation leaves intact and re-runs the prior independent-QA
+coverage, including:
+
+- 1.1 MB previous-generation oversized payload bounded diagnostic;
+- sustained 32-overflow coalescing to attempt range `2..=33` / count 32;
+- neighbor-stream serviceability;
+- exact project identity gate for `bitget/usdt-futures/books50`;
+- canonical same-`BookRef` second-writer rejection through
+  `validate_registration()`;
+- original QueueOverflow-before-epoch-advance FIFO regression;
+- architecture grouped/alias namespace anti-bypass regressions.
+
+### Second-remediation changed paths
+
+Relative to second-QA-rejected head
+`cd02f7c0e3aaa70b31546ad548ab48f46f268a9c`, the code/test repair before
+this documentation commit changes only:
+
+- `crates/market-data/src/ws_supervisor.rs`;
+- `crates/market-data/tests/ws_supervisor.rs`.
+
+This handoff file is the only additional path in the final documentation commit.
+
+No `crates/domain/**`, `crates/recording/**`, accepted spec/ADR,
+`tests/architecture.rs`, workflow, application composition, networking stack,
+`docs/PROJECT_STATE.md`, canonical book, strategy or execution path is changed
+by this second remediation.
+
+### Verification during second remediation
+
+Worker-local Rust/shell execution remains unavailable on this connector surface:
+
+- `cargo fmt --all -- --check` — **NOT_RUN locally**;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` —
+  **NOT_RUN locally**;
+- `cargo test --workspace --locked` — **NOT_RUN locally**;
+- live public WebSocket smoke — **NOT_RUN**.
+
+Historical intermediate exact-head run:
+
+- `37540989334` on
+  `1a4418ffb6b512d652340c99f976dd6c81cf0d03` — **FAIL** only because
+  rust-fmt reported layout changes; on that same SHA rust-clippy and rust-tests
+  completed **PASS**.
+
+Code-only post-format exact-head run:
+
+- **37541101768** on
+  `c36b8c11aabe5e1b45012e0cbcdbe0a876f904e6` — **SUCCESS**:
+  rust-fmt PASS, rust-clippy PASS, rust-tests PASS, Cargo.lock verification
+  PASS, workspace build PASS, and clean-checkout verification PASS.
+
+The code-only PASS becomes historical after this handoff commit and is not
+transferred to the final documentation-containing SHA.
+
+### Preserved boundaries after second remediation
+
+Unchanged:
+
+- **U-09 UNKNOWN / BLOCKED** — regular books50 quantity unit;
+- **U-10 UNKNOWN / BLOCKED** — zero/delete semantics;
+- **U-20 NOT_PROVEN / FORBIDDEN** — REST<->WS healing/stitching;
+- **C-01 BLOCKED** — RPI canonical normalization;
+- **C-03 UNKNOWN** — instruments-route relationship.
+
+No quantity interpretation, `qty=0 -> DeleteLevel`, REST healing, RPI
+normalization, private/authenticated API, strategy, execution, REC-001E or
+REC-001F was introduced. The concrete DNS/TCP/TLS/WebSocket driver remains the
+documented external-driver limitation and is not a finding/remediation here.
+
+### Second re-QA gate
+
+After the commit containing this section:
+
+1. obtain the new immutable PR #34 head;
+2. require fresh exact-head GitHub Actions **SUCCESS** for rust-fmt,
+   rust-clippy and rust-tests;
+3. require Cargo.lock verification, workspace build and clean checkout all PASS;
+4. record the final SHA/run in PR #34 and Issue #20 mutable metadata;
+5. return the existing PR from Draft to Ready;
+6. perform a **full independent QA of the complete new immutable SHA**, not only
+   this patch, with explicit retest of repeated disconnect, timeout+disconnect,
+   old-generation ingress barrier, empty-queue completion, stale post-transition
+   disconnect, and all previously fixed HIGH findings.
+
+The historical PASS `37538436961` belongs to the second rejected head and is
+not transferred.
+
+Target worker stop state after the containing-head CI succeeds:
+**READY_FOR_INDEPENDENT_QA**. The worker does not declare
+READY_FOR_OWNER_REVIEW.
+
