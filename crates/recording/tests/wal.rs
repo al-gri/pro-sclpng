@@ -1078,7 +1078,6 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
     ));
 }
 
-
 #[test]
 fn unresolved_local_loss_window_is_nonfatal_diagnostic_on_complete_unknown_archive() {
     let frames = unresolved_archive_frames(InputQuality::Unknown);
