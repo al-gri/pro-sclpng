@@ -759,10 +759,12 @@ fn repeated_same_epoch_disconnect_records_duplicate_down_and_finishes_once() {
             .count(),
         1
     );
-    assert!(!first.commands.iter().any(|command| matches!(
-        command,
-        TransportCommand::ReconnectAfter { .. }
-    )));
+    assert!(
+        !first
+            .commands
+            .iter()
+            .any(|command| matches!(command, TransportCommand::ReconnectAfter { .. }))
+    );
     let pending = supervisor.snapshot(stream).expect("pending");
     assert_eq!(pending.tag.connection, old_epoch);
     assert_eq!(pending.transport, Transport::Down);
@@ -870,14 +872,18 @@ fn heartbeat_timeout_then_same_epoch_disconnect_finishes_one_transition() {
         .expect("drain timeout")
         .expect("timeout result");
     assert_eq!(timed_out.records.len(), 2);
-    assert!(timed_out.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::HeartbeatTimerRecorded { .. }
-    )));
-    assert!(!timed_out.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::EpochAdvanced { .. }
-    )));
+    assert!(
+        timed_out
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::HeartbeatTimerRecorded { .. }))
+    );
+    assert!(
+        !timed_out
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::EpochAdvanced { .. }))
+    );
     let pending = supervisor.snapshot(stream).expect("pending timeout");
     assert_eq!(pending.tag.connection, old_epoch);
     assert_eq!(pending.transport, Transport::Down);
@@ -990,11 +996,16 @@ fn repeated_disconnect_waits_for_queued_old_generation_raw_before_advancing() {
         .drain_one(&mut sink)
         .expect("drain old raw")
         .expect("old raw result");
-    assert!(raw_result.events.iter().all(|event| !matches!(
-        event,
-        SupervisorEvent::EpochAdvanced { .. }
-    )));
-    assert_eq!(supervisor.snapshot(stream).expect("still pending").tag, old_tag);
+    assert!(
+        raw_result
+            .events
+            .iter()
+            .all(|event| !matches!(event, SupervisorEvent::EpochAdvanced { .. }))
+    );
+    assert_eq!(
+        supervisor.snapshot(stream).expect("still pending").tag,
+        old_tag
+    );
 
     let duplicate = supervisor
         .drain_one(&mut sink)
@@ -1008,24 +1019,28 @@ fn repeated_disconnect_waits_for_queued_old_generation_raw_before_advancing() {
     let raw_position = sink
         .frames
         .iter()
-        .position(|frame| matches!(
-            &frame.value,
-            Record::RawInput(input) if input.tag == old_tag && input.bytes == raw
-        ))
+        .position(|frame| {
+            matches!(
+                &frame.value,
+                Record::RawInput(input) if input.tag == old_tag && input.bytes == raw
+            )
+        })
         .expect("old raw persisted");
     let advance_position = sink
         .frames
         .iter()
-        .position(|frame| matches!(
-            &frame.value,
-            Record::Control(ControlRecord {
-                value: Control::EpochAdvance {
-                    change: EpochChange::Connection { .. },
+        .position(|frame| {
+            matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance {
+                        change: EpochChange::Connection { .. },
+                        ..
+                    },
                     ..
-                },
-                ..
-            })
-        ))
+                })
+            )
+        })
         .expect("connection epoch advance");
     assert!(raw_position < advance_position);
 

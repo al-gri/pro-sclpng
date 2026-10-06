@@ -823,10 +823,7 @@ impl PublicWsSupervisor {
         let Some(ingress) = self.queue.pop_front() else {
             let mut result = DrainResult::default();
             self.finish_ready_disconnects(sink, &mut result)?;
-            if result.records.is_empty()
-                && result.commands.is_empty()
-                && result.events.is_empty()
-            {
+            if result.records.is_empty() && result.commands.is_empty() && result.events.is_empty() {
                 return Ok(None);
             }
             return Ok(Some(result));
