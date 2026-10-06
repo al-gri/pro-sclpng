@@ -65,6 +65,7 @@ pub enum BookInvalidReason {
     SnapshotIntervalMismatch,
     NeedsSnapshot,
     UnexpectedSnapshot,
+    SnapshotNotTwoSided,
     PendingOverflow(PendingLimit),
     PendingTimeout,
     PendingDeadlineOverflow,
@@ -185,12 +186,75 @@ pub struct BookFrameObservation {
     pub frame: Books50Frame,
 }
 
+/// Opaque post-verifier capability for one accepted frame proof.
+///
+/// Ordinary callers can name and transport this value but cannot construct it
+/// from a parsed `ArtifactRef` or public DTO fields. Until a production artifact
+/// verifier is implemented inside this crate, only crate unit tests mint it.
+///
+/// ```compile_fail
+/// use market_data::VerifiedFrameProof;
+/// let _ = VerifiedFrameProof {
+///     evidence: todo!(),
+///     valid_until_ns: None,
+/// };
+/// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedFrameProof {
-    pub evidence: VerificationEvidence,
-    /// Accepted post-verifier temporal bound from the resolved verification body.
-    /// Parsed artifact references alone are not sufficient to construct this.
-    pub valid_until_ns: Option<u64>,
+    evidence: VerificationEvidence,
+    valid_until_ns: Option<u64>,
+}
+
+impl VerifiedFrameProof {
+    #[cfg(test)]
+    fn accepted(evidence: VerificationEvidence, valid_until_ns: Option<u64>) -> Self {
+        Self {
+            evidence,
+            valid_until_ns,
+        }
+    }
+}
+
+/// Opaque post-verifier capability for a truthful warm-up witness.
+///
+/// ```compile_fail
+/// use market_data::VerifiedWarmupProof;
+/// let _ = VerifiedWarmupProof { evidence: todo!() };
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedWarmupProof {
+    evidence: WarmupEvidence,
+}
+
+impl VerifiedWarmupProof {
+    #[cfg(test)]
+    fn accepted(evidence: WarmupEvidence) -> Self {
+        Self { evidence }
+    }
+}
+
+/// Opaque post-verifier capability for a contradictory current-scope proof.
+///
+/// ```compile_fail
+/// use market_data::VerifiedProofConflict;
+/// let _ = VerifiedProofConflict {
+///     stream: todo!(),
+///     tag: todo!(),
+///     raw: todo!(),
+/// };
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedProofConflict {
+    stream: StreamId,
+    tag: EpochTag,
+    raw: RecordNo,
+}
+
+impl VerifiedProofConflict {
+    #[cfg(test)]
+    fn accepted(stream: StreamId, tag: EpochTag, raw: RecordNo) -> Self {
+        Self { stream, tag, raw }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,17 +275,13 @@ pub enum HealthObservation {
     /// boundary. This reducer still enforces current scope, barrier, ordering,
     /// evidence kind, proof expiry and ordered pending release.
     VerifiedFrame(VerifiedFrameProof),
-    /// Explicit post-verifier outcome for contradictory current-scope frame
-    /// evidence. Old/pre-barrier scope is diagnosed before invalidation.
-    ProofConflict {
-        stream: StreamId,
-        tag: EpochTag,
-        raw: RecordNo,
-    },
+    /// Explicit opaque post-verifier outcome for contradictory current-scope
+    /// frame evidence. Old/pre-barrier scope is diagnosed before invalidation.
+    ProofConflict(VerifiedProofConflict),
     /// The evidence has already passed the accepted artifact/body verification
     /// boundary. Parsed proof references alone must not be converted into this
     /// observation.
-    VerifiedWarmup(WarmupEvidence),
+    VerifiedWarmup(VerifiedWarmupProof),
     Timer {
         stream: StreamId,
     },
@@ -281,6 +341,7 @@ struct PendingFrame {
     outputs: u32,
     deadline_ns: u64,
     proof: Option<AcceptedFrameProof>,
+    two_sided_snapshot: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -551,11 +612,11 @@ impl DataHealthReducer {
             HealthObservation::BookFrame(frame) => {
                 self.book_frame(at, original_sample_ns, frame, out)
             }
-            HealthObservation::VerifiedFrame(evidence) => self.verify_frame(at, evidence, out),
-            HealthObservation::ProofConflict { stream, tag, raw } => {
-                self.proof_conflict(at, *stream, *tag, *raw, out)
+            HealthObservation::VerifiedFrame(proof) => self.verify_frame(at, proof, out),
+            HealthObservation::ProofConflict(conflict) => {
+                self.proof_conflict(at, conflict, out)
             }
-            HealthObservation::VerifiedWarmup(evidence) => self.warmup(at, evidence, out),
+            HealthObservation::VerifiedWarmup(proof) => self.warmup(at, proof, out),
             HealthObservation::Timer { stream } => {
                 if self.streams.contains_key(stream) {
                     Ok(())
@@ -616,23 +677,27 @@ impl DataHealthReducer {
         let affected: Vec<_> = self
             .streams
             .values()
-            .filter(|state| {
-                state.binding.connection_id == connection && state.binding.tag.connection == epoch
-            })
+            .filter(|state| state.binding.connection_id == connection)
             .map(|state| state.binding.id)
             .collect();
-
-        if affected.is_empty() {
-            if self
-                .streams
-                .values()
-                .any(|state| state.binding.connection_id == connection)
-            {
-                out.diagnostics
-                    .push(HealthDiagnostic::ObsoleteConnection { connection, epoch });
-                return Ok(());
-            }
+        let Some(first) = affected.first() else {
             return Err(HealthError::UnknownConnection(connection));
+        };
+        let current = self
+            .streams
+            .get(first)
+            .ok_or(HealthError::UnknownStream(*first))?
+            .binding
+            .tag
+            .connection;
+
+        if epoch < current {
+            out.diagnostics
+                .push(HealthDiagnostic::ObsoleteConnection { connection, epoch });
+            return Ok(());
+        }
+        if epoch > current {
+            return Err(HealthError::Identity(IdentityError::EpochMismatch));
         }
 
         let previous = self.transport_state(connection, epoch);
@@ -642,15 +707,18 @@ impl DataHealthReducer {
                 epoch,
                 value,
             });
-            return Ok(());
+            if value != Transport::Down {
+                return Ok(());
+            }
+        } else {
+            self.transport.insert((connection, epoch), value);
+            out.effects.push(HealthEffect::TransportChanged {
+                connection,
+                epoch,
+                value,
+            });
         }
 
-        self.transport.insert((connection, epoch), value);
-        out.effects.push(HealthEffect::TransportChanged {
-            connection,
-            epoch,
-            value,
-        });
         if value == Transport::Down {
             for stream in affected {
                 self.invalidate_stream(stream, at, BookInvalidReason::TransportDown, out)?;
@@ -980,6 +1048,8 @@ impl DataHealthReducer {
             outputs: observation.candidate_outputs,
             deadline_ns,
             proof: None,
+            two_sided_snapshot: !observation.frame.asks.is_empty()
+                && !observation.frame.bids.is_empty(),
         });
         out.effects.push(HealthEffect::FramePending {
             stream: state.binding.id,
@@ -1075,24 +1145,23 @@ impl DataHealthReducer {
     fn proof_conflict(
         &mut self,
         at: RecordNo,
-        stream: StreamId,
-        tag: EpochTag,
-        raw: RecordNo,
+        conflict: &VerifiedProofConflict,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
+        let stream = conflict.stream;
         let state = self
             .streams
             .get(&stream)
             .ok_or(HealthError::UnknownStream(stream))?;
-        if raw <= state.barrier {
+        if conflict.raw <= state.barrier {
             out.diagnostics.push(HealthDiagnostic::PreBarrier {
                 stream,
-                referenced: raw,
+                referenced: conflict.raw,
                 barrier: state.barrier,
             });
             return Ok(());
         }
-        if tag != state.binding.tag {
+        if conflict.tag != state.binding.tag {
             out.diagnostics
                 .push(HealthDiagnostic::ObsoleteScope { stream });
             return Ok(());
@@ -1127,6 +1196,17 @@ impl DataHealthReducer {
             }
             match pending.kind {
                 BookEvidenceKind::Snapshot => {
+                    if self.policy.fields.require_two_sided_snapshot
+                        && !pending.two_sided_snapshot
+                    {
+                        Self::invalidate_state(
+                            state,
+                            at,
+                            BookInvalidReason::SnapshotNotTwoSided,
+                            out,
+                        );
+                        break;
+                    }
                     state.book = Some(BookValidity::Warming);
                     state.anchor = Some(Anchor {
                         raw: pending.raw,
@@ -1181,9 +1261,10 @@ impl DataHealthReducer {
     fn warmup(
         &mut self,
         at: RecordNo,
-        evidence: &WarmupEvidence,
+        proof: &VerifiedWarmupProof,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
+        let evidence = &proof.evidence;
         let stream = evidence.stream;
         let mut state = self
             .streams
@@ -1359,3 +1440,7 @@ fn ordinary_freshness(
     };
     (value, false)
 }
+
+#[cfg(test)]
+#[path = "data_health_tests.rs"]
+mod tests;
