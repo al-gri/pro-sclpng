@@ -13,7 +13,8 @@ pub use data_health::{
     BookFrameObservation, BookInvalidReason, BookValidity, ConnectionTransportSnapshot,
     ContinuityReport, DataHealthReducer, DataHealthSnapshot, HealthDiagnostic, HealthEffect,
     HealthError, HealthObservation, PendingLimit, PendingSummary, RecordedHealthObservation,
-    StepResult, StreamHealthSnapshot, VerifiedFrameProof,
+    StepResult, StreamHealthSnapshot, VerifiedFrameProof, VerifiedProofConflict,
+    VerifiedWarmupProof,
 };
 pub use decoder::{
     Action, BOOKS50_MAX_LEVELS, BitgetMessage, Books50Frame, Category, DecodeError, DecodeLimits,
