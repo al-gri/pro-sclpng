@@ -1,0 +1,115 @@
+{
+  "schema": "pro-sclpng/bitget-fixture-manifest/v1",
+  "verified_date": "2026-10-06",
+  "profile": "Bitget UTA v3 regular JSON public feed unless fixture name says rpi",
+  "origin_default": "synthetic",
+  "documentation_version": "No global JSON wire-doc version exposed; pages checked 2026-10-06",
+  "sources": {
+    "depth": "https://www.bitget.com/docs/uta/websocket/public/Order-Book-Channel",
+    "trades": "https://www.bitget.com/docs/uta/websocket/public/New-Trades-Channel",
+    "rpi_depth": "https://www.bitget.com/docs/uta/websocket/public/RPI-OrderBook-Channel",
+    "market": "https://www.bitget.com/docs/catalog/market/market-data",
+    "changelog": "https://www.bitget.com/legacy-docs/uta/changelog"
+  },
+  "fixtures": [
+    {
+      "file": "books50-snapshot.json",
+      "origin": "synthetic",
+      "scenario": "snapshot",
+      "source": [
+        "depth"
+      ],
+      "expected": "initial trusted-anchor candidate only after project verification; sequence snapshot seq=1000",
+      "guarantee_scope": "shape/snapshot role/order are source-derived; numeric values synthetic",
+      "sha256": "231fa6cfbd0ca4b42e99628da4b84d29066e3c4b1a91d30555624f962e549c29"
+    },
+    {
+      "file": "books50-update.json",
+      "origin": "synthetic",
+      "scenario": "update",
+      "source": [
+        "depth"
+      ],
+      "expected": "continuity candidate because pseq=1000 follows snapshot seq=1000 and snapshot seq lies in [pseq,seq]",
+      "guarantee_scope": "continuity relation source-derived; values synthetic; zero/delete semantics not exercised",
+      "sha256": "df394ff695a4f0cecc55fcd75e4b0321d4756f78cf68ea9c21b7a9003faf6100"
+    },
+    {
+      "file": "books50-gap.json",
+      "origin": "synthetic",
+      "scenario": "gap",
+      "source": [
+        "depth"
+      ],
+      "expected": "invalid continuity if applied after books50-update.json because previous seq=1001 != current pseq=1003",
+      "guarantee_scope": "pseq mismatch gap detection is source-derived; exact numbers synthetic",
+      "sha256": "31dbdf5f3eba0542c2a0d607dfbaa50832bd53402b439ce6675346ffb6fe815e"
+    },
+    {
+      "file": "books50-duplicate.json",
+      "origin": "synthetic",
+      "scenario": "duplicate",
+      "source": [
+        "depth"
+      ],
+      "expected": "synthetic repeated-message/idempotency negative case; NOT a claim Bitget guarantees or emits duplicates",
+      "guarantee_scope": "edge case project test only",
+      "sha256": "df394ff695a4f0cecc55fcd75e4b0321d4756f78cf68ea9c21b7a9003faf6100"
+    },
+    {
+      "file": "books50-reset.json",
+      "origin": "synthetic",
+      "scenario": "reset",
+      "source": [
+        "depth"
+      ],
+      "expected": "synthetic reset-signature case pseq=0 with low seq; docs say reset may occur and pseq=0 is most likely, not guaranteed",
+      "guarantee_scope": "possibility/reset note source-derived; exact frame synthetic",
+      "sha256": "8a3c3b0f518ad5f3d98fd8b2dd3362171d85cb4e747121e90feb6ba6d0a1c0e4"
+    },
+    {
+      "file": "books50-empty-levels.json",
+      "origin": "synthetic",
+      "scenario": "empty levels",
+      "source": [
+        "depth"
+      ],
+      "expected": "bounded parser/structural edge case; empty arrays are not asserted as a Bitget guarantee",
+      "guarantee_scope": "synthetic parser case",
+      "sha256": "0a7225bebbead121e461a1f8945af71eb14630253b674f44d48b4c02ba614104"
+    },
+    {
+      "file": "public-trades.json",
+      "origin": "synthetic",
+      "scenario": "trades",
+      "source": [
+        "trades"
+      ],
+      "expected": "parse price/size/id/correlation/time/isRPI; map JSON fill side to accepted aggressor UNKNOWN",
+      "guarantee_scope": "field schema/unit source-derived; values synthetic; aggressor remains unknown",
+      "sha256": "30b0f5bd2d990bc84b5ee9b75455e03a2f223ad7931d02d145695d98fa7c5a89"
+    },
+    {
+      "file": "books50-zero-quantity-unknown.json",
+      "origin": "synthetic",
+      "scenario": "zero quantity unknown",
+      "source": [
+        "depth"
+      ],
+      "expected": "MUST NOT infer DeleteLevel; official regular JSON page does not define zero/delete mapping",
+      "guarantee_scope": "negative evidence/unknown-semantics test only",
+      "sha256": "ae00fc0c706bc9e9f4bc6bf27d7ed6f820fa211b02a4a77cbd6db8bf03d3bc95"
+    },
+    {
+      "file": "rpi-books50-snapshot.json",
+      "origin": "synthetic",
+      "scenario": "RPI two-quantity snapshot",
+      "source": [
+        "rpi_depth"
+      ],
+      "expected": "preserve separate non-RPI/RPI quantity components; do not normalize into accepted one-quantity book without ADR",
+      "guarantee_scope": "three-field level shape and snapshot-every-push source-derived; values synthetic",
+      "sha256": "e4deab497c4cf81a936324e42347ef51b672df9bcab6f2b5dab3857e1fe705b5"
+    }
+  ]
+}
