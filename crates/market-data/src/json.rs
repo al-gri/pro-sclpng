@@ -183,7 +183,7 @@ impl Parser<'_> {
                     return String::from_utf8(out)
                         .map_err(|_| self.error_at(JsonErrorKind::InvalidUtf8, start));
                 }
-                b'\' => self.parse_escape(&mut out)?,
+                0x5c => self.parse_escape(&mut out)?,
                 0x00..=0x1f => {
                     return Err(self.error(JsonErrorKind::ControlCharacterInString));
                 }
@@ -201,7 +201,7 @@ impl Parser<'_> {
             .ok_or_else(|| self.error(JsonErrorKind::UnexpectedEof))?;
         match escaped {
             b'"' => out.push(b'"'),
-            b'\' => out.push(b'\'),
+            0x5c => out.push(0x5c),
             b'/' => out.push(b'/'),
             b'b' => out.push(0x08),
             b'f' => out.push(0x0c),
@@ -211,7 +211,7 @@ impl Parser<'_> {
             b'u' => {
                 let high = self.parse_hex_quad()?;
                 let scalar = if (0xd800..=0xdbff).contains(&high) {
-                    if self.bump() != Some(b'\') || self.bump() != Some(b'u') {
+                    if self.bump() != Some(0x5c) || self.bump() != Some(b'u') {
                         return Err(self.error(JsonErrorKind::InvalidUnicodeEscape));
                     }
                     let low = self.parse_hex_quad()?;
