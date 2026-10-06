@@ -13,10 +13,10 @@ mod file;
 mod recovery;
 mod wire;
 
-pub use binary::{crc32, CodecError, CodecErrorKind, Crc32};
+pub use binary::{CodecError, CodecErrorKind, Crc32, crc32};
 pub use codec::{
-    decode_exact, decode_frame, encode_frame, scan_frame, Definitions, FrameHeader, FrameView,
-    HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD,
+    Definitions, FrameHeader, FrameView, HEADER_LEN, MAX_FRAME_LEN, MAX_PAYLOAD, decode_exact,
+    decode_frame, encode_frame, scan_frame,
 };
 pub use file::{StorageWatermarks, WalWriter, WriterError};
 pub use recovery::{
