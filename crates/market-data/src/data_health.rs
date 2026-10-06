@@ -68,6 +68,7 @@ pub enum BookInvalidReason {
     PendingOverflow(PendingLimit),
     PendingTimeout,
     PendingDeadlineOverflow,
+    ProofExpired,
     ProofConflict,
 }
 
@@ -111,6 +112,9 @@ pub enum HealthDiagnostic {
         value: Transport,
     },
     WitnessMismatch {
+        stream: StreamId,
+    },
+    FreshnessDeadlineOverflow {
         stream: StreamId,
     },
 }
@@ -182,6 +186,14 @@ pub struct BookFrameObservation {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedFrameProof {
+    pub evidence: VerificationEvidence,
+    /// Accepted post-verifier temporal bound from the resolved verification body.
+    /// Parsed artifact references alone are not sufficient to construct this.
+    pub valid_until_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HealthObservation {
     RegisterStream(StreamBinding),
     Transport {
@@ -197,8 +209,8 @@ pub enum HealthObservation {
     BookFrame(BookFrameObservation),
     /// The evidence has already passed the accepted artifact/body verification
     /// boundary. This reducer still enforces current scope, barrier, ordering,
-    /// evidence kind and ordered pending release.
-    VerifiedFrame(VerificationEvidence),
+    /// evidence kind, proof expiry and ordered pending release.
+    VerifiedFrame(VerifiedFrameProof),
     /// Explicit post-verifier outcome for contradictory current-scope frame
     /// evidence. Old/pre-barrier scope is diagnosed before invalidation.
     ProofConflict {
@@ -268,7 +280,12 @@ struct PendingFrame {
     raw_bytes: u32,
     outputs: u32,
     deadline_ns: u64,
-    verified: bool,
+    proof: Option<AcceptedFrameProof>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AcceptedFrameProof {
+    valid_until_ns: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -962,7 +979,7 @@ impl DataHealthReducer {
             raw_bytes: observation.raw_bytes,
             outputs: observation.candidate_outputs,
             deadline_ns,
-            verified: false,
+            proof: None,
         });
         out.effects.push(HealthEffect::FramePending {
             stream: state.binding.id,
@@ -974,9 +991,10 @@ impl DataHealthReducer {
     fn verify_frame(
         &mut self,
         at: RecordNo,
-        evidence: &VerificationEvidence,
+        proof: &VerifiedFrameProof,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
+        let evidence = &proof.evidence;
         let stream = evidence.stream;
         let mut state = self
             .streams
@@ -1024,16 +1042,31 @@ impl DataHealthReducer {
             self.streams.insert(stream, state);
             return Ok(());
         }
-        if state.pending[position].verified {
-            out.diagnostics.push(HealthDiagnostic::AlreadyVerified {
-                stream,
-                raw: evidence.raw,
-            });
+        let accepted = AcceptedFrameProof {
+            valid_until_ns: proof.valid_until_ns,
+        };
+        if let Some(first) = state.pending[position].proof {
+            if first == accepted {
+                out.diagnostics.push(HealthDiagnostic::AlreadyVerified {
+                    stream,
+                    raw: evidence.raw,
+                });
+            } else {
+                Self::invalidate_state(&mut state, at, BookInvalidReason::ProofConflict, out);
+            }
+            self.streams.insert(stream, state);
+            return Ok(());
+        }
+        if accepted
+            .valid_until_ns
+            .is_some_and(|until| self.evaluation_ns >= until)
+        {
+            Self::invalidate_state(&mut state, at, BookInvalidReason::ProofExpired, out);
             self.streams.insert(stream, state);
             return Ok(());
         }
 
-        state.pending[position].verified = true;
+        state.pending[position].proof = Some(accepted);
         self.release_ready(&mut state, at, out)?;
         self.streams.insert(stream, state);
         Ok(())
@@ -1076,12 +1109,22 @@ impl DataHealthReducer {
         while state
             .pending
             .front()
-            .is_some_and(|pending| pending.verified)
+            .is_some_and(|pending| pending.proof.is_some())
         {
             let pending = state
                 .pending
                 .pop_front()
                 .ok_or(HealthError::InvalidObservation("pending.front"))?;
+            let proof = pending
+                .proof
+                .ok_or(HealthError::InvalidObservation("pending.proof"))?;
+            if proof
+                .valid_until_ns
+                .is_some_and(|until| self.evaluation_ns >= until)
+            {
+                Self::invalidate_state(state, at, BookInvalidReason::ProofExpired, out);
+                break;
+            }
             match pending.kind {
                 BookEvidenceKind::Snapshot => {
                     state.book = Some(BookValidity::Warming);
@@ -1273,7 +1316,14 @@ impl DataHealthReducer {
         policy: HealthPolicy,
         out: &mut StepResult,
     ) {
-        let next = ordinary_freshness(state.last_valid_sample_ns, evaluation_ns, policy);
+        let (next, diagnostic) =
+            ordinary_freshness(state.last_valid_sample_ns, evaluation_ns, policy);
+        if diagnostic {
+            out.diagnostics
+                .push(HealthDiagnostic::FreshnessDeadlineOverflow {
+                    stream: state.binding.id,
+                });
+        }
         if next != state.freshness {
             let previous = state.freshness;
             state.freshness = next;
@@ -1286,21 +1336,26 @@ impl DataHealthReducer {
     }
 }
 
-fn ordinary_freshness(sample: Option<u64>, evaluation_ns: u64, policy: HealthPolicy) -> Freshness {
+fn ordinary_freshness(
+    sample: Option<u64>,
+    evaluation_ns: u64,
+    policy: HealthPolicy,
+) -> (Freshness, bool) {
     let (Some(sample), Some(deadline)) = (sample, policy.fields.freshness_deadline_ns) else {
-        return Freshness::Unknown;
+        return (Freshness::Unknown, false);
     };
     let Some(expiry) = sample.checked_add(deadline) else {
-        return Freshness::Unknown;
+        return (Freshness::Unknown, true);
     };
     if evaluation_ns < sample {
-        return Freshness::Unknown;
+        return (Freshness::Unknown, false);
     }
     if evaluation_ns < expiry {
-        return Freshness::Fresh;
+        return (Freshness::Fresh, false);
     }
-    match policy.fields.silence_rule {
+    let value = match policy.fields.silence_rule {
         SilenceRule::UnknownOnSilence => Freshness::Unknown,
         SilenceRule::StaleAfterDeadline => Freshness::Stale,
-    }
+    };
+    (value, false)
 }
