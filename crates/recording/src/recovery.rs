@@ -972,6 +972,41 @@ impl WalReader {
         }
 
         loop {
+            if self.validator.archive_sealed() {
+                let mut extra = [0_u8; 1];
+                let extra_read = match read_up_to(
+                    &mut self.files[self.segment_index],
+                    &mut extra,
+                ) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let failure = self.fail(
+                            self.local_offset,
+                            self.absolute_offset,
+                            FailureKind::Io {
+                                operation: "read_after_archive_seal",
+                                kind: error.kind(),
+                            },
+                            ArchiveStatus::Invalid,
+                        );
+                        return Err(failure);
+                    }
+                };
+                if extra_read != 0 || self.segment_index + 1 < self.files.len() {
+                    let failure = self.fail(
+                        self.local_offset,
+                        self.absolute_offset,
+                        FailureKind::Validation(ValidationError::TrailingData),
+                        ArchiveStatus::Invalid,
+                    );
+                    return Err(failure);
+                }
+                self.report.status = ArchiveStatus::Complete;
+                self.report.input_quality = self.validator.input_quality();
+                self.terminal = true;
+                return Ok(None);
+            }
+
             let frame_start_local = self.local_offset;
             let frame_start_absolute = self.absolute_offset;
             let mut header_bytes = [0_u8; HEADER_LEN];
@@ -1152,16 +1187,11 @@ impl WalReader {
                 &bytes[..protected_end],
                 view.checksum,
             ) {
-                let status = if error == ValidationError::TrailingData {
-                    ArchiveStatus::Invalid
-                } else {
-                    ArchiveStatus::Invalid
-                };
                 let failure = self.fail(
                     frame_start_local,
                     frame_start_absolute,
                     FailureKind::Validation(error),
-                    status,
+                    ArchiveStatus::Invalid,
                 );
                 return Err(failure);
             }
@@ -1184,7 +1214,11 @@ impl WalReader {
             self.report.physical_good_offset = end;
             self.report.last_record = Some(frame.record_no);
             self.report.input_quality = self.validator.input_quality();
-            self.report.status = self.validator.eof_status();
+            self.report.status = if self.validator.archive_sealed() {
+                ArchiveStatus::ValidPrefixIncomplete
+            } else {
+                self.validator.eof_status()
+            };
             return Ok(Some(frame));
         }
     }
