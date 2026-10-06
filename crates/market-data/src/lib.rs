@@ -17,7 +17,7 @@ pub use data_health::{
 };
 pub use decoder::{
     Action, BOOKS50_MAX_LEVELS, BitgetMessage, Books50Frame, Category, DecodeError, DecodeLimits,
-    FillSide, LexicalValue, PublicTradeFrame, RpiFlag, Topic, WireLevel, WireTimestampMs, WireTrade,
-    decode_message, decode_message_with_limits,
+    FillSide, LexicalValue, PublicTradeFrame, RpiFlag, Topic, WireLevel, WireTimestampMs,
+    WireTrade, decode_message, decode_message_with_limits,
 };
 pub use json::{JsonError, JsonErrorKind};
