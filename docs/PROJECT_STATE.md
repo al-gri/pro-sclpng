@@ -14,11 +14,14 @@
 - Accepted MD-001 reviewed head: `76ca481ed9221289e001d120baf4baf8170c205a`.
 - Accepted MD-001 main baseline: `da3c1cd1086b42d4a06ec4a0c90010b012099557` — squash merge of [PR #13](https://github.com/al-gri/pro-sclpng/pull/13); post-merge push CI [37440205546](https://github.com/al-gri/pro-sclpng/actions/runs/37440205546) completed successfully on this exact commit.
 - Accepted post-MD state sync: `94b391c6f2ce3a86fdbdd3eb2bca503b38808069` — squash merge of [PR #15](https://github.com/al-gri/pro-sclpng/pull/15); post-merge push CI [37440668685](https://github.com/al-gri/pro-sclpng/actions/runs/37440668685) completed successfully on this exact commit.
-- Current phase: **M1 implementation / REC-001A next**.
+- REC-001A (#16): **DONE / ACCEPTED_IN_MAIN**.
+- Accepted REC-001A reviewed head: `edeae3608c369a5060798c19c3505d1c847b51db`; QA verdict record: PR #25 review `5426726490`.
+- Accepted REC-001A main baseline: `943c5d8f36015c65eda542717c2d61477dae7621` — squash merge of [PR #25](https://github.com/al-gri/pro-sclpng/pull/25); post-merge push CI [37446766415](https://github.com/al-gri/pro-sclpng/actions/runs/37446766415) completed successfully on this exact commit.
+- Current phase: **M1 implementation / REC-001B next**.
 - Workspace/toolchain: Rust **1.98.1**, workspace and offline/shadow CLI established by BOOT-001.
 - Domain status: exact value types, identities, event/causal contracts, DataHealth reference contracts, artifact relations and bounded WAL contracts are implemented/verified within the accepted SPEC-001 scope.
 - Exchange contract status: current Bitget public-feed baseline and bounded synthetic fixtures are accepted from MD-001; unresolved UNKNOWN/BLOCKED/CONFLICT items remain hard downstream constraints rather than implementation assumptions.
-- Runtime status: production Bitget connector, live book engine, filesystem recorder/replay, production artifact loader/verifier, strategy and execution are **NOT_IMPLEMENTED**.
+- Runtime status: accepted pure offline Bitget JSON decoder + continuity classifier are implemented by REC-001A; production Bitget connector, canonical live book engine, filesystem WAL/recorder/replay, production artifact loader/verifier, strategy and execution are **NOT_IMPLEMENTED**.
 - CI: **CONFIGURED / GREEN**. Required jobs are `rust-fmt`, `rust-clippy`, `rust-tests`; the latest accepted state-sync baseline above passed all three on push.
 - Main protection: `protect-main` is active with PR workflow, review-thread resolution and strict required checks.
 - Live trading: **OUT_OF_SCOPE / DISABLED**.
@@ -34,7 +37,7 @@ The embedded accepted baseline SHAs are release/reference points, not claims tha
 | BOOT-001 | #2 | **DONE** | — |
 | SPEC-001 | #3 | **DONE / ACCEPTED_IN_MAIN** | Downstream code must reuse accepted contracts rather than invent replacements |
 | MD-001 | #4 | **DONE / ACCEPTED_IN_MAIN** | Preserve unresolved U/C constraints in every dependent task |
-| REC-001 | #5 | **DECOMPOSED / REC-001A NEXT** | Start one worker on #16; later child tasks follow dependency order recorded in #5 comment 6013088690 |
+| REC-001 | #5 | **IN_PROGRESS / REC-001A ACCEPTED / REC-001B NEXT** | Start one worker on #17; later child tasks follow dependency order recorded in #5 comment 6013088690 |
 | QA-001 | #6 | **OPEN / ONGOING** | Independent review/evidence for concrete M1 PR SHAs |
 | RULE-001 | #7 | **PARALLEL / NON_BLOCKING_M1** | Validate provenance for the two strategy setups without delaying recorder/replay |
 
@@ -54,15 +57,15 @@ The remaining U-01…U-21/C-02 limitations in `docs/exchange/bitget-public-feed.
 
 ## REC-001 decomposition boundary
 
-- **#16 REC-001A** — pure regular JSON decoder + continuity classifier. **NEXT.**
-- **#17 REC-001B** — bounded WAL file writer/reader/recovery; follow accepted #16 unless Integrator explicitly avoids workspace conflict.
+- **#16 REC-001A** — pure regular JSON decoder + continuity classifier. **DONE / ACCEPTED_IN_MAIN.**
+- **#17 REC-001B** — bounded WAL file writer/reader/recovery. **NEXT.**
 - **#18 REC-001C** — DataHealth/continuity runtime reducer; depends on accepted #16.
 - **#19 MD-002** — source-evidence follow-up for U-09/U-10; required before canonical local-book level mutation.
 - **#20 REC-001D** — public WS supervisor/raw capture; depends on accepted #16/#17/#18.
 - **#21 REC-001E** — canonical regular local-book reducer; BLOCKED by accepted resolution of #19 plus #16/#18.
 - **#22 REC-001F** — recorder/replay integration; depends on accepted upstream components.
 
-WIP policy: launch only #16 as the next implementation worker. Do not assign the whole epic to one worker.
+WIP policy: launch only #17 as the next implementation worker. Do not assign the whole epic to one worker.
 
 ## Управление
 
@@ -74,6 +77,6 @@ WIP policy: launch only #16 as the next implementation worker. Do not assign the
 
 ## Следующая практическая поставка
 
-**REC-001A (#16)** — fixture-driven pure Rust decoder and continuity classifier only. It must not implement live networking, WAL, canonical book mutation, RPI normalization, REST stitching, strategy signals or execution.
+**REC-001B (#17)** — implement the accepted bounded filesystem WAL writer/reader/recovery contract only. It must not add WebSocket/networking, canonical local-book mutation, strategy signals or execution.
 
 Первый functional M1 target после последовательного принятия child tasks остаётся прежним: небольшой публичный поток → validated local state/data health → WAL → deterministic replay без скрытых gaps. Сигналы/TradePlan/execution в M1 не входят.
