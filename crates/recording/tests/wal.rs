@@ -395,9 +395,10 @@ fn encode_sequence(frames: &[RecordFrame]) -> Vec<u8> {
 fn hex(text: &str) -> Vec<u8> {
     let digits: String = text.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     assert!(digits.len().is_multiple_of(2));
-    digits
-        .as_bytes()
-        .chunks_exact(2)
+    let (pairs, remainder) = digits.as_bytes().as_chunks::<2>();
+    assert!(remainder.is_empty());
+    pairs
+        .iter()
         .map(|pair| {
             let pair = std::str::from_utf8(pair).expect("ascii hex");
             u8::from_str_radix(pair, 16).expect("hex")
@@ -458,11 +459,8 @@ struct TestRead {
 fn read_archive<P: AsRef<Path>>(paths: &[P]) -> TestRead {
     let mut reader = WalReader::open_segments(paths).expect("open WAL paths");
     let mut records = Vec::new();
-    loop {
-        match reader.next_record() {
-            Ok(Some(record)) => records.push(record),
-            Ok(None) | Err(_) => break,
-        }
+    while let Ok(Some(record)) = reader.next_record() {
+        records.push(record);
     }
     TestRead {
         records,
