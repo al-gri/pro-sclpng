@@ -13,17 +13,18 @@
 - MD-001 (#4): **DONE / ACCEPTED_IN_MAIN**.
 - Accepted MD-001 reviewed head: `76ca481ed9221289e001d120baf4baf8170c205a`.
 - Accepted MD-001 main baseline: `da3c1cd1086b42d4a06ec4a0c90010b012099557` — squash merge of [PR #13](https://github.com/al-gri/pro-sclpng/pull/13); post-merge push CI [37440205546](https://github.com/al-gri/pro-sclpng/actions/runs/37440205546) completed successfully on this exact commit.
-- Current phase: **M1 implementation planning / REC-001 decomposition ready**.
+- Accepted post-MD state sync: `94b391c6f2ce3a86fdbdd3eb2bca503b38808069` — squash merge of [PR #15](https://github.com/al-gri/pro-sclpng/pull/15); post-merge push CI [37440668685](https://github.com/al-gri/pro-sclpng/actions/runs/37440668685) completed successfully on this exact commit.
+- Current phase: **M1 implementation / REC-001A next**.
 - Workspace/toolchain: Rust **1.98.1**, workspace and offline/shadow CLI established by BOOT-001.
 - Domain status: exact value types, identities, event/causal contracts, DataHealth reference contracts, artifact relations and bounded WAL contracts are implemented/verified within the accepted SPEC-001 scope.
 - Exchange contract status: current Bitget public-feed baseline and bounded synthetic fixtures are accepted from MD-001; unresolved UNKNOWN/BLOCKED/CONFLICT items remain hard downstream constraints rather than implementation assumptions.
 - Runtime status: production Bitget connector, live book engine, filesystem recorder/replay, production artifact loader/verifier, strategy and execution are **NOT_IMPLEMENTED**.
-- CI: **CONFIGURED / GREEN**. Required jobs are `rust-fmt`, `rust-clippy`, `rust-tests`; the latest accepted main baseline above passed all three on push.
+- CI: **CONFIGURED / GREEN**. Required jobs are `rust-fmt`, `rust-clippy`, `rust-tests`; the latest accepted state-sync baseline above passed all three on push.
 - Main protection: `protect-main` is active with PR workflow, review-thread resolution and strict required checks.
 - Live trading: **OUT_OF_SCOPE / DISABLED**.
 - Imported course/matrix: **NOT_IMPORTED**; provenance work remains RULE-001 (#7).
 
-The embedded accepted baseline SHAs are release/reference points, not claims that `refs/heads/main` can never advance after later bounded governance changes.
+The embedded accepted baseline SHAs are release/reference points, not claims that `refs/heads/main` can never advance after later bounded changes.
 
 ## Очередь
 
@@ -33,12 +34,11 @@ The embedded accepted baseline SHAs are release/reference points, not claims tha
 | BOOT-001 | #2 | **DONE** | — |
 | SPEC-001 | #3 | **DONE / ACCEPTED_IN_MAIN** | Downstream code must reuse accepted contracts rather than invent replacements |
 | MD-001 | #4 | **DONE / ACCEPTED_IN_MAIN** | Preserve unresolved U/C constraints in every dependent task |
-| REC-001 | #5 | **READY_FOR_DECOMPOSITION** | Integrator splits M1 into small dependency-ordered implementation Issues/PRs; do not assign the whole epic to one worker |
+| REC-001 | #5 | **DECOMPOSED / REC-001A NEXT** | Start one worker on #16; later child tasks follow dependency order recorded in #5 comment 6013088690 |
 | QA-001 | #6 | **OPEN / ONGOING** | Independent review/evidence for concrete M1 PR SHAs |
 | RULE-001 | #7 | **PARALLEL / NON_BLOCKING_M1** | Validate provenance for the two strategy setups without delaying recorder/replay |
-| STATE-002 | #14 | **IN_PROGRESS / GOVERNANCE_ONLY** | Synchronize this state after accepted MD-001; no runtime semantics |
 
-All M1 prerequisites GOV-001, BOOT-001, SPEC-001 and MD-001 are now accepted. This unblocks **decomposition** of REC-001, not a monolithic implementation.
+REC-001 child Issues are #16–#22. Dynamic assignment and blockers live in Issues; this file does not duplicate their full status graph. The accepted decomposition is recorded in [Issue #5 comment 6013088690](https://github.com/al-gri/pro-sclpng/issues/5#issuecomment-6013088690).
 
 ## REC-001 downstream constraints
 
@@ -52,6 +52,18 @@ At minimum, every relevant REC-001 task packet must carry these accepted MD-001 
 
 The remaining U-01…U-21/C-02 limitations in `docs/exchange/bitget-public-feed.md` also remain authoritative. In particular Spot exact increments (U-06/U-07) and aggressor semantics (U-18) must stay unresolved unless a later accepted task provides evidence.
 
+## REC-001 decomposition boundary
+
+- **#16 REC-001A** — pure regular JSON decoder + continuity classifier. **NEXT.**
+- **#17 REC-001B** — bounded WAL file writer/reader/recovery; follow accepted #16 unless Integrator explicitly avoids workspace conflict.
+- **#18 REC-001C** — DataHealth/continuity runtime reducer; depends on accepted #16.
+- **#19 MD-002** — source-evidence follow-up for U-09/U-10; required before canonical local-book level mutation.
+- **#20 REC-001D** — public WS supervisor/raw capture; depends on accepted #16/#17/#18.
+- **#21 REC-001E** — canonical regular local-book reducer; BLOCKED by accepted resolution of #19 plus #16/#18.
+- **#22 REC-001F** — recorder/replay integration; depends on accepted upstream components.
+
+WIP policy: launch only #16 as the next implementation worker. Do not assign the whole epic to one worker.
+
 ## Управление
 
 Владелец: al-gri. Главный чат — Architecture; один Integrator; workers краткоживущие; QA проверяет конкретные SHAs независимо от worker reasoning.
@@ -62,6 +74,6 @@ The remaining U-01…U-21/C-02 limitations in `docs/exchange/bitget-public-feed.
 
 ## Следующая практическая поставка
 
-**REC-001 (#5) decomposition** — создать dependency-ordered bounded implementation Issues до начала кода. Первый worker не должен одновременно реализовывать live WebSocket, canonical book mutation, WAL и replay.
+**REC-001A (#16)** — fixture-driven pure Rust decoder and continuity classifier only. It must not implement live networking, WAL, canonical book mutation, RPI normalization, REST stitching, strategy signals or execution.
 
-Первый functional M1 target остаётся прежним: небольшой публичный поток → validated local state/data health → WAL → deterministic replay без скрытых gaps. Сигналы/TradePlan/execution в M1 не входят.
+Первый functional M1 target после последовательного принятия child tasks остаётся прежним: небольшой публичный поток → validated local state/data health → WAL → deterministic replay без скрытых gaps. Сигналы/TradePlan/execution в M1 не входят.
