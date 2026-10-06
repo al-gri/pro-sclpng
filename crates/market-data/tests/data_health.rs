@@ -908,3 +908,306 @@ fn same_bounded_trace_is_deterministic_across_repeated_runs() {
         )))
     );
 }
+
+
+#[test]
+fn proof_expiry_is_checked_at_receipt_and_again_at_ordered_release() {
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(policy());
+    register_and_up(&mut runtime, &binding);
+
+    runtime
+        .step(recorded(3, 10, frame(&binding, books(SNAPSHOT))))
+        .expect("snapshot pending");
+    runtime
+        .step(recorded(4, 11, frame(&binding, books(UPDATE))))
+        .expect("delta pending");
+    let ready_delta = runtime
+        .step(recorded(
+            5,
+            12,
+            verify_until(&binding, 4, BookEvidenceKind::Delta, Some(13)),
+        ))
+        .expect("later proof becomes ready");
+    assert!(ready_delta.effects.is_empty());
+    assert_eq!(
+        runtime.stream_state(binding.id).expect("state").pending.frames,
+        2
+    );
+
+    let release = runtime
+        .step(recorded(
+            6,
+            13,
+            verify(&binding, 3, BookEvidenceKind::Snapshot),
+        ))
+        .expect("ordered release fails closed on expired ready delta");
+    assert!(release.effects.iter().any(|effect| matches!(
+        effect,
+        HealthEffect::SnapshotReleased { stream, raw }
+            if *stream == binding.id && raw.get() == 3
+    )));
+    assert!(!release.effects.iter().any(|effect| matches!(
+        effect,
+        HealthEffect::UpdateReleased { stream, raw, .. }
+            if *stream == binding.id && raw.get() == 4
+    )));
+    assert_eq!(
+        release.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(6).expect("barrier"),
+            reason: BookInvalidReason::ProofExpired,
+        })
+    );
+    let state = runtime.stream_state(binding.id).expect("state");
+    assert_eq!(state.barrier.get(), 6);
+    assert_eq!(state.freshness, Freshness::Unknown);
+    assert_eq!(
+        state.book,
+        Some(BookValidity::Invalid(BookInvalidReason::ProofExpired))
+    );
+    assert_eq!(state.pending.frames, 0);
+    assert_eq!(state.anchor, None);
+    assert_eq!(state.progress, 0);
+    assert_eq!(state.witness, None);
+    assert_eq!(state.last_valid_sample_ns, None);
+    assert!(!runtime.usable_data(binding.id));
+
+    let mut expired_at_receipt = reducer(policy());
+    register_and_up(&mut expired_at_receipt, &binding);
+    expired_at_receipt
+        .step(recorded(3, 10, frame(&binding, books(SNAPSHOT))))
+        .expect("snapshot pending");
+    let receipt = expired_at_receipt
+        .step(recorded(
+            4,
+            13,
+            verify_until(&binding, 3, BookEvidenceKind::Snapshot, Some(13)),
+        ))
+        .expect("expired proof is semantic invalidation");
+    assert!(!receipt
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, HealthEffect::SnapshotReleased { .. })));
+    assert_eq!(
+        receipt.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(4).expect("barrier"),
+            reason: BookInvalidReason::ProofExpired,
+        })
+    );
+    let state = expired_at_receipt
+        .stream_state(binding.id)
+        .expect("state after expired receipt");
+    assert_eq!(state.barrier.get(), 4);
+    assert_eq!(state.pending.frames, 0);
+    assert_eq!(state.anchor, None);
+    assert_eq!(state.freshness, Freshness::Unknown);
+    assert_eq!(
+        state.book,
+        Some(BookValidity::Invalid(BookInvalidReason::ProofExpired))
+    );
+}
+
+#[test]
+fn freshness_deadline_overflow_is_unknown_with_typed_diagnostic_only() {
+    let mut overflow_policy = policy();
+    overflow_policy.pending_wait_ns = 1;
+    overflow_policy.fields.freshness_deadline_ns = Some(10);
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(overflow_policy);
+    register_and_up(&mut runtime, &binding);
+
+    let sample = u64::MAX - 5;
+    runtime
+        .step(recorded(3, sample, frame(&binding, books(SNAPSHOT))))
+        .expect("snapshot pending");
+    let release = runtime
+        .step(recorded(
+            4,
+            sample,
+            verify(&binding, 3, BookEvidenceKind::Snapshot),
+        ))
+        .expect("snapshot release");
+    assert_eq!(
+        release.diagnostics,
+        vec![HealthDiagnostic::FreshnessDeadlineOverflow {
+            stream: binding.id,
+        }]
+    );
+    let state = runtime.stream_state(binding.id).expect("state");
+    assert_eq!(state.transport, Transport::Up);
+    assert_eq!(state.freshness, Freshness::Unknown);
+    assert_eq!(state.book, Some(BookValidity::Warming));
+    assert_eq!(state.barrier.get(), 1);
+    assert_eq!(state.anchor.expect("anchor").get(), 3);
+    assert_eq!(state.last_valid_sample_ns, Some(sample));
+    assert!(!runtime.usable_data(binding.id));
+}
+
+#[test]
+fn pending_raw_bytes_overflow_is_typed_and_clears_pending() {
+    let mut bounded = policy();
+    bounded.pending_max_raw_bytes = 300;
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(bounded);
+    register_and_up(&mut runtime, &binding);
+
+    runtime
+        .step(recorded(
+            3,
+            0,
+            frame_with_bounds(&binding, books(SNAPSHOT), 200, 1),
+        ))
+        .expect("first pending frame");
+    let overflow = runtime
+        .step(recorded(
+            4,
+            1,
+            frame_with_bounds(&binding, books(UPDATE), 200, 1),
+        ))
+        .expect("raw-byte overflow is semantic");
+    assert_eq!(
+        overflow.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(4).expect("barrier"),
+            reason: BookInvalidReason::PendingOverflow(PendingLimit::RawBytes),
+        })
+    );
+    let state = runtime.stream_state(binding.id).expect("state");
+    assert_eq!(state.pending.frames, 0);
+    assert_eq!(state.pending.raw_bytes, 0);
+    assert_eq!(state.pending.outputs, 0);
+}
+
+#[test]
+fn pending_output_count_overflow_is_typed_and_clears_pending() {
+    let mut bounded = policy();
+    bounded.pending_max_outputs = 1;
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(bounded);
+    register_and_up(&mut runtime, &binding);
+
+    runtime
+        .step(recorded(
+            3,
+            0,
+            frame_with_bounds(&binding, books(SNAPSHOT), 100, 1),
+        ))
+        .expect("first pending frame");
+    let overflow = runtime
+        .step(recorded(
+            4,
+            1,
+            frame_with_bounds(&binding, books(UPDATE), 100, 1),
+        ))
+        .expect("output-count overflow is semantic");
+    assert_eq!(
+        overflow.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(4).expect("barrier"),
+            reason: BookInvalidReason::PendingOverflow(PendingLimit::Outputs),
+        })
+    );
+    assert_eq!(
+        runtime.stream_state(binding.id).expect("state").pending.frames,
+        0
+    );
+}
+
+#[test]
+fn pending_deadline_equality_times_out_before_current_observation() {
+    let mut bounded = policy();
+    bounded.pending_wait_ns = 10;
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(bounded);
+    register_and_up(&mut runtime, &binding);
+
+    runtime
+        .step(recorded(3, 5, frame(&binding, books(SNAPSHOT))))
+        .expect("pending snapshot");
+    let timeout = runtime
+        .step(recorded(
+            4,
+            15,
+            HealthObservation::Timer { stream: binding.id },
+        ))
+        .expect("deadline equality expires before timer dispatch");
+    assert_eq!(
+        timeout.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(4).expect("barrier"),
+            reason: BookInvalidReason::PendingTimeout,
+        })
+    );
+    let state = runtime.stream_state(binding.id).expect("state");
+    assert_eq!(state.barrier.get(), 4);
+    assert_eq!(state.pending.frames, 0);
+    assert_eq!(state.freshness, Freshness::Unknown);
+}
+
+#[test]
+fn pending_deadline_arithmetic_overflow_fails_closed_without_wrap() {
+    let mut bounded = policy();
+    bounded.pending_wait_ns = 10;
+    let binding = binding(1, 1, 1, 1, "BTCUSDT");
+    let mut runtime = reducer(bounded);
+    register_and_up(&mut runtime, &binding);
+
+    let overflow = runtime
+        .step(recorded(
+            3,
+            u64::MAX - 5,
+            frame(&binding, books(SNAPSHOT)),
+        ))
+        .expect("deadline arithmetic overflow is semantic");
+    assert_eq!(
+        overflow.effects.last(),
+        Some(&HealthEffect::StreamInvalidated {
+            stream: binding.id,
+            barrier: RecordNo::new(3).expect("barrier"),
+            reason: BookInvalidReason::PendingDeadlineOverflow,
+        })
+    );
+    let state = runtime.stream_state(binding.id).expect("state");
+    assert_eq!(state.barrier.get(), 3);
+    assert_eq!(state.pending.frames, 0);
+    assert_eq!(state.anchor, None);
+    assert_eq!(state.freshness, Freshness::Unknown);
+}
+
+#[test]
+fn second_writer_for_same_book_ref_is_rejected_transactionally() {
+    let first = binding(1, 1, 1, 1, "BTCUSDT");
+    let second = binding(2, 1, 2, 1, "BTCUSDT");
+    let mut runtime = reducer(policy());
+
+    runtime
+        .step(recorded(
+            1,
+            0,
+            HealthObservation::RegisterStream(first.clone()),
+        ))
+        .expect("first writer");
+    let before = runtime.stream_state(first.id).expect("first state");
+
+    let error = runtime
+        .step(recorded(
+            2,
+            0,
+            HealthObservation::RegisterStream(second.clone()),
+        ))
+        .expect_err("same BookRef must require a new archive");
+    assert_eq!(
+        error,
+        HealthError::Identity(IdentityError::WriterRebindRequiresNewArchive)
+    );
+    assert_eq!(runtime.last_record(), Some(RecordNo::new(1).expect("record")));
+    assert_eq!(runtime.stream_state(first.id).expect("first state"), before);
+    assert!(runtime.stream_state(second.id).is_none());
+}
