@@ -1,10 +1,10 @@
-# Handoff: SPEC-001 — implementation continuation
+# Handoff: SPEC-001 — accepted
 
-Status: **PARTIAL / QA_P2_FIXED / FINAL_SHA_VERIFICATION_PENDING**. All new contracts and ADR remain **PROPOSED**.
-Repository: `al-gri/pro-sclpng` only. Same Issue #3, branch `feat/SPEC-001-domain-contracts`, Draft PR #10.
-[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674).
-Base/main remains `6c520237d35865c79dba9e74fa64bd4c2c9e419f`. Approved design revision: `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
-This file deliberately does not embed its own containing commit SHA; exact final head and CI are recorded post-commit in PR #10.
+Status: **DONE / ACCEPTED_IN_MAIN**.
+Repository: `al-gri/pro-sclpng` only. Issue #3 is completed; [PR #10](https://github.com/al-gri/pro-sclpng/pull/10) was squash-merged by the owner.
+[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674) · [final QA](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5423917112) · [final Integrator acceptance](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5423949919).
+Accepted source head: `9f351334d82e07be03694682d219d343471630c6`. Squash commit / verified SPEC-001 main baseline: `8d9d6ada6309542822e4e38dd064f1e3467f990b`. Post-merge push CI: [37416467117](https://github.com/al-gri/pro-sclpng/actions/runs/37416467117).
+The historical implementation/review evidence below is retained verbatim where practical; intermediate failures remain audit history and are not current blockers.
 
 ## Evidence correction retained
 

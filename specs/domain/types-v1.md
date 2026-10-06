@@ -1,8 +1,8 @@
 # Domain types v1 — проект
 
-Status: **PROPOSED**. Proposal revision **2**, SPEC-001 / DESIGN_REVIEW_REQUIRED.
-Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
-Numeric D1/D2: APPROVED_FOR_ISOLATED_IMPLEMENTATION by [Integrator](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5415922496), retained by [Architecture](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5416219284). Это не принятие всего API; эта ревизия docs-only, numeric implementation не начата.
+Status: **ACCEPTED**. Proposal revision **2**, accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10); verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
+Design base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; post-merge CI: [37416467117](https://github.com/al-gri/pro-sclpng/actions/runs/37416467117).
+Historical numeric D1/D2 review provenance: [Integrator](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5415922496) and [Architecture](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5416219284). Final implementation/QA/owner acceptance is recorded in PR #10.
 Решения: [ADR-0002](../../docs/adr/0002-domain-event-wal-contracts.md); проверки: [matrix](test-matrix-v1.md), [review vectors](review-vectors-v2.md); зависимости: [artifacts](artifacts-v1.md).
 
 ## 1. Идентичность и единицы

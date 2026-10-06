@@ -1,6 +1,6 @@
 # SPEC-001 revision 2 — named review vectors
 
-Status: **PROPOSED**, DESIGN_REVIEW_REQUIRED. All traces are origin=synthetic, schema_version=1, proposal_revision=2. These are exact EXPECTED outcomes for design review, **NOT executed Rust tests or an implemented model**.
+Status: **ACCEPTED**. All traces remain origin=synthetic, schema_version=1, proposal_revision=2. They are accepted expected outcomes from SPEC-001; executable mappings and run evidence live in the Rust tests/PR history rather than being inferred from this prose. Accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10) at verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
 Contracts: [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [artifacts](artifacts-v1.md), [matrix](test-matrix-v1.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
 
 ## 1. Notation and explicit initial states

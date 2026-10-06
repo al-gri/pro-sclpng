@@ -1,8 +1,8 @@
 # Content-bound artifacts v1 — descriptor proposal
 
-Status: **PROPOSED**. Proposal revision **2**, Architecture A3 / R4 with A1/R3 scope and time bindings.
+Status: **ACCEPTED**. Proposal revision **2**, Architecture A3 / R4 with A1/R3 scope and time bindings; accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10) at verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
 Links: [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [WAL](../recording/wal-v1.md), [AF fixtures](../../tests/fixtures/domain/artifacts-v1.md), [review vectors](review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
-Formats and pure relations only;no production hash,loader,verifier,network fetch or event/health model is implemented.
+Accepted formats and pure relations; no production hash, loader, verifier or network fetch is implemented by SPEC-001. Executable reference models/tests in `crates/domain/tests/**` are verification support, not production artifact infrastructure.
 
 ## 1. References, identity and verification stages
 
