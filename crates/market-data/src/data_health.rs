@@ -4,7 +4,8 @@ use std::fmt;
 
 use domain::event::{ClockScope, MonotonicSample};
 use domain::identity::{
-    EpochTag, IdentityError, RecordNo, StreamBinding, StreamId, ConnectionEpoch, ConnectionId,
+    Channel, ConnectionEpoch, ConnectionId, EpochTag, IdentityError, RecordNo, StreamBinding,
+    StreamId,
 };
 use domain::policy::{DurabilityMode, HealthPolicy, PolicyError, SilenceRule};
 use domain::record::{
@@ -12,7 +13,7 @@ use domain::record::{
     WarmupEvidence,
 };
 
-use crate::{Action, Books50Frame, ContinuityClassifier, ContinuityOutcome};
+use crate::{Books50Frame, ContinuityClassifier, ContinuityOutcome};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HealthError {
@@ -198,8 +199,8 @@ pub enum HealthObservation {
     /// boundary. This reducer still enforces current scope, barrier, ordering,
     /// evidence kind and ordered pending release.
     VerifiedFrame(VerificationEvidence),
-    /// Explicit outcome from the evidence resolver for a contradictory
-    /// current-scope frame proof.
+    /// Explicit post-verifier outcome for contradictory current-scope frame
+    /// evidence. Old/pre-barrier scope is diagnosed before invalidation.
     ProofConflict {
         stream: StreamId,
         tag: EpochTag,
@@ -328,8 +329,16 @@ impl StreamRuntime {
     fn pending_summary(&self) -> PendingSummary {
         PendingSummary {
             frames: u32::try_from(self.pending.len()).unwrap_or(u32::MAX),
-            raw_bytes: self.pending.iter().map(|frame| u64::from(frame.raw_bytes)).sum(),
-            outputs: self.pending.iter().map(|frame| u64::from(frame.outputs)).sum(),
+            raw_bytes: self
+                .pending
+                .iter()
+                .map(|frame| u64::from(frame.raw_bytes))
+                .sum(),
+            outputs: self
+                .pending
+                .iter()
+                .map(|frame| u64::from(frame.outputs))
+                .sum(),
         }
     }
 }
@@ -388,7 +397,8 @@ impl DataHealthReducer {
 
     pub fn stream_state(&self, stream: StreamId) -> Option<StreamHealthSnapshot> {
         let state = self.streams.get(&stream)?;
-        let transport = self.transport_state(state.binding.connection_id, state.binding.tag.connection);
+        let transport =
+            self.transport_state(state.binding.connection_id, state.binding.tag.connection);
         Some(StreamHealthSnapshot {
             binding: state.binding.clone(),
             transport,
@@ -404,15 +414,38 @@ impl DataHealthReducer {
         })
     }
 
+    pub fn usable_data(&self, stream: StreamId) -> bool {
+        let Some(state) = self.streams.get(&stream) else {
+            return false;
+        };
+        let Some(anchor) = state.anchor else {
+            return false;
+        };
+        let Some(witness) = state.witness else {
+            return false;
+        };
+        self.transport_state(state.binding.connection_id, state.binding.tag.connection)
+            == Transport::Up
+            && matches!(
+                state.freshness,
+                Freshness::Fresh | Freshness::QuietVerified
+            )
+            && state.book == Some(BookValidity::Usable)
+            && anchor.raw > state.barrier
+            && witness.anchor == anchor.raw
+    }
+
     pub fn snapshot(&self) -> DataHealthSnapshot {
         let connections = self
             .transport
             .iter()
-            .map(|(&(connection, epoch), &transport)| ConnectionTransportSnapshot {
-                connection,
-                epoch,
-                transport,
-            })
+            .map(
+                |(&(connection, epoch), &transport)| ConnectionTransportSnapshot {
+                    connection,
+                    epoch,
+                    transport,
+                },
+            )
             .collect();
         let streams = self
             .streams
@@ -454,10 +487,16 @@ impl DataHealthReducer {
             return Err(HealthError::IncomparableClock);
         }
 
-        self.evaluation_ns = self.evaluation_ns.max(observation.sample.ns.get());
+        let original_sample_ns = observation.sample.ns.get();
+        self.evaluation_ns = self.evaluation_ns.max(original_sample_ns);
         let mut result = StepResult::default();
         self.expire_before(observation.record, &mut result)?;
-        self.dispatch(observation.record, &observation.value, &mut result)?;
+        self.dispatch(
+            observation.record,
+            original_sample_ns,
+            &observation.value,
+            &mut result,
+        )?;
         self.last_record = Some(observation.record);
         Ok(result)
     }
@@ -488,6 +527,7 @@ impl DataHealthReducer {
     fn dispatch(
         &mut self,
         at: RecordNo,
+        original_sample_ns: u64,
         observation: &HealthObservation,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
@@ -502,7 +542,9 @@ impl DataHealthReducer {
             } => self.transport_observation(at, *connection, *epoch, *value, out),
             HealthObservation::EpochAdvance(change) => self.advance_epoch(at, change, out),
             HealthObservation::Gap { scope, reason } => self.gap(at, scope, *reason, out),
-            HealthObservation::BookFrame(frame) => self.book_frame(at, frame, out),
+            HealthObservation::BookFrame(frame) => {
+                self.book_frame(at, original_sample_ns, frame, out)
+            }
             HealthObservation::VerifiedFrame(evidence) => self.verify_frame(at, evidence, out),
             HealthObservation::ProofConflict { stream, tag, raw } => {
                 self.proof_conflict(at, *stream, *tag, *raw, out)
@@ -531,8 +573,7 @@ impl DataHealthReducer {
             .map(|state| state.binding.clone())
             .collect();
         binding.validate_registration(&existing)?;
-        let book = (binding.channel != domain::identity::Channel::Trades)
-            .then_some(BookValidity::NoSnapshot);
+        let book = (binding.channel != Channel::Trades).then_some(BookValidity::NoSnapshot);
         self.transport
             .entry((binding.connection_id, binding.tag.connection))
             .or_insert(Transport::Unknown);
@@ -553,7 +594,8 @@ impl DataHealthReducer {
                 continuity: ContinuityClassifier::new(),
             },
         );
-        out.effects.push(HealthEffect::StreamRegistered { stream: id });
+        out.effects
+            .push(HealthEffect::StreamRegistered { stream: id });
         Ok(())
     }
 
@@ -761,6 +803,7 @@ impl DataHealthReducer {
     fn book_frame(
         &mut self,
         at: RecordNo,
+        original_sample_ns: u64,
         observation: &BookFrameObservation,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
@@ -785,7 +828,7 @@ impl DataHealthReducer {
             self.streams.insert(stream, state);
             return Ok(());
         }
-        if state.binding.channel != domain::identity::Channel::BookNormal {
+        if state.binding.channel != Channel::BookNormal {
             return Err(HealthError::InvalidObservation("BookFrame.channel"));
         }
         if at <= state.barrier {
@@ -806,6 +849,7 @@ impl DataHealthReducer {
                 self.admit_pending(
                     &mut state,
                     at,
+                    original_sample_ns,
                     BookEvidenceKind::Snapshot,
                     observation,
                     out,
@@ -815,6 +859,7 @@ impl DataHealthReducer {
                 self.admit_pending(
                     &mut state,
                     at,
+                    original_sample_ns,
                     BookEvidenceKind::Delta,
                     observation,
                     out,
@@ -849,12 +894,7 @@ impl DataHealthReducer {
                 );
             }
             ContinuityOutcome::NeedsSnapshot { .. } => {
-                Self::invalidate_state(
-                    &mut state,
-                    at,
-                    BookInvalidReason::NeedsSnapshot,
-                    out,
-                );
+                Self::invalidate_state(&mut state, at, BookInvalidReason::NeedsSnapshot, out);
             }
             ContinuityOutcome::UnexpectedSnapshot { .. } => {
                 Self::invalidate_state(
@@ -874,17 +914,16 @@ impl DataHealthReducer {
         &self,
         state: &mut StreamRuntime,
         at: RecordNo,
+        original_sample_ns: u64,
         kind: BookEvidenceKind,
         observation: &BookFrameObservation,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
-        let next_frames = state.pending.len().checked_add(1);
-        let frames_exceeded = next_frames.is_none_or(|frames| {
-            u64::try_from(frames).map_or(true, |frames| {
-                frames > u64::from(self.policy.pending_max_frames)
-            })
-        });
-        if frames_exceeded {
+        let frames = u64::try_from(state.pending.len())
+            .map_err(|_| HealthError::InvalidObservation("pending.frames"))?
+            .checked_add(1)
+            .ok_or(HealthError::InvalidObservation("pending.frames"))?;
+        if frames > u64::from(self.policy.pending_max_frames) {
             Self::invalidate_state(
                 state,
                 at,
@@ -899,8 +938,10 @@ impl DataHealthReducer {
             .iter()
             .map(|frame| u64::from(frame.raw_bytes))
             .sum();
-        let bytes = current_bytes.checked_add(u64::from(observation.raw_bytes));
-        if bytes.is_none_or(|bytes| bytes > self.policy.pending_max_raw_bytes) {
+        let bytes = current_bytes
+            .checked_add(u64::from(observation.raw_bytes))
+            .ok_or(HealthError::InvalidObservation("pending.raw_bytes"))?;
+        if bytes > self.policy.pending_max_raw_bytes {
             Self::invalidate_state(
                 state,
                 at,
@@ -915,8 +956,10 @@ impl DataHealthReducer {
             .iter()
             .map(|frame| u64::from(frame.outputs))
             .sum();
-        let outputs = current_outputs.checked_add(u64::from(observation.candidate_outputs));
-        if outputs.is_none_or(|outputs| outputs > u64::from(self.policy.pending_max_outputs)) {
+        let outputs = current_outputs
+            .checked_add(u64::from(observation.candidate_outputs))
+            .ok_or(HealthError::InvalidObservation("pending.outputs"))?;
+        if outputs > u64::from(self.policy.pending_max_outputs) {
             Self::invalidate_state(
                 state,
                 at,
@@ -926,8 +969,7 @@ impl DataHealthReducer {
             return Ok(());
         }
 
-        let sample = self.evaluation_sample_for(observation)?;
-        let Some(deadline_ns) = sample.checked_add(self.policy.pending_wait_ns) else {
+        let Some(deadline_ns) = original_sample_ns.checked_add(self.policy.pending_wait_ns) else {
             Self::invalidate_state(
                 state,
                 at,
@@ -944,7 +986,7 @@ impl DataHealthReducer {
         state.pending.push_back(PendingFrame {
             raw: at,
             kind,
-            original_sample_ns: sample,
+            original_sample_ns,
             raw_bytes: observation.raw_bytes,
             outputs: observation.candidate_outputs,
             deadline_ns,
@@ -955,13 +997,6 @@ impl DataHealthReducer {
             raw: at,
         });
         Ok(())
-    }
-
-    fn evaluation_sample_for(
-        &self,
-        _observation: &BookFrameObservation,
-    ) -> Result<u64, HealthError> {
-        Ok(self.evaluation_ns)
     }
 
     fn verify_frame(
@@ -1124,12 +1159,7 @@ impl DataHealthReducer {
                     .map_or(sample, |previous| previous.max(sample)),
             );
             state.last_applied_raw = Some(pending.raw);
-            Self::refresh_freshness_state(
-                state,
-                self.evaluation_ns,
-                self.policy,
-                out,
-            );
+            Self::refresh_freshness_state(state, self.evaluation_ns, self.policy, out);
         }
         Ok(())
     }
