@@ -115,7 +115,7 @@ fn stream_binding(stream: u32, connection: u32, book: u32, symbol: &str) -> Stre
         instrument_slot: id(InstrumentSlot::new(stream)),
         spec: SpecRef {
             instrument: InstrumentRef {
-                venue: id(Token::new("BITGET")),
+                venue: id(Token::new("bitget")),
                 market: MarketKind::Perpetual,
                 product_namespace: id(Token::new("usdt-futures")),
                 native_symbol: id(Token::new(symbol)),
@@ -142,20 +142,28 @@ fn active_context() -> ActiveContext {
     }
 }
 
-fn supervisor(
+fn supervisor_config(
     streams: Vec<StreamBinding>,
     queue_policy: QueuePolicy,
     gate: RecordingGate,
-) -> PublicWsSupervisor {
-    PublicWsSupervisor::new(WsSupervisorConfig {
+) -> WsSupervisorConfig {
+    WsSupervisorConfig {
         active_context: active_context(),
         recording_gate: gate,
         segment_no: SegmentNo::new(0),
         next_record_no: id(RecordNo::new(5)),
         queue_policy,
         streams,
-    })
-    .expect("valid supervisor config")
+    }
+}
+
+fn supervisor(
+    streams: Vec<StreamBinding>,
+    queue_policy: QueuePolicy,
+    gate: RecordingGate,
+) -> PublicWsSupervisor {
+    PublicWsSupervisor::new(supervisor_config(streams, queue_policy, gate))
+        .expect("valid supervisor config")
 }
 
 fn stamp(monotonic_ns: u64) -> ReceiveStamp {
@@ -211,6 +219,321 @@ fn drain_all(supervisor: &mut PublicWsSupervisor, sink: &mut impl RecordSink) ->
         results.push(result);
     }
     results
+}
+
+#[test]
+fn supervisor_rejects_bindings_outside_exact_bitget_usdt_futures_profile() {
+    let base = stream_binding(1, 1, 1, "BTCUSDT");
+
+    let mut wrong_venue = base.clone();
+    wrong_venue.spec.instrument.venue = id(Token::new("other"));
+    assert!(matches!(
+        PublicWsSupervisor::new(supervisor_config(
+            vec![wrong_venue],
+            QueuePolicy::default(),
+            RecordingGate::Written,
+        )),
+        Err(SupervisorError::InvalidConfiguration(
+            "regular bitget usdt-futures books50 binding"
+        ))
+    ));
+
+    for namespace in ["coin-futures", "usdc-futures", "other-futures"] {
+        let mut wrong_namespace = base.clone();
+        wrong_namespace.spec.instrument.product_namespace = id(Token::new(namespace));
+        assert!(matches!(
+            PublicWsSupervisor::new(supervisor_config(
+                vec![wrong_namespace],
+                QueuePolicy::default(),
+                RecordingGate::Written,
+            )),
+            Err(SupervisorError::InvalidConfiguration(
+                "regular bitget usdt-futures books50 binding"
+            ))
+        ));
+    }
+
+    let mut wrong_market = base.clone();
+    wrong_market.spec.instrument.market = MarketKind::Spot;
+    assert!(matches!(
+        PublicWsSupervisor::new(supervisor_config(
+            vec![wrong_market],
+            QueuePolicy::default(),
+            RecordingGate::Written,
+        )),
+        Err(SupervisorError::InvalidConfiguration(
+            "regular bitget usdt-futures books50 binding"
+        ))
+    ));
+
+    let mut dated = base;
+    dated.spec.instrument.market = MarketKind::DatedFuture;
+    assert!(PublicWsSupervisor::new(supervisor_config(
+        vec![dated],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    ))
+    .is_ok());
+}
+
+#[test]
+fn supervisor_rejects_second_writer_for_same_canonical_normal_book() {
+    let first = stream_binding(1, 1, 1, "BTCUSDT");
+    let second = stream_binding(2, 2, 2, "BTCUSDT");
+
+    assert!(matches!(
+        PublicWsSupervisor::new(supervisor_config(
+            vec![first, second],
+            QueuePolicy::default(),
+            RecordingGate::Written,
+        )),
+        Err(SupervisorError::Identity(
+            IdentityError::WriterRebindRequiresNewArchive
+        ))
+    ));
+}
+
+#[test]
+fn previous_epoch_oversized_raw_is_bounded_as_empty_diagnostic() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let old_epoch = binding.tag.connection;
+    let queue = QueuePolicy {
+        max_raw_frames_per_stream: 1,
+        max_raw_bytes_per_stream: 1_000_000,
+        max_raw_message_bytes: 1_000_000,
+        max_total_items: 5,
+    };
+    let mut supervisor = supervisor(vec![binding.clone()], queue, RecordingGate::Written);
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(2))
+        .expect("disconnect");
+    supervisor
+        .drain_one(&mut sink)
+        .expect("drain disconnect")
+        .expect("disconnect result");
+    assert_eq!(
+        supervisor
+            .snapshot(binding.id)
+            .expect("current")
+            .tag
+            .connection
+            .get(),
+        2
+    );
+
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_epoch,
+            stamp(3),
+            vec![b'x'; 1_000_001],
+        )
+        .expect("bounded stale rejection");
+    let queued = supervisor.snapshot(binding.id).expect("queued");
+    assert_eq!(queued.queued_raw_frames, 0);
+    assert_eq!(queued.queued_raw_bytes, 0);
+    assert_eq!(supervisor.queued_items(), 1);
+
+    let result = supervisor
+        .drain_one(&mut sink)
+        .expect("drain rejected stale")
+        .expect("rejected stale result");
+    assert_eq!(result.records.len(), 2);
+
+    let raw = sink
+        .frames
+        .iter()
+        .rev()
+        .find_map(|frame| match &frame.value {
+            Record::RawInput(raw) if raw.tag.connection == old_epoch => Some(raw),
+            _ => None,
+        })
+        .expect("bounded stale raw provenance");
+    assert!(raw.bytes.is_empty());
+    assert_eq!(raw.attempt.get(), 1);
+
+    let gap = sink
+        .frames
+        .iter()
+        .rev()
+        .find_map(|frame| match &frame.value {
+            Record::Gap(gap) if gap.reason == Reason::Unknown => Some(gap),
+            _ => None,
+        })
+        .expect("stale rejection diagnostic");
+    let GapScope::ExplicitTargets(targets) = &gap.scope else {
+        panic!("expected explicit stale diagnostic target");
+    };
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].stream, binding.id);
+    assert_eq!(targets[0].tag.connection, old_epoch);
+    assert_eq!(targets[0].range, None);
+    assert_eq!(targets[0].loss_count, None);
+    assert!(!supervisor.is_halted());
+}
+
+#[test]
+fn sustained_overflow_coalesces_loss_and_does_not_halt_neighbor_stream() {
+    let a = stream_binding(1, 1, 1, "BTCUSDT");
+    let b = stream_binding(2, 2, 2, "ETHUSDT");
+    let queue = QueuePolicy {
+        max_raw_frames_per_stream: 1,
+        max_raw_bytes_per_stream: 4096,
+        max_raw_message_bytes: 4096,
+        max_total_items: 12,
+    };
+    let mut supervisor = supervisor(vec![a.clone(), b.clone()], queue, RecordingGate::Written);
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &a, 1);
+    connect_one(&mut supervisor, &mut sink, &b, 2);
+
+    supervisor
+        .queue_text(a.connection_id, a.tag.connection, stamp(10), ack("BTCUSDT"))
+        .expect("a first raw");
+    for n in 0..32 {
+        supervisor
+            .queue_text(
+                a.connection_id,
+                a.tag.connection,
+                stamp(11 + n),
+                ack("BTCUSDT"),
+            )
+            .expect("a coalesced overflow");
+    }
+    assert_eq!(supervisor.queued_items(), 2);
+    assert!(!supervisor.is_halted());
+
+    supervisor
+        .queue_text(b.connection_id, b.tag.connection, stamp(100), ack("ETHUSDT"))
+        .expect("neighbor raw remains admissible");
+    assert_eq!(supervisor.queued_items(), 3);
+
+    drain_all(&mut supervisor, &mut sink);
+    assert!(!supervisor.is_halted());
+
+    let overflow = sink
+        .frames
+        .iter()
+        .find_map(|frame| match &frame.value {
+            Record::Gap(gap) if gap.reason == Reason::QueueOverflow => Some(gap),
+            _ => None,
+        })
+        .expect("coalesced overflow gap");
+    let GapScope::ExplicitTargets(targets) = &overflow.scope else {
+        panic!("expected explicit overflow target");
+    };
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].stream, a.id);
+    assert_eq!(
+        targets[0]
+            .range
+            .map(|(first, last)| (first.get(), last.get())),
+        Some((2, 33))
+    );
+    assert_eq!(targets[0].loss_count, Some(32));
+
+    let b_state = supervisor.snapshot(b.id).expect("neighbor");
+    assert_eq!(b_state.transport, Transport::Up);
+    assert_eq!(b_state.subscription, SubscriptionState::AwaitingSnapshot);
+}
+
+#[test]
+fn queued_overflow_before_disconnect_drains_before_epoch_advance() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_tag = binding.tag;
+    let queue = QueuePolicy {
+        max_raw_frames_per_stream: 1,
+        max_raw_bytes_per_stream: 4096,
+        max_raw_message_bytes: 4096,
+        max_total_items: 5,
+    };
+    let mut supervisor = supervisor(vec![binding.clone()], queue, RecordingGate::Written);
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(10),
+            ack("BTCUSDT"),
+        )
+        .expect("admitted raw");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(11))
+        .expect("queued disconnect");
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(12),
+            ack("BTCUSDT"),
+        )
+        .expect("queued overflow behind disconnect");
+
+    supervisor
+        .drain_one(&mut sink)
+        .expect("drain raw")
+        .expect("raw result");
+    let down = supervisor
+        .drain_one(&mut sink)
+        .expect("drain disconnect")
+        .expect("disconnect result");
+    assert_eq!(down.records.len(), 1);
+    let pending = supervisor.snapshot(stream).expect("pending disconnect");
+    assert_eq!(pending.tag, old_tag);
+    assert_eq!(pending.transport, Transport::Down);
+    assert_eq!(pending.subscription, SubscriptionState::Degraded);
+    assert!(!supervisor.is_halted());
+
+    let loss = supervisor
+        .drain_one(&mut sink)
+        .expect("drain loss")
+        .expect("loss result");
+    assert_eq!(loss.records.len(), 4);
+    assert!(loss.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::QueueGapRecorded { .. }
+    )));
+    assert!(loss.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { tag, .. } if tag.connection.get() == 2
+    )));
+
+    let gap = sink
+        .frames
+        .iter()
+        .find_map(|frame| match &frame.value {
+            Record::Gap(gap) if gap.reason == Reason::QueueOverflow => Some(gap),
+            _ => None,
+        })
+        .expect("queued overflow persisted");
+    let GapScope::ExplicitTargets(targets) = &gap.scope else {
+        panic!("expected explicit overflow target");
+    };
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].tag, old_tag);
+    assert_eq!(
+        targets[0]
+            .range
+            .map(|(first, last)| (first.get(), last.get())),
+        Some((2, 2))
+    );
+
+    let current = supervisor.snapshot(stream).expect("advanced");
+    assert_eq!(current.tag.connection.get(), 2);
+    assert_eq!(current.tag.subscription.get(), 2);
+    assert_eq!(current.tag.book.expect("book").get(), 2);
+    assert_eq!(current.transport, Transport::Unknown);
+    assert_eq!(current.subscription, SubscriptionState::Backoff);
+    assert!(!supervisor.is_halted());
 }
 
 #[test]

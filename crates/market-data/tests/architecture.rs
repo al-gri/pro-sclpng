@@ -62,12 +62,45 @@ fn dependency_boundary_ok(manifest: &str) -> bool {
         && dev.as_slice() == ["recording = { path = \"../recording\" }"]
 }
 
+fn grouped_std_runtime_namespace(compact: &str) -> bool {
+    let mut cursor = 0;
+    while let Some(relative) = compact[cursor..].find("std::{") {
+        let start = cursor + relative + "std::{".len();
+        let Some(relative_end) = compact[start..].find('}') else {
+            return true;
+        };
+        let end = start + relative_end;
+        for item in compact[start..end].split(',') {
+            let root = item.split("::").next().unwrap_or(item);
+            let name = root.split("as").next().unwrap_or(root);
+            if matches!(name, "fs" | "net" | "process") || (name == "self" && item.contains("as")) {
+                return true;
+            }
+        }
+        cursor = end + 1;
+    }
+    false
+}
+
 fn forbidden_concrete_runtime(source: &str) -> Option<&'static str> {
     let compact: String = source.chars().filter(|ch| !ch.is_whitespace()).collect();
     for (needle, label) in [
         ("std::fs", "filesystem ownership"),
         ("std::net", "socket ownership"),
         ("std::process", "process ownership"),
+        ("usestdas", "std namespace alias"),
+        ("use::stdas", "absolute std namespace alias"),
+        ("externcratestdas", "std crate alias"),
+    ] {
+        if compact.contains(needle) {
+            return Some(label);
+        }
+    }
+    if grouped_std_runtime_namespace(&compact) {
+        return Some("grouped forbidden std namespace");
+    }
+
+    for (needle, label) in [
         ("TcpStream", "TCP socket ownership"),
         ("UdpSocket", "UDP socket ownership"),
         ("reqwest", "HTTP client"),
@@ -82,7 +115,7 @@ fn forbidden_concrete_runtime(source: &str) -> Option<&'static str> {
         ("https://", "HTTPS endpoint"),
         ("/api/", "REST endpoint"),
     ] {
-        if source.contains(needle) || compact.contains(needle) {
+        if source.contains(needle) {
             return Some(label);
         }
     }
@@ -114,6 +147,25 @@ fn manifest_gate_rejects_arbitrary_and_hidden_production_dependencies() {
 
     let dependency_table = format!("{MANIFEST}\n[dependencies.anything]\npath = \"../anything\"\n");
     assert!(!dependency_boundary_ok(&dependency_table));
+}
+
+#[test]
+fn source_gate_rejects_namespace_import_and_alias_bypasses() {
+    for synthetic in [
+        "use std::fs; fn x() { let _ = fs::read(\"x\"); }",
+        "use std::net; fn x() { let _ = net::TcpStream::connect(\"x\"); }",
+        "use std::{io, fs}; fn x() { let _ = fs::read(\"x\"); }",
+        "use std::{net, io}; fn x() { let _ = net::TcpStream::connect(\"x\"); }",
+        "use std as system; use system::fs;",
+        "use ::std as system; use system::net;",
+        "use std::{self as system}; use system::process;",
+        "extern crate std as system; use system::net;",
+    ] {
+        assert!(
+            forbidden_concrete_runtime(synthetic).is_some(),
+            "synthetic forbidden source bypassed regression guard: {synthetic}"
+        );
+    }
 }
 
 #[test]
