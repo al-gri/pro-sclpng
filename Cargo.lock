@@ -9,6 +9,9 @@ version = "0.1.0"
 [[package]]
 name = "market-data"
 version = "0.1.0"
+dependencies = [
+ "domain",
+]
 
 [[package]]
 name = "radar"
