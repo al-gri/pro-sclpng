@@ -7,3 +7,6 @@ publish.workspace = true
 
 [dependencies]
 domain = { path = "../domain" }
+
+[dev-dependencies]
+recording = { path = "../recording" }
