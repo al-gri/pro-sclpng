@@ -1,17 +1,17 @@
 # ADR-0002 — Exact values, causal application, health and bounded WAL
 
-Status: **PROPOSED — DESIGN_REVIEW_REQUIRED**. Proposal revision **2**.
-Date: 2026-10-05. Task: [SPEC-001 #3](https://github.com/al-gri/pro-sclpng/issues/3).
-[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Existing claim](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5995282901) · [Same Draft PR #10](https://github.com/al-gri/pro-sclpng/pull/10).
-Base `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; previously reviewed revision `98ecd7484f8345d6c5f162a85ff3effbd6a46a68`; branch `feat/SPEC-001-domain-contracts`.
+Status: **ACCEPTED**. Proposal revision **2** accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10); verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b` with post-merge push CI [37416467117](https://github.com/al-gri/pro-sclpng/actions/runs/37416467117).
+Date: 2026-10-05. Task: [SPEC-001 #3](https://github.com/al-gri/pro-sclpng/issues/3) — completed.
+[Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674) · [Merged PR #10](https://github.com/al-gri/pro-sclpng/pull/10).
+Design work started from base `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; intermediate review SHAs remain historical provenance in PR #10.
 
 ## Review provenance and authority
 
 [Integrator review5415922496](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5415922496): DESIGN_CHANGES_REQUIRED,R1–R6,C1/C2; D1/D2 APPROVED_FOR_ISOLATED_IMPLEMENTATION only.
 [Architecture review5416219284](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5416219284): ARCHITECTURE_DIRECTION_SET / DESIGN_REVISION_REQUIRED. A1–A3 plus R3/R5/R6/C1/C2 directions below are copied into coordinated proposals,not silently attributed to the old revision or real Bitget.
-Neither review approved the whole API/wire format. This docs-only revision requests renewed approval; it does not resolve/close findings itself. Numeric implementation has not started and no code was discarded. ADR-0001 and accepted baseline remain untouched.
+Those reviews were intermediate design gates, not final acceptance. Targeted Integrator review [5418412674](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674) later returned DESIGN_APPROVED_FOR_IMPLEMENTATION. Independent QA and final Integrator acceptance on the final source head are preserved in PR #10; owner merge and post-merge CI establish the accepted status recorded above.
 
-Targeted follow-up: [Integrator review5417294202](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5417294202), reviewed head `8758b3c2a8896146a14d397bd65dc18ac5a49415`, marked R1–R6/C1/C2 RESOLVED at design level. A1–A3 below are not redesigned. Only V2-WIRE-01/02 and V2-DOC-01 corrections are submitted here; they are not self-closed and general implementation approval remains pending.
+Earlier targeted follow-up [5417294202](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5417294202), reviewed head `8758b3c2a8896146a14d397bd65dc18ac5a49415`, marked R1–R6/C1/C2 RESOLVED at design level before the final targeted wire/doc corrections. These historical review steps remain provenance; they are not current blockers.
 
 ## Context / retained D1–D6
 
@@ -100,7 +100,7 @@ The three AF links under specs/domain now use two parent traversals from that di
 
 The [finding mapping](../../specs/domain/review-vectors-v2.md#8-finding-to-change-mapping-and-remaining-review) names every finding,changed sections,exact test vectors and outstanding proof/review. It is SUBMITTED_FOR_REVIEW,not a checklist marked closed.
 
-Renewed review should confirm: source/effect/control projection and CausalBasis;frame-prefix atomicity,proof equivalence and bounded retention interface;candidate creation/supersession/fence diagnostics;exact binary descriptor/PSCO schemas/caps and verifier boundary;one-window/scope-change restrictions in local loss accounting;full expiry/fan-out/progress traces. These are independent of unverified real Bitget facts,which remain MD-001-owned. Full multi-frame golden,all truncation offsets and executable models are still NOT_IMPLEMENTED/NOT_RUN.
+Final SPEC-001 review/QA confirmed the source/effect/control, bounded retention, publication, artifact and loss-accounting contract behavior through executable reference models/tests. Unverified real Bitget facts remain MD-001-owned. Production verifier/storage/filesystem durability remains downstream and is not implied by SPEC-001 acceptance.
 
 ## Scope and next gate
 

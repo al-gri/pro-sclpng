@@ -1,9 +1,9 @@
 # WAL v1 — byte, recovery, accounting and publication proposal
 
-Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED.
-Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
+Status: **ACCEPTED**. Proposal revision **2**, accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10); verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
+Design base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`.
 Links: [types](../domain/types-v1.md), [events](../market-data/events-v1.md), [health](../market-data/data-health-v1.md), [artifacts](../domain/artifacts-v1.md), [matrix](../domain/test-matrix-v1.md), [review vectors](../domain/review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
-No production recorder, file I/O, queue or replay/recovery engine is implemented. A memory codec/model also awaits renewed design approval.
+No production recorder, file I/O, queue or replay/recovery engine is implemented by SPEC-001. The accepted memory codec/recovery/reference behavior exists in test support and does not constitute production storage implementation.
 
 ## 1. Revision boundary and archive scope
 
@@ -195,4 +195,4 @@ W01 synthetic, frame/schema1; archive16x01,session16x02,clock1,SyncBeforePublish
 0040: 01 00 00 00 03 00 13 c4 02 9e
 ```
 
-CRC(header+payload)=0x9E02C413, trailer13 c4 02 9e. CRC(ASCII123456789)=0xCBF43926; empty=0. Whole-frame-with-trailer CRC=0x2144DF1C, hence aggregate excludes trailers. Original checkpoint checked zlib plus bit-loop; this revision rechecked literal bytes/length/zlib without changing the golden. Neither is Rust codec execution. Full multi-frame/segment/each-offset assertions remain required after approval and NOT_IMPLEMENTED/NOT_RUN now.
+CRC(header+payload)=0x9E02C413, trailer13 c4 02 9e. CRC(ASCII123456789)=0xCBF43926; empty=0. Whole-frame-with-trailer CRC=0x2144DF1C, hence aggregate excludes trailers. The original checkpoint checked zlib plus bit-loop before Rust codec execution existed. Final SPEC-001 includes the accepted memory-only codec plus multi-frame/segment and each-offset truncation assertions; production filesystem recorder/durability remains downstream.

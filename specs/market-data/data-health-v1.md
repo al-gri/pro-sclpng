@@ -1,8 +1,8 @@
 # DataHealth v1 — revised transition proposal
 
-Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED.
+Status: **ACCEPTED**. Proposal revision **2**, accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10); verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
 Links: [events](events-v1.md),[types](../domain/types-v1.md),[artifacts](../domain/artifacts-v1.md),[WAL](../recording/wal-v1.md),[exact vectors](../domain/review-vectors-v2.md).
-A1–A3/R3/R6/C2 are directions for renewed review,not an accepted Rust model. No supervisor,queues,book reducer,storage or replay engine is implemented.
+A1–A3/R3/R6/C2 are part of the accepted SPEC-001 contract. The executable DataHealth model remains test/reference support; no production supervisor, queues, book reducer, storage or replay engine is implemented by SPEC-001.
 
 ## 1. State and owners
 
@@ -121,4 +121,4 @@ Replay reconstructs state,candidates and recorded observations,NOT historical ph
 
 ## 6. Vectors and approval gate
 
-[Named vectors](../domain/review-vectors-v2.md) cover all findings with exact state,diagnostic,source/application IDs,cursors and availability. [Matrix](../domain/test-matrix-v1.md) retains numeric/full-WAL obligations. New specs/ADR PROPOSED;model/executable tests NOT_IMPLEMENTED/NOT_RUN. D1/D2 permission does not approve event/health/WAL. R1–R6 remain submitted for independent renewed review,not closed by this worker.
+[Named vectors](../domain/review-vectors-v2.md) cover the reviewed findings with exact state, diagnostic, source/application IDs, cursors and availability. [Matrix](../domain/test-matrix-v1.md) retains numeric/full-WAL obligations. The SPEC-001 reference model/executable tests are implemented and accepted; R1–R6 were closed through design review and final QA. Production supervisor/book/storage/replay behavior remains downstream.

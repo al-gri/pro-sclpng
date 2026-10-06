@@ -1,9 +1,9 @@
 # Events, identities and causal application v1
 
-Status: **PROPOSED**. Proposal revision **2**, DESIGN_REVIEW_REQUIRED.
-Base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; replaces the proposal at `98ecd7484f8345d6c5f162a85ff3effbd6a46a68`, not an accepted contract.
+Status: **ACCEPTED**. Proposal revision **2**, accepted by owner squash merge of [PR #10](https://github.com/al-gri/pro-sclpng/pull/10); verified main baseline `8d9d6ada6309542822e4e38dd064f1e3467f990b`.
+Design base: `6c520237d35865c79dba9e74fa64bd4c2c9e419f`; intermediate proposal/review SHAs remain historical provenance in PR #10.
 Links: [types](../domain/types-v1.md), [artifacts](../domain/artifacts-v1.md), [health](data-health-v1.md), [WAL](../recording/wal-v1.md), [vectors](../domain/review-vectors-v2.md), [ADR](../../docs/adr/0002-domain-event-wal-contracts.md).
-Architecture A1/A3 and Integrator R1/R4 are incorporated for renewed review. No event/health/WAL implementation is authorized by this text.
+Architecture A1/A3 and Integrator R1/R4 are incorporated in the accepted contract. SPEC-001 implements the domain/reference validation scope only; production market-data connector, book engine, recorder/replay and downstream runtime remain separate tasks.
 
 ## 1. Source identity is not effect identity
 
@@ -100,4 +100,4 @@ RecordNo is authoritative admission order across raw/control, not a global excha
 
 Data readiness, immutable publication_candidate and publication_permit are distinct ([health section 5](data-health-v1.md#5-a2-publication-candidate-and-permit)). A candidate derived while processing RecordingEvidence includes that record in its causal prefix. Final StorageFence is a storage operation result, NOT a new WAL/control record, clock tick, market effect or automatic ack-generating cause. Receipt alone never permits publication. Historical state/candidates can replay; physical sync and external delivery cannot be inferred from recorded claims.
 
-New contracts remain PROPOSED. Exact negative traces are in review-vectors-v2; full runtime validators/models are NOT_IMPLEMENTED / NOT_RUN pending renewed approval.
+This contract is ACCEPTED. Exact negative traces remain in review-vectors-v2 and executable validators/reference models are covered by SPEC-001 tests; production market-data runtime behavior remains downstream of MD-001/REC-001.
