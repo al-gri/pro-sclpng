@@ -821,7 +821,15 @@ impl PublicWsSupervisor {
     ) -> Result<Option<DrainResult>, SupervisorError> {
         self.ensure_started()?;
         let Some(ingress) = self.queue.pop_front() else {
-            return Ok(None);
+            let mut result = DrainResult::default();
+            self.finish_ready_disconnects(sink, &mut result)?;
+            if result.records.is_empty()
+                && result.commands.is_empty()
+                && result.events.is_empty()
+            {
+                return Ok(None);
+            }
+            return Ok(Some(result));
         };
 
         let mut result = match ingress {
@@ -1444,7 +1452,7 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let connection = {
+        let (connection, duplicate_pending) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -1457,12 +1465,10 @@ impl PublicWsSupervisor {
                     epoch,
                 });
             }
-            if runtime.pending_disconnect.is_some() {
-                return Err(SupervisorError::InvalidConfiguration(
-                    "disconnect already pending",
-                ));
-            }
-            runtime.binding.connection_id
+            let duplicate_pending = runtime
+                .pending_disconnect
+                .is_some_and(|pending| pending.epoch == epoch);
+            (runtime.binding.connection_id, duplicate_pending)
         };
 
         let down_record = self.persist_record(
@@ -1477,6 +1483,18 @@ impl PublicWsSupervisor {
             }),
             sink,
         )?;
+
+        if duplicate_pending {
+            return Ok(DrainResult {
+                records: vec![down_record],
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::TransportRecorded {
+                    stream,
+                    record: down_record,
+                    value: Transport::Down,
+                }],
+            });
+        }
 
         let runtime =
             self.streams

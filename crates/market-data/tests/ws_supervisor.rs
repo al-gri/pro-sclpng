@@ -726,6 +726,431 @@ fn disconnect_reconnect_advances_connection_subscription_and_book_epochs() {
 }
 
 #[test]
+fn repeated_same_epoch_disconnect_records_duplicate_down_and_finishes_once() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_epoch = binding.tag.connection;
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(10))
+        .expect("first disconnect");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(11))
+        .expect("duplicate disconnect");
+
+    let first = supervisor
+        .drain_one(&mut sink)
+        .expect("drain first disconnect")
+        .expect("first disconnect result");
+    assert_eq!(first.records.len(), 1);
+    assert_eq!(
+        first
+            .commands
+            .iter()
+            .filter(|command| matches!(command, TransportCommand::Close { .. }))
+            .count(),
+        1
+    );
+    assert!(!first.commands.iter().any(|command| matches!(
+        command,
+        TransportCommand::ReconnectAfter { .. }
+    )));
+    let pending = supervisor.snapshot(stream).expect("pending");
+    assert_eq!(pending.tag.connection, old_epoch);
+    assert_eq!(pending.transport, Transport::Down);
+    assert_eq!(pending.subscription, SubscriptionState::Degraded);
+
+    let second = supervisor
+        .drain_one(&mut sink)
+        .expect("drain duplicate disconnect")
+        .expect("duplicate disconnect result");
+    assert_eq!(
+        first
+            .commands
+            .iter()
+            .chain(second.commands.iter())
+            .filter(|command| matches!(command, TransportCommand::ReconnectAfter { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        second
+            .events
+            .iter()
+            .filter(|event| matches!(event, SupervisorEvent::EpochAdvanced { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Transport {
+                        value: Transport::Down,
+                        ..
+                    },
+                    ..
+                })
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance { .. },
+                    ..
+                })
+            ))
+            .count(),
+        3
+    );
+
+    let current = supervisor.snapshot(stream).expect("advanced");
+    assert_eq!(current.tag.connection.get(), 2);
+    assert_eq!(current.tag.subscription.get(), 2);
+    assert_eq!(current.tag.book.expect("book").get(), 2);
+    assert_eq!(current.transport, Transport::Unknown);
+    assert_eq!(current.subscription, SubscriptionState::Backoff);
+    assert_eq!(current.last_market_record, None);
+    assert_eq!(supervisor.queued_items(), 0);
+    assert!(
+        supervisor
+            .drain_one(&mut sink)
+            .expect("empty drain after completion")
+            .is_none()
+    );
+    assert!(!supervisor.is_halted());
+}
+
+#[test]
+fn heartbeat_timeout_then_same_epoch_disconnect_finishes_one_transition() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_epoch = binding.tag.connection;
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 100);
+
+    let ping_due = 100 + HEARTBEAT_INTERVAL_NS;
+    supervisor.queue_tick(stamp(ping_due)).expect("queue ping");
+    supervisor
+        .drain_one(&mut sink)
+        .expect("drain ping")
+        .expect("ping result");
+
+    let timeout = ping_due + PONG_TIMEOUT_NS_V1;
+    supervisor
+        .queue_tick(stamp(timeout))
+        .expect("queue pong timeout");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(timeout + 1))
+        .expect("queue same-epoch disconnect");
+
+    let timed_out = supervisor
+        .drain_one(&mut sink)
+        .expect("drain timeout")
+        .expect("timeout result");
+    assert_eq!(timed_out.records.len(), 2);
+    assert!(timed_out.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::HeartbeatTimerRecorded { .. }
+    )));
+    assert!(!timed_out.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { .. }
+    )));
+    let pending = supervisor.snapshot(stream).expect("pending timeout");
+    assert_eq!(pending.tag.connection, old_epoch);
+    assert_eq!(pending.transport, Transport::Down);
+    assert_eq!(pending.subscription, SubscriptionState::Degraded);
+
+    let duplicate = supervisor
+        .drain_one(&mut sink)
+        .expect("drain queued disconnect")
+        .expect("queued disconnect result");
+    assert_eq!(
+        timed_out
+            .commands
+            .iter()
+            .chain(duplicate.commands.iter())
+            .filter(|command| matches!(command, TransportCommand::ReconnectAfter { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Timer { .. },
+                    ..
+                })
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Transport {
+                        value: Transport::Down,
+                        ..
+                    },
+                    ..
+                })
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance { .. },
+                    ..
+                })
+            ))
+            .count(),
+        3
+    );
+
+    let current = supervisor.snapshot(stream).expect("advanced");
+    assert_eq!(current.tag.connection.get(), 2);
+    assert_eq!(current.tag.subscription.get(), 2);
+    assert_eq!(current.tag.book.expect("book").get(), 2);
+    assert_eq!(current.transport, Transport::Unknown);
+    assert_eq!(current.subscription, SubscriptionState::Backoff);
+    assert_eq!(supervisor.queued_items(), 0);
+    assert!(!supervisor.is_halted());
+}
+
+#[test]
+fn repeated_disconnect_waits_for_queued_old_generation_raw_before_advancing() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_tag = binding.tag;
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    let raw = ack("BTCUSDT");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(10))
+        .expect("first disconnect");
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(11),
+            raw.clone(),
+        )
+        .expect("old-generation raw");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(12))
+        .expect("second disconnect");
+
+    let first = supervisor
+        .drain_one(&mut sink)
+        .expect("drain first disconnect")
+        .expect("first result");
+    assert_eq!(first.records.len(), 1);
+    assert_eq!(supervisor.snapshot(stream).expect("pending").tag, old_tag);
+
+    let raw_result = supervisor
+        .drain_one(&mut sink)
+        .expect("drain old raw")
+        .expect("old raw result");
+    assert!(raw_result.events.iter().all(|event| !matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { .. }
+    )));
+    assert_eq!(supervisor.snapshot(stream).expect("still pending").tag, old_tag);
+
+    let duplicate = supervisor
+        .drain_one(&mut sink)
+        .expect("drain duplicate")
+        .expect("duplicate result");
+    assert!(duplicate.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { tag, .. } if tag.connection.get() == 2
+    )));
+
+    let raw_position = sink
+        .frames
+        .iter()
+        .position(|frame| matches!(
+            &frame.value,
+            Record::RawInput(input) if input.tag == old_tag && input.bytes == raw
+        ))
+        .expect("old raw persisted");
+    let advance_position = sink
+        .frames
+        .iter()
+        .position(|frame| matches!(
+            &frame.value,
+            Record::Control(ControlRecord {
+                value: Control::EpochAdvance {
+                    change: EpochChange::Connection { .. },
+                    ..
+                },
+                ..
+            })
+        ))
+        .expect("connection epoch advance");
+    assert!(raw_position < advance_position);
+
+    let current = supervisor.snapshot(stream).expect("advanced");
+    assert_eq!(current.tag.connection.get(), 2);
+    assert_eq!(current.transport, Transport::Unknown);
+    assert_eq!(current.subscription, SubscriptionState::Backoff);
+    assert_eq!(supervisor.queued_items(), 0);
+    assert!(!supervisor.is_halted());
+}
+
+#[test]
+fn pending_disconnect_finishes_when_last_blocker_drain_empties_queue() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_tag = binding.tag;
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(10))
+        .expect("disconnect");
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(11),
+            ack("BTCUSDT"),
+        )
+        .expect("last old-generation blocker");
+
+    let down = supervisor
+        .drain_one(&mut sink)
+        .expect("drain down")
+        .expect("down result");
+    assert_eq!(down.records.len(), 1);
+    assert_eq!(supervisor.snapshot(stream).expect("pending").tag, old_tag);
+    assert_eq!(supervisor.queued_items(), 1);
+
+    let last = supervisor
+        .drain_one(&mut sink)
+        .expect("drain last blocker")
+        .expect("last blocker result");
+    assert!(last.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { tag, .. } if tag.connection.get() == 2
+    )));
+    assert!(last.commands.iter().any(|command| matches!(
+        command,
+        TransportCommand::ReconnectAfter { epoch, .. } if epoch.get() == 2
+    )));
+    assert_eq!(supervisor.queued_items(), 0);
+
+    let current = supervisor.snapshot(stream).expect("advanced");
+    assert_eq!(current.tag.connection.get(), 2);
+    assert_eq!(current.subscription, SubscriptionState::Backoff);
+    assert!(
+        supervisor
+            .drain_one(&mut sink)
+            .expect("empty drain")
+            .is_none()
+    );
+}
+
+#[test]
+fn stale_disconnect_after_epoch_advance_cannot_start_another_transition() {
+    let binding = stream_binding(1, 1, 1, "BTCUSDT");
+    let stream = binding.id;
+    let old_epoch = binding.tag.connection;
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
+    let mut sink = MemorySink::default();
+    supervisor.start_commands().expect("start");
+    connect_one(&mut supervisor, &mut sink, &binding, 1);
+
+    supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(10))
+        .expect("disconnect");
+    let first = supervisor
+        .drain_one(&mut sink)
+        .expect("drain disconnect")
+        .expect("disconnect result");
+    assert!(first.events.iter().any(|event| matches!(
+        event,
+        SupervisorEvent::EpochAdvanced { tag, .. } if tag.connection.get() == 2
+    )));
+
+    let before = supervisor.snapshot(stream).expect("before stale");
+    let error = supervisor
+        .queue_disconnected(binding.connection_id, old_epoch, stamp(11))
+        .expect_err("old epoch disconnect rejected");
+    assert_eq!(
+        error,
+        SupervisorError::UnknownConnectionEpoch {
+            connection: binding.connection_id,
+            epoch: old_epoch,
+        }
+    );
+    assert_eq!(supervisor.queued_items(), 0);
+    assert_eq!(supervisor.snapshot(stream).expect("after stale"), before);
+    assert_eq!(
+        sink.frames
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance { .. },
+                    ..
+                })
+            ))
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn reconnect_backoff_is_deterministic_and_bounded() {
     let stream = id(StreamId::new(4));
     let mut previous = 0;
