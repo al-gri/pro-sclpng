@@ -130,12 +130,6 @@ impl Default for PhysicalReport {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReadArchive {
-    pub records: Vec<RecordFrame>,
-    pub report: PhysicalReport,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 struct LossWindow {
     left: u64,
     tag: EpochTag,
@@ -1280,17 +1274,3 @@ fn read_up_to(reader: &mut File, bytes: &mut [u8]) -> io::Result<usize> {
     Ok(total)
 }
 
-pub fn read_all<P: AsRef<Path>>(paths: &[P]) -> io::Result<ReadArchive> {
-    let mut reader = WalReader::open_segments(paths)?;
-    let mut records = Vec::new();
-    loop {
-        match reader.next_record() {
-            Ok(Some(record)) => records.push(record),
-            Ok(None) | Err(_) => break,
-        }
-    }
-    Ok(ReadArchive {
-        records,
-        report: reader.report.clone(),
-    })
-}
