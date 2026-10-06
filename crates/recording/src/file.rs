@@ -59,11 +59,11 @@ impl fmt::Display for WriterError {
             Self::Codec(error) => write!(f, "{error}"),
             Self::Validation(error) => write!(f, "{error}"),
             Self::Io { operation, source } => write!(f, "{operation}: {source}"),
-            Self::Poisoned => f.write_str("WAL writer is poisoned after a failed storage operation"),
-            Self::Closed => f.write_str("WAL writer is already finalized"),
-            Self::RotationRequired => {
-                f.write_str("WAL rotation requires a non-final SegmentSeal")
+            Self::Poisoned => {
+                f.write_str("WAL writer is poisoned after a failed storage operation")
             }
+            Self::Closed => f.write_str("WAL writer is already finalized"),
+            Self::RotationRequired => f.write_str("WAL rotation requires a non-final SegmentSeal"),
             Self::ArchiveNotSealed => {
                 f.write_str("durable finalization requires an accepted ArchiveSeal")
             }
@@ -103,10 +103,7 @@ struct FileBackend {
 
 impl FileBackend {
     fn create(path: &Path) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)?;
+        let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         Ok(Self {
             path: path.to_path_buf(),
             writer: BufWriter::new(file),
@@ -282,12 +279,11 @@ impl WalWriter {
             return Err(WriterError::RotationRequired);
         }
         self.sync_all()?;
-        let next_backend = FileBackend::create(next_path.as_ref()).map_err(|source| {
-            WriterError::Io {
+        let next_backend =
+            FileBackend::create(next_path.as_ref()).map_err(|source| WriterError::Io {
                 operation: "create_segment",
                 source,
-            }
-        })?;
+            })?;
         self.backend = next_backend;
         self.segment_index = self
             .segment_index
