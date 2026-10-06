@@ -343,6 +343,26 @@ fn complete_frames() -> Vec<RecordFrame> {
     frames
 }
 
+fn unresolved_prefix_frames() -> Vec<RecordFrame> {
+    vec![
+        start_frame(DurabilityMode::Buffered),
+        spec_frame(2, 1, 2, 2),
+        stream_frame(3),
+        config_frame(RecordingGate::Written),
+        raw_frame(5, 1, b"one".to_vec()),
+        queue_gap_frame(6, None),
+    ]
+}
+
+fn unresolved_archive_frames(quality: InputQuality) -> Vec<RecordFrame> {
+    let mut frames = unresolved_prefix_frames();
+    let seal = seal_frame(7, 0, &frames, true, true);
+    frames.push(seal);
+    let archive_seal = archive_seal_frame(8, 0, &frames, 1, quality);
+    frames.push(archive_seal);
+    frames
+}
+
 fn multi_segment_frames() -> (Vec<RecordFrame>, Vec<RecordFrame>) {
     let mut first = vec![
         start_frame(DurabilityMode::Buffered),
@@ -1056,6 +1076,156 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
         error,
         WriterError::Validation(ValidationError::Loss(LossError::GapScopeTransition))
     ));
+}
+
+
+#[test]
+fn unresolved_local_loss_window_is_nonfatal_diagnostic_on_complete_unknown_archive() {
+    let frames = unresolved_archive_frames(InputQuality::Unknown);
+    let mut temp = TempFiles::new();
+    let path = temp.path("r5-unresolved-complete");
+    write_bytes(&path, &encode_sequence(&frames));
+
+    let read = read_archive(&[&path]);
+    assert_eq!(read.records, frames);
+    assert_eq!(read.report.status, ArchiveStatus::Complete);
+    assert_eq!(read.report.input_quality, Some(InputQuality::Unknown));
+    assert_eq!(read.report.failure, None);
+    assert_eq!(
+        read.report.diagnostics,
+        vec![RecoveryDiagnostic::Loss {
+            stream: StreamId::new(1).expect("stream"),
+            error: LossError::UnresolvedLossWindow,
+        }]
+    );
+}
+
+#[test]
+fn unresolved_local_loss_window_rejects_stronger_archive_quality_claims() {
+    let mut temp = TempFiles::new();
+
+    for (index, quality) in [InputQuality::NoKnownLoss, InputQuality::GapsRecorded]
+        .into_iter()
+        .enumerate()
+    {
+        let frames = unresolved_archive_frames(quality);
+        let path = temp.path(&format!("r5-unresolved-stronger-{index}"));
+        write_bytes(&path, &encode_sequence(&frames));
+
+        let read = read_archive(&[&path]);
+        assert_eq!(read.report.status, ArchiveStatus::Invalid);
+        assert_ne!(read.report.status, ArchiveStatus::Complete);
+        assert!(matches!(
+            read.report.failure.as_ref().map(|failure| &failure.kind),
+            Some(FailureKind::Validation(ValidationError::OrderOrChain(
+                "archive_seal"
+            )))
+        ));
+    }
+}
+
+#[test]
+fn ordinary_eof_with_unresolved_local_loss_window_reports_unknown_diagnostic() {
+    let mut frames = unresolved_prefix_frames();
+    let seal = seal_frame(7, 0, &frames, true, true);
+    frames.push(seal);
+
+    let mut temp = TempFiles::new();
+    let path = temp.path("r5-unresolved-eof");
+    write_bytes(&path, &encode_sequence(&frames));
+
+    let read = read_archive(&[&path]);
+    assert_eq!(read.records, frames);
+    assert_eq!(
+        read.report.status,
+        ArchiveStatus::SegmentSealedArchiveIncomplete
+    );
+    assert_eq!(read.report.input_quality, Some(InputQuality::Unknown));
+    assert_eq!(read.report.failure, None);
+    assert_eq!(
+        read.report.diagnostics,
+        vec![RecoveryDiagnostic::Loss {
+            stream: StreamId::new(1).expect("stream"),
+            error: LossError::UnresolvedLossWindow,
+        }]
+    );
+}
+
+#[test]
+fn unresolved_loss_diagnostics_are_deterministic_stream_ordered_and_unique() {
+    let mut second_binding = stream_binding();
+    second_binding.id = StreamId::new(2).expect("stream");
+    second_binding.channel = Channel::Trades;
+    second_binding.book_id = None;
+    second_binding.tag.book = None;
+
+    let second_stream = RecordFrame {
+        record_no: record(4),
+        segment_no: segment(0),
+        value: Record::StreamDefinition(StreamDefinition {
+            context: bootstrap_context(4, 4),
+            binding: second_binding.clone(),
+            provenance: artifact(),
+        }),
+    };
+    let second_raw = RecordFrame {
+        record_no: record(6),
+        segment_no: segment(0),
+        value: Record::RawInput(RawInput {
+            context: active_wire_context(6, 6),
+            stream: second_binding.id,
+            tag: second_binding.tag,
+            attempt: CaptureAttemptNo::new(1).expect("attempt"),
+            bytes: b"stream-two".to_vec(),
+        }),
+    };
+    let all_streams_gap = RecordFrame {
+        record_no: record(8),
+        segment_no: segment(0),
+        value: Record::Gap(Gap {
+            context: active_wire_context(8, 8),
+            scope: GapScope::AllDeclaredStreams,
+            reason: Reason::QueueOverflow,
+        }),
+    };
+
+    let mut frames = vec![
+        start_frame(DurabilityMode::Buffered),
+        spec_frame(2, 1, 2, 2),
+        stream_frame(3),
+        second_stream,
+        config_frame_at(5, RecordingGate::Written),
+        second_raw,
+        raw_frame(7, 1, b"stream-one".to_vec()),
+        all_streams_gap,
+    ];
+    let seal = seal_frame(9, 0, &frames, true, true);
+    frames.push(seal);
+    let archive_seal = archive_seal_frame(10, 0, &frames, 1, InputQuality::Unknown);
+    frames.push(archive_seal);
+
+    let mut temp = TempFiles::new();
+    let path = temp.path("r5-unresolved-order");
+    write_bytes(&path, &encode_sequence(&frames));
+
+    let first = read_archive(&[&path]);
+    let second = read_archive(&[&path]);
+    let expected = vec![
+        RecoveryDiagnostic::Loss {
+            stream: StreamId::new(1).expect("stream"),
+            error: LossError::UnresolvedLossWindow,
+        },
+        RecoveryDiagnostic::Loss {
+            stream: StreamId::new(2).expect("stream"),
+            error: LossError::UnresolvedLossWindow,
+        },
+    ];
+
+    assert_eq!(first.report.status, ArchiveStatus::Complete);
+    assert_eq!(first.report.input_quality, Some(InputQuality::Unknown));
+    assert_eq!(first.report.failure, None);
+    assert_eq!(first.report.diagnostics, expected);
+    assert_eq!(second.report.diagnostics, first.report.diagnostics);
 }
 
 #[test]

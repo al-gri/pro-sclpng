@@ -46,6 +46,11 @@ pub enum LossError {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecoveryDiagnostic {
+    Loss { stream: StreamId, error: LossError },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     Record(RecordError),
     Identity(IdentityError),
@@ -112,6 +117,7 @@ pub struct PhysicalReport {
     pub physical_good_offset: u64,
     pub framing_good_offset: u64,
     pub last_record: Option<RecordNo>,
+    pub diagnostics: Vec<RecoveryDiagnostic>,
     pub failure: Option<Failure>,
 }
 
@@ -124,6 +130,7 @@ impl Default for PhysicalReport {
             physical_good_offset: 0,
             framing_good_offset: 0,
             last_record: None,
+            diagnostics: Vec::new(),
             failure: None,
         }
     }
@@ -347,6 +354,22 @@ impl ArchiveValidator {
 
     pub(crate) fn input_quality(&self) -> Option<InputQuality> {
         self.input_quality
+    }
+
+    pub(crate) fn recovery_diagnostics(&self) -> Vec<RecoveryDiagnostic> {
+        self.streams
+            .iter()
+            .filter_map(|(stream, state)| {
+                state
+                    .loss
+                    .window
+                    .as_ref()
+                    .map(|_| RecoveryDiagnostic::Loss {
+                        stream: *stream,
+                        error: LossError::UnresolvedLossWindow,
+                    })
+            })
+            .collect()
     }
 
     fn check_context(&self, context: &WireContext) -> Result<(), ValidationError> {
@@ -948,9 +971,7 @@ impl WalReader {
                     );
                     return Err(failure);
                 }
-                self.report.status = ArchiveStatus::Complete;
-                self.report.input_quality = self.validator.input_quality();
-                self.terminal = true;
+                self.finalize_eof(ArchiveStatus::Complete);
                 return Ok(None);
             }
 
@@ -1002,9 +1023,8 @@ impl WalReader {
                     self.local_offset = 0;
                     continue;
                 }
-                self.report.status = self.validator.eof_status();
-                self.report.input_quality = self.validator.input_quality();
-                self.terminal = true;
+                let status = self.validator.eof_status();
+                self.finalize_eof(status);
                 return Ok(None);
             }
 
@@ -1161,6 +1181,18 @@ impl WalReader {
             };
             return Ok(Some(frame));
         }
+    }
+
+    fn finalize_eof(&mut self, status: ArchiveStatus) {
+        let diagnostics = self.validator.recovery_diagnostics();
+        self.report.status = status;
+        self.report.input_quality = if diagnostics.is_empty() {
+            self.validator.input_quality()
+        } else {
+            Some(InputQuality::Unknown)
+        };
+        self.report.diagnostics = diagnostics;
+        self.terminal = true;
     }
 
     fn fail(

@@ -252,6 +252,47 @@ Recorder/replay integration should:
 - call the same reducers used by live processing;
 - not infer historical sync/send success from replayed WAL bytes or CRCs.
 
+## Independent QA finding and R5 correction
+
+Independent QA reviewed exact head
+`3b3222bd8171421e9f7df075daeb12446e2cb58c` and returned
+**CHANGES_REQUIRED** for one MEDIUM R5 recovery defect:
+
+- an unknown-range local QueueOverflow window could remain open through final seals;
+- `ArchiveSeal(input_quality=Unknown)` could validly preserve a physical `Complete` chain;
+- however `PhysicalReport` had no non-fatal typed way to surface the accepted
+  `UnresolvedLossWindow` diagnostic.
+
+The correction is intentionally runtime-only and does not change WAL bytes, tags,
+accepted specs, domain contracts, or physical completion semantics:
+
+- `PhysicalReport` now carries ordered `RecoveryDiagnostic` values;
+- a loss diagnostic identifies the affected `StreamId` and typed `LossError`;
+- terminal EOF/finalization derives unresolved-window diagnostics from validator
+  state in deterministic `BTreeMap<StreamId, ...>` order;
+- an unresolved local window reports `LossError::UnresolvedLossWindow`;
+- terminal input quality is `Unknown` while such a window remains open;
+- valid `ArchiveSeal(input_quality=Unknown)` + exact EOF remains physical
+  `ArchiveStatus::Complete` with `failure == None`;
+- stronger `NoKnownLoss` and `GapsRecorded` seal claims remain rejected;
+- ordinary EOF before ArchiveSeal remains physically incomplete while exposing the
+  same non-fatal diagnostic.
+
+New production regression coverage in `crates/recording/tests/wal.rs` includes:
+
+- accepted vector `V-R5-UNRESOLVED`: Complete + Unknown + non-fatal
+  `UnresolvedLossWindow`;
+- rejection of NoKnownLoss and GapsRecorded on an unresolved window;
+- ordinary EOF before ArchiveSeal with Unknown + diagnostic;
+- two unresolved streams with deterministic ascending StreamId diagnostic order,
+  no duplicates, and repeated-read equality.
+
+The previous exact-head CI run `37455560628` applies only to the QA-rejected
+head `3b3222bd...` and is historical after this correction. Local Rust commands
+remain **NOT_RUN** in this connector-only continuation session. The post-fix exact
+head and its new exact-head CI run are recorded in mutable PR #28 / Issue #17
+metadata after this commit; no PASS is transferred from the rejected head.
+
 ## Next gate
 
 After the handoff commit:
