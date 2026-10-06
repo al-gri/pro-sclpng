@@ -613,9 +613,7 @@ impl DataHealthReducer {
                 self.book_frame(at, original_sample_ns, frame, out)
             }
             HealthObservation::VerifiedFrame(proof) => self.verify_frame(at, proof, out),
-            HealthObservation::ProofConflict(conflict) => {
-                self.proof_conflict(at, conflict, out)
-            }
+            HealthObservation::ProofConflict(conflict) => self.proof_conflict(at, conflict, out),
             HealthObservation::VerifiedWarmup(proof) => self.warmup(at, proof, out),
             HealthObservation::Timer { stream } => {
                 if self.streams.contains_key(stream) {
@@ -1196,8 +1194,7 @@ impl DataHealthReducer {
             }
             match pending.kind {
                 BookEvidenceKind::Snapshot => {
-                    if self.policy.fields.require_two_sided_snapshot
-                        && !pending.two_sided_snapshot
+                    if self.policy.fields.require_two_sided_snapshot && !pending.two_sided_snapshot
                     {
                         Self::invalidate_state(
                             state,
