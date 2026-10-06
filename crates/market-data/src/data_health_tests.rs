@@ -6,15 +6,15 @@ use domain::identity::{
     RecordNo, SpecRef, SpecVersion, StreamBinding, StreamId, SubscriptionEpoch, Token,
 };
 use domain::policy::{DurabilityMode, HealthPolicy, PolicyFields, RecordingGate, SilenceRule};
-use domain::record::{
-    BookEvidenceKind, EpochChange, Freshness, GapScope, GapTarget, Reason, Transport,
-    VerificationEvidence, WarmupEvidence,
-};
 use super::{VerifiedFrameProof, VerifiedProofConflict, VerifiedWarmupProof};
 use crate::{
     BitgetMessage, BookFrameObservation, BookInvalidReason, BookValidity, ContinuityOutcome,
     ContinuityRule, DataHealthReducer, HealthDiagnostic, HealthEffect, HealthError,
     HealthObservation, PendingLimit, RecordedHealthObservation, StepResult, decode_message,
+};
+use domain::record::{
+    BookEvidenceKind, EpochChange, Freshness, GapScope, GapTarget, Reason, Transport,
+    VerificationEvidence, WarmupEvidence,
 };
 
 const SNAPSHOT: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-snapshot.json");
@@ -1218,7 +1218,6 @@ fn second_writer_for_same_book_ref_is_rejected_transactionally() {
     assert!(runtime.stream_state(second.id).is_none());
 }
 
-
 #[test]
 fn repeated_current_down_advances_barrier_and_blocks_intervening_pending_frame() {
     let binding = binding(1, 1, 1, 1, "BTCUSDT");
@@ -1236,13 +1235,24 @@ fn repeated_current_down_advances_barrier_and_blocks_intervening_pending_frame()
             },
         ))
         .expect("first down");
-    assert_eq!(runtime.stream_state(binding.id).expect("state").barrier.get(), 3);
+    assert_eq!(
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .barrier
+            .get(),
+        3
+    );
 
     runtime
         .step(recorded(4, 2, frame(&binding, books(SNAPSHOT))))
         .expect("post-first-down snapshot may be pending");
     assert_eq!(
-        runtime.stream_state(binding.id).expect("state").pending.frames,
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .pending
+            .frames,
         1
     );
 
@@ -1301,7 +1311,11 @@ fn repeated_current_down_advances_barrier_and_blocks_intervening_pending_frame()
         }]
     );
     assert_eq!(
-        runtime.stream_state(binding.id).expect("state").barrier.get(),
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .barrier
+            .get(),
         5
     );
 }
@@ -1327,10 +1341,12 @@ fn two_sided_snapshot_policy_fails_closed_without_quantity_semantics() {
         ))
         .expect("two-sided guard is semantic invalidation");
 
-    assert!(!proof.effects.iter().any(|effect| matches!(
-        effect,
-        HealthEffect::SnapshotReleased { .. }
-    )));
+    assert!(
+        !proof
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, HealthEffect::SnapshotReleased { .. }))
+    );
     assert_eq!(
         proof.effects.last(),
         Some(&HealthEffect::StreamInvalidated {
@@ -1378,10 +1394,7 @@ fn future_unannounced_connection_epoch_is_transactional_mismatch() {
             },
         ))
         .expect_err("future epoch requires explicit EpochAdvance");
-    assert_eq!(
-        error,
-        HealthError::Identity(IdentityError::EpochMismatch)
-    );
+    assert_eq!(error, HealthError::Identity(IdentityError::EpochMismatch));
     assert_eq!(runtime.snapshot(), before);
     assert_eq!(
         runtime.last_record(),
