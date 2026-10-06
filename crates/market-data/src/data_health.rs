@@ -384,11 +384,7 @@ impl DataHealthReducer {
         self.last_record
     }
 
-    pub fn transport_state(
-        &self,
-        connection: ConnectionId,
-        epoch: ConnectionEpoch,
-    ) -> Transport {
+    pub fn transport_state(&self, connection: ConnectionId, epoch: ConnectionEpoch) -> Transport {
         self.transport
             .get(&(connection, epoch))
             .copied()
@@ -426,10 +422,7 @@ impl DataHealthReducer {
         };
         self.transport_state(state.binding.connection_id, state.binding.tag.connection)
             == Transport::Up
-            && matches!(
-                state.freshness,
-                Freshness::Fresh | Freshness::QuietVerified
-            )
+            && matches!(state.freshness, Freshness::Fresh | Freshness::QuietVerified)
             && state.book == Some(BookValidity::Usable)
             && anchor.raw > state.barrier
             && witness.anchor == anchor.raw
@@ -501,11 +494,7 @@ impl DataHealthReducer {
         Ok(result)
     }
 
-    fn expire_before(
-        &mut self,
-        at: RecordNo,
-        out: &mut StepResult,
-    ) -> Result<(), HealthError> {
+    fn expire_before(&mut self, at: RecordNo, out: &mut StepResult) -> Result<(), HealthError> {
         let streams: Vec<_> = self.streams.keys().copied().collect();
         for stream in streams {
             let pending_expired = self
@@ -622,10 +611,8 @@ impl DataHealthReducer {
                 .values()
                 .any(|state| state.binding.connection_id == connection)
             {
-                out.diagnostics.push(HealthDiagnostic::ObsoleteConnection {
-                    connection,
-                    epoch,
-                });
+                out.diagnostics
+                    .push(HealthDiagnostic::ObsoleteConnection { connection, epoch });
                 return Ok(());
             }
             return Err(HealthError::UnknownConnection(connection));
@@ -870,12 +857,7 @@ impl DataHealthReducer {
                     .push(HealthDiagnostic::DuplicateObservation { stream, raw: at });
             }
             ContinuityOutcome::Gap { .. } => {
-                Self::invalidate_state(
-                    &mut state,
-                    at,
-                    BookInvalidReason::ContinuityGap,
-                    out,
-                );
+                Self::invalidate_state(&mut state, at, BookInvalidReason::ContinuityGap, out);
             }
             ContinuityOutcome::ResetOrDiscontinuity { .. } => {
                 Self::invalidate_state(
@@ -897,12 +879,7 @@ impl DataHealthReducer {
                 Self::invalidate_state(&mut state, at, BookInvalidReason::NeedsSnapshot, out);
             }
             ContinuityOutcome::UnexpectedSnapshot { .. } => {
-                Self::invalidate_state(
-                    &mut state,
-                    at,
-                    BookInvalidReason::UnexpectedSnapshot,
-                    out,
-                );
+                Self::invalidate_state(&mut state, at, BookInvalidReason::UnexpectedSnapshot, out);
             }
         }
 
@@ -970,12 +947,7 @@ impl DataHealthReducer {
         }
 
         let Some(deadline_ns) = original_sample_ns.checked_add(self.policy.pending_wait_ns) else {
-            Self::invalidate_state(
-                state,
-                at,
-                BookInvalidReason::PendingDeadlineOverflow,
-                out,
-            );
+            Self::invalidate_state(state, at, BookInvalidReason::PendingDeadlineOverflow, out);
             return Ok(());
         };
         if self.evaluation_ns >= deadline_ns {
@@ -1101,7 +1073,11 @@ impl DataHealthReducer {
         at: RecordNo,
         out: &mut StepResult,
     ) -> Result<(), HealthError> {
-        while state.pending.front().is_some_and(|pending| pending.verified) {
+        while state
+            .pending
+            .front()
+            .is_some_and(|pending| pending.verified)
+        {
             let pending = state
                 .pending
                 .pop_front()
@@ -1127,12 +1103,7 @@ impl DataHealthReducer {
                             Some(BookValidity::Warming | BookValidity::Usable)
                         )
                     {
-                        Self::invalidate_state(
-                            state,
-                            at,
-                            BookInvalidReason::NeedsSnapshot,
-                            out,
-                        );
+                        Self::invalidate_state(state, at, BookInvalidReason::NeedsSnapshot, out);
                         break;
                     }
                     if state.book == Some(BookValidity::Warming) {
@@ -1315,11 +1286,7 @@ impl DataHealthReducer {
     }
 }
 
-fn ordinary_freshness(
-    sample: Option<u64>,
-    evaluation_ns: u64,
-    policy: HealthPolicy,
-) -> Freshness {
+fn ordinary_freshness(sample: Option<u64>, evaluation_ns: u64, policy: HealthPolicy) -> Freshness {
     let (Some(sample), Some(deadline)) = (sample, policy.fields.freshness_deadline_ns) else {
         return Freshness::Unknown;
     };
