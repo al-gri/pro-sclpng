@@ -300,3 +300,177 @@ Not implemented by REC-001C:
 Worker readiness is conditional only on the fresh exact-post-handoff CI described above.
 
 After that run succeeds, update PR #32 metadata, convert Draft -> Ready for review if permitted, post the durable Issue #18 completion record with status `READY_FOR_INDEPENDENT_QA`, and stop without merge or auto-merge.
+
+
+## Independent QA CHANGES_REQUIRED and repair
+
+Independent QA reviewed exact head
+`6ad75f9862521f4cae6043bf8e5412a9142624e0` against exact base
+`24fb4872150232af2665d3fc45bcdc63d6b355e9` and returned
+**CHANGES_REQUIRED**. Integrator return-to-worker record: Issue #18 comment
+`6021958200`.
+
+The repair continued the existing claim/branch/PR #32. No new claim, branch or PR
+was created. The branch lineage is a fast-forward from the QA-reviewed head.
+
+### F1 — HIGH: ordered pending proof expiry
+
+Disposition: **FIXED**.
+
+Production no longer stores frame verification as an irreversible boolean.
+`VerifiedFrameProof` is an explicit REC-001C post-verifier projection carrying
+the accepted `VerificationEvidence` plus `valid_until_ns: Option<u64>`.
+Pending state stores the corresponding accepted local projection.
+
+Proof expiry uses checked recorded evaluation semantics:
+
+- at first verified-proof receipt, `evaluation_ns >= valid_until_ns` fails closed;
+- immediately before each ready frame is actually released from the ordered pending prefix,
+  the same exclusive-bound check is repeated;
+- expiry yields typed `BookInvalidReason::ProofExpired`;
+- release-time expiry is a semantic invalidation, not a transactional Rust `Err`, so
+  whole frames already completed earlier in that same release step remain historical;
+- the expired frame emits no release effect and the current scope is invalidated at the
+  current recorded input, clearing pending/anchor/progress/witness/last-valid continuity state.
+
+This is the bounded production analogue of accepted `V-R1-EXPIRED-PROOF`.
+Artifact loading/body verification remains outside REC-001C; a parsed
+`ArtifactRef` alone is still not a verified frame proof.
+
+New regression coverage includes:
+
+- later delta proof becomes ready behind an unverified snapshot;
+- equality expiry at actual ordered release;
+- earlier snapshot release remains in the step result;
+- expired delta release is absent;
+- final book state is `Invalid(ProofExpired)`, freshness Unknown, barrier=current record,
+  pending/anchor/progress/witness/last-valid cleared and `usable_data == false`;
+- a proof already expired at its initial verification receipt fails closed without release.
+
+### F2 — MEDIUM: freshness deadline overflow diagnostic
+
+Disposition: **FIXED**.
+
+Production ordinary freshness now returns both the resulting `Freshness` and
+whether checked `sample + deadline` overflowed. Overflow preserves
+`Freshness::Unknown` and emits typed
+`HealthDiagnostic::FreshnessDeadlineOverflow { stream }` even when freshness
+was already Unknown, so lack of a state transition cannot hide the diagnostic.
+No saturating or wrapping arithmetic is used.
+
+The production regression for accepted `V-R3-OVERFLOW` uses an applied original
+sample `u64::MAX - 5` with deadline 10 and asserts Unknown freshness plus the
+typed diagnostic while transport stays Up and book continuity is not reset.
+
+### F3 — MEDIUM: architecture regression gates
+
+Disposition: **FIXED**.
+
+The manifest gate is now an exact allow-list for normal runtime dependencies:
+the only accepted `[dependencies]` entry is exactly
+
+`domain = { path = "../domain" }`.
+
+The deterministic no-dependency parser also rejects:
+
+- any additional normal runtime dependency regardless of package name;
+- `[dependencies.<name>]` tables;
+- any `[build-dependencies]` / `[build-dependencies.<name>]`;
+- target-specific production dependency/build-dependency sections.
+
+No parser dependency was added.
+
+Source scanning remains explicitly a defense-in-depth regression guard rather than
+a formal architecture proof. It now catches `std::fs`, `std::net`,
+`std::process`, direct and grouped imports, absolute/std aliases and obvious
+`extern crate std as ...` alias attempts, in addition to the existing socket,
+HTTP/REST, filesystem open, live-clock, WAL-path, canonical mutation and
+private/execution/strategy tokens.
+
+Synthetic regressions prove that arbitrary manifest dependencies and representative
+`use std::fs; fs::read(...)`, `use std::net; ...`, grouped import and std-alias
+bypasses are rejected.
+
+### Additional QA-requested production regressions
+
+Added explicit tests for:
+
+- pending raw-byte bound overflow;
+- pending candidate-output-count overflow;
+- pending deadline equality (`evaluation == deadline` => `PendingTimeout`);
+- pending deadline checked-add overflow => `PendingDeadlineOverflow` with no wrap;
+- attempted second writer for the same accepted `BookRef` rejected transactionally
+  as `IdentityError::WriterRebindRequiresNewArchive`, with the prior reducer state
+  and `last_record` unchanged.
+
+All pre-existing REC-001C regression scenarios remain in the same test suite.
+
+### Repair changed files relative to rejected QA head
+
+The implementation repair from
+`6ad75f9862521f4cae6043bf8e5412a9142624e0` changes only:
+
+- `crates/market-data/src/data_health.rs`;
+- `crates/market-data/src/lib.rs`;
+- `crates/market-data/tests/architecture.rs`;
+- `crates/market-data/tests/data_health.rs`;
+- this handoff file is updated by the final documentation commit.
+
+There is no dependency-graph change in the repair; `Cargo.lock` is unchanged
+relative to the rejected QA head. No `crates/domain/**`, `crates/recording/**`,
+accepted spec/ADR, `docs/PROJECT_STATE.md`, workflow or app change is part of
+the repair.
+
+### Verification after QA repair
+
+Local environment capability check in this worker continuation:
+
+- shell/Git: available;
+- Rust/Cargo/rustfmt: unavailable in the local execution environment.
+
+Therefore the mandatory Rust commands are truthfully:
+
+- `cargo fmt --all -- --check` — **NOT_RUN locally**;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` — **NOT_RUN locally**;
+- `cargo test --workspace --locked` — **NOT_RUN locally**.
+
+GitHub Actions run `37507031250` on intermediate repair head
+`281633e987dbe9a53d3a4131a822e05bfc98ccf9` is historical **FAIL** because
+`rust-fmt` failed on one alias-regression layout line. On that same SHA,
+`rust-clippy` and `rust-tests` (including lockfile verification, workspace
+build and clean-checkout verification) passed. The rustfmt log gave the exact
+canonical replacement; that formatting-only correction produced pre-handoff repair
+head `b2ad1ba2533ed3716ea5af942d06840dbdea2e91`.
+
+No PASS from either the rejected QA head or an intermediate repair head is
+transferred to the final post-handoff head. The exact final SHA and fresh
+exact-head CI run are recorded in mutable PR #32 / Issue #18 metadata after this
+committed handoff update.
+
+### Preserved boundaries after repair
+
+Unchanged:
+
+- **U-09 UNKNOWN / BLOCKED** — regular books50 quantity unit;
+- **U-10 UNKNOWN / BLOCKED** — zero/delete semantics;
+- **U-20 NOT_PROVEN / FORBIDDEN** — REST<->WS healing/stitching;
+- **C-01 CONTRACT_CONFLICT / BLOCKED** — RPI canonical normalization;
+- **C-03 DOC_CONFLICT / UNKNOWN** — instruments route relationship.
+
+No canonical `SetLevel`/`DeleteLevel`, quantity mapping, REST healing, RPI
+normalization, socket ownership, WAL filesystem I/O, recorder/replay app,
+publication/StorageFence, strategy, private API or execution was introduced.
+
+### Re-QA gate
+
+After this handoff update commit:
+
+1. obtain the exact new PR #32 head;
+2. require a fresh exact-head GitHub Actions **SUCCESS** with `rust-fmt`,
+   `rust-clippy`, `rust-tests`, Cargo.lock verification, workspace build and
+   clean checkout all PASS;
+3. update PR #32 and Issue #18 with the exact final SHA/run and status
+   `READY_FOR_RE_QA`;
+4. perform full independent re-QA of that exact SHA.
+
+The worker does not merge or enable auto-merge.
