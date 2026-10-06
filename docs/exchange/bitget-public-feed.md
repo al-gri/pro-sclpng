@@ -19,13 +19,13 @@ The regular JSON UTA pages do not expose one global immutable documentation vers
 | BG-TRADES | https://www.bitget.com/docs/uta/websocket/public/New-Trades-Channel | publicTrade schema, fill side, IDs, timestamp, isRPI, size unit |
 | BG-RPI | https://www.bitget.com/docs/uta/websocket/public/RPI-OrderBook-Channel | RPI channels, 100 ms rpi-books50 snapshots, two quantity components, independent sequence rules |
 | BG-MARKET | https://www.bitget.com/docs/catalog/market/market-data | GET /api/v3/market/instruments, standard/RPI REST books, instrument fields and futures multipliers |
-| BG-BEST | https://www.bitget.com/docs/uta/best-practices-guide | Regular JSON depth frequency/snapshot-update guidance and unchanged-book behavior |
+| BG-BEST | https://www.bitget.com/docs/uta/best-practices-guide | Regular JSON depth frequency/snapshot-update guidance, unchanged-book behavior, final-state coalescing, and the conflicting /api/v3/public/instruments product-configuration path |
 | BG-CHANGE | https://www.bitget.com/legacy-docs/uta/changelog | Checksum removal, SBE launch history and feed changes |
 | BG-DEMO | https://www.bitget.com/docs/uta/demo-trading/websocket | Demo WS address and Demo API Key requirement |
 | BG-SBE | https://www.bitget.com/docs/uta/websocket/sbe/sbe-intro | Separate SBE profile and current schema version |
 | BG-PUBLIC-AUTH | https://www.bitget.com/docs/uta/rest-api | Generic statement that public interfaces can be used without authentication; its older domain table is not used for current v3 endpoint selection |
 | BG-TICK-CHANGE | https://www.bitget.com/support/articles/12560603894868 | 2026-09-11 official spot tick-size change notice; proves spot tick size changes operationally |
-| BG-UPGRADE | https://www.bitget.com/docs/classic/uta-api-upgrade-guide | v3 migration context and books50 “up to 50 levels” statement |
+| BG-UPGRADE | https://www.bitget.com/docs/classic/uta-api-upgrade-guide | v3 migration context, books50 “up to 50 levels”, and the conflicting /api/v3/public/instruments migration mapping |
 
 Current endpoint/channel semantics are taken from current v3 pages BG-QUICK, BG-DEPTH, BG-TRADES, BG-RPI and BG-MARKET. Historical/generic pages are used only for the specific statements named above.
 
@@ -75,9 +75,22 @@ Safe project mapping:
 
 ## 4. Instrument metadata mapping
 
-Source: BG-MARKET, BG-TICK-CHANGE.
+Source: BG-MARKET, BG-CHANGE, BG-BEST, BG-UPGRADE, BG-TICK-CHANGE.
 
-Endpoint: GET https://api.bitget.com/api/v3/market/instruments
+### DOC_CONFLICT: instrument endpoint path
+
+Checked **2026-10-06**, current official Bitget pages simultaneously publish two different v3 paths for product/instrument configuration:
+
+- **BG-MARKET**, the dedicated current Market Data reference with the complete request/response schema, defines `GET https://api.bitget.com/api/v3/market/instruments`.
+- **BG-CHANGE**, in the dated **2026-09-20** “Get Instruments: Corrected minOrderAmount description” entry, explicitly names `/api/v3/market/instruments`.
+- **BG-BEST** says product configuration is available via `GET /api/v3/public/instruments`.
+- **BG-UPGRADE** maps Classic product configuration to v3 `GET /api/v3/public/instruments`.
+
+This is an official-documentation conflict, not a project inference. For the MD-001 current contract, **`/api/v3/market/instruments` is selected as the reference endpoint** because the dedicated Market Data endpoint reference provides the current full schema and the newer dated changelog entry explicitly updates that same path. This evidence precedence is sufficient to choose the reference path for this document, but it does **not** prove that `/api/v3/public/instruments` is invalid, removed, or an alias. The current relationship/status of the `/public/instruments` path remains **DOC_CONFLICT / UNKNOWN**.
+
+No accepted SPEC-001 contract is changed by this documentation conflict.
+
+Reference endpoint used below: `GET https://api.bitget.com/api/v3/market/instruments`.
 
 Relevant documented fields:
 
@@ -308,7 +321,7 @@ MD-001 does not modify SPEC-001. A separate ADR/change task is required before R
 
 ## 11. MBP observability and limitations
 
-Source: BG-DEPTH.
+Source: BG-DEPTH, BG-BEST.
 
 Regular books50 exposes price levels [price, quantity]. It exposes no individual order ID, queue position, participant ID, or per-order timestamp. Its observable model is therefore price-level aggregate / Market By Price, not Market By Order.
 
@@ -323,7 +336,9 @@ Observable limitations:
 
 Do **not** infer true iceberg hidden size, spoof intent, participant identity/“large player”, exact queue position, or order-level FIFO from books50 alone.
 
-Whether Bitget internally coalesces multiple source events into each 20 ms update beyond the visible price-level aggregation is **UNKNOWN**.
+BG-BEST documents a material feed-boundary coalescing property: the system pushes the **latest state** of the order book, and when depth changes multiple times within a short period (its explicit example is `A→B→A`), the pushed update reflects the **final state**. Therefore regular depth consumers are **not guaranteed to observe every intermediate order-book state/event** that occurred between pushes. This is source-derived behavior, not an inference from the 20 ms cadence.
+
+The checked source does **not** define the exact batching/coalescing window beyond “short period”, the internal aggregation mechanism, whether coalescing is scoped per level or more broadly, or how many underlying matching-engine/order events may collapse into one visible push. Those implementation details remain **UNKNOWN**. Do not infer a complete order-event tape, intermediate-state observability, MBO/FIFO, or hidden batching mechanics from books50.
 
 ## 12. Resync and warm-up specification
 
@@ -366,6 +381,7 @@ Any warm-up threshold is accepted project engineering policy, not a Bitget guara
 | INV-06 no unproven REST stitching | REST has no common sequence field: NOT_PROVEN / FORBIDDEN |
 | INV-08 unknown causality | Trade↔book link and JSON aggressor stay UNKNOWN |
 | INV-11 heartbeat != freshness | Directly preserved |
+| MBP event completeness | BG-BEST documents final-state coalescing; every intermediate book state/event is not guaranteed observable |
 | Warm-up | No Bitget warm-up guarantee found |
 
 ## 14. UNKNOWN / CONFLICT / BLOCKED table
@@ -394,7 +410,8 @@ Any warm-up threshold is accepted project engineering policy, not a Bitget guara
 | U-20 | NOT_PROVEN / FORBIDDEN | REST↔WS common causal/sequence bridge | Never stitch by timestamp/price |
 | C-01 | CONTRACT_CONFLICT / BLOCKED | RPI level [price, non-RPI qty, RPI qty] vs accepted one-qty Book level | Separate ADR/change task before RPI normalization |
 | C-02 | CONFLICT / PROFILE-SEPARATION | 2026-04-21 SBE launch changelog described SBE books50 full snapshots every 20 ms, while current SBE schema v5 has depthAction Snapshot/Update and pseq since v5 | Do not infer SBE behavior from old launch text; any SBE implementation needs its own version-aware task |
-| U-21 | UNKNOWN | Internal event coalescing/aggregation within 20 ms regular feed beyond visible price-level aggregation | Do not infer order-event completeness or FIFO |
+| C-03 | DOC_CONFLICT / UNKNOWN | Instrument endpoint path: BG-MARKET + 2026-09-20 BG-CHANGE name /api/v3/market/instruments, while BG-BEST + BG-UPGRADE name /api/v3/public/instruments | Use /market/instruments as this contract's reference by stated evidence precedence; do not claim /public/instruments alias/removal semantics |
+| U-21 | UNKNOWN (DETAILS ONLY) | Exact “short period” coalescing/batching window and internal aggregation mechanism; final-state coalescing itself is documented by BG-BEST | Do not assume every intermediate book state/event is observable; do not invent hidden batching mechanics |
 
 These blockers are findings of MD-001, not permission to alter accepted SPEC-001 in this task.
 
@@ -426,7 +443,8 @@ MD-001 is complete as a source-verification task, but REC-001 must respect these
 2. Canonical regular-book quantity unit is not established by the checked depth docs.
 3. Spot exact tick/quantity-step derivation is not proven by the current instruments schema.
 4. RPI normalization conflicts with the accepted one-quantity level model and requires separate ADR/change work.
+5. Instrument documentation has a path conflict; MD-001 uses /api/v3/market/instruments by explicit evidence precedence while the /api/v3/public/instruments relationship remains UNKNOWN.
 
-Futures metadata multipliers, regular JSON sequence continuity, heartbeat/limits, publicTrade field parsing and REST non-stitching are sufficiently documented to build bounded parsing/supervision scaffolding **without** inventing the blocked canonical effects.
+Futures metadata multipliers, regular JSON sequence continuity, heartbeat/limits, publicTrade field parsing, documented final-state coalescing and REST non-stitching are sufficiently documented to build bounded parsing/supervision scaffolding **without** inventing the blocked canonical effects.
 
 No production connector, decoder, local book, supervisor, recorder/replay runtime, private API, strategy, execution, performance benchmark, merge, or auto-merge is implemented by MD-001.
