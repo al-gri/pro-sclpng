@@ -6,7 +6,7 @@ use domain::policy::{PolicyFields, RecordingGate, SilenceRule};
 use domain::qualified::{NumericSpec, NumericSpecFields, PriceUnits};
 use domain::record::WireContext;
 
-use crate::binary::{checked, CodecError, CodecErrorKind, Reader, Result, Writer};
+use crate::binary::{CodecError, CodecErrorKind, Reader, Result, Writer, checked};
 
 macro_rules! read_id {
     ($name:ident, $ty:ident, $read:ident) => {
