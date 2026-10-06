@@ -39,8 +39,7 @@ fn runtime_dependency_boundary_ok(manifest: &str) -> bool {
         }
     }
 
-    dependencies_seen
-        && runtime_dependencies.as_slice() == ["domain = { path = \"../domain\" }"]
+    dependencies_seen && runtime_dependencies.as_slice() == ["domain = { path = \"../domain\" }"]
 }
 
 fn grouped_std_runtime_namespace(compact: &str) -> bool {
@@ -123,14 +122,10 @@ fn manifest_gate_rejects_arbitrary_and_hidden_production_dependencies() {
     let build = format!("{MANIFEST}\n[build-dependencies]\n");
     assert!(!runtime_dependency_boundary_ok(&build));
 
-    let target = format!(
-        "{MANIFEST}\n[target.'cfg(unix)'.dependencies]\nanything = \"1\"\n"
-    );
+    let target = format!("{MANIFEST}\n[target.'cfg(unix)'.dependencies]\nanything = \"1\"\n");
     assert!(!runtime_dependency_boundary_ok(&target));
 
-    let dependency_table = format!(
-        "{MANIFEST}\n[dependencies.anything]\npath = \"../anything\"\n"
-    );
+    let dependency_table = format!("{MANIFEST}\n[dependencies.anything]\npath = \"../anything\"\n");
     assert!(!runtime_dependency_boundary_ok(&dependency_table));
 }
 
