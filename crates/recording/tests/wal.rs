@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use domain::artifact::ArtifactRef;
@@ -461,6 +461,27 @@ fn write_bytes(path: &PathBuf, bytes: &[u8]) {
     fs::write(path, bytes).expect("write fixture");
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TestRead {
+    records: Vec<RecordFrame>,
+    report: PhysicalReport,
+}
+
+fn read_archive<P: AsRef<Path>>(paths: &[P]) -> TestRead {
+    let mut reader = WalReader::open_segments(paths).expect("open WAL paths");
+    let mut records = Vec::new();
+    loop {
+        match reader.next_record() {
+            Ok(Some(record)) => records.push(record),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    TestRead {
+        records,
+        report: reader.report().clone(),
+    }
+}
+
 fn standard_prefix_writer(path: &PathBuf) -> WalWriter {
     let mut writer = WalWriter::create(path).expect("create writer");
     for frame in [
@@ -498,7 +519,7 @@ fn w00_crc_and_w01_exact_round_trip() {
     writer.flush().expect("flush");
     drop(writer);
 
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records, vec![frame]);
     assert_eq!(read.report.status, ArchiveStatus::ValidPrefixIncomplete);
     assert_eq!(read.report.physical_good_offset, 74);
@@ -520,8 +541,8 @@ fn multiple_records_preserve_recorded_order_and_repeated_read_is_deterministic()
     writer.flush().expect("flush");
     drop(writer);
 
-    let first = read_all(&[&path]).expect("first read");
-    let second = read_all(&[&path]).expect("second read");
+    let first = read_archive(&[&path]);
+    let second = read_archive(&[&path]);
     assert_eq!(first, second);
     assert_eq!(first.records, frames);
     assert_eq!(
@@ -550,7 +571,7 @@ fn maximum_bounded_record_is_accepted_without_unbounded_length_trust() {
     writer.flush().expect("flush");
     drop(writer);
 
-    let read = read_all(&[&path]).expect("read max");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records.len(), 5);
     match &read.records[4].value {
         Record::RawInput(raw) => assert_eq!(raw.bytes.len(), raw_len),
@@ -571,7 +592,7 @@ fn complete_archive_with_control_and_gap_round_trips_and_finishes_durable() {
     assert_eq!(marks.durable, Some(record(10)));
     assert!(writer.is_closed());
 
-    let read = read_all(&[&path]).expect("read complete");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records, frames);
     assert_eq!(read.report.status, ArchiveStatus::Complete);
     assert_eq!(read.report.input_quality, Some(InputQuality::GapsRecorded));
@@ -586,7 +607,7 @@ fn checksum_corruption_is_explicit_and_not_a_clean_eof() {
     let mut temp = TempFiles::new();
     let path = temp.path("checksum");
     write_bytes(&path, &bytes);
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     assert_eq!(read.report.status, ArchiveStatus::Corrupt);
     assert_eq!(read.report.physical_good_offset, 0);
     assert!(matches!(
@@ -605,7 +626,7 @@ fn w08_w01_every_cut_is_noarchive_or_truncated_tail() {
     let path = temp.path("w01-cuts");
     for cut in 0..bytes.len() {
         write_bytes(&path, &bytes[..cut]);
-        let read = read_all(&[&path]).expect("read cut");
+        let read = read_archive(&[&path]);
         if cut == 0 {
             assert_eq!(read.report.status, ArchiveStatus::NoArchive);
         } else {
@@ -635,7 +656,7 @@ fn w09_complete_archive_every_byte_cut_never_becomes_complete() {
     let path = temp.path("archive-cuts");
     for cut in 0..bytes.len() {
         write_bytes(&path, &bytes[..cut]);
-        let read = read_all(&[&path]).expect("read cut");
+        let read = read_archive(&[&path]);
         assert_ne!(read.report.status, ArchiveStatus::Complete, "cut={cut}");
         if cut == 0 {
             assert_eq!(read.report.status, ArchiveStatus::NoArchive);
@@ -671,7 +692,7 @@ fn partial_header_body_and_checksum_keep_only_valid_prefix() {
         let mut bytes = first.clone();
         bytes.extend_from_slice(&second[..cut]);
         write_bytes(&path, &bytes);
-        let read = read_all(&[&path]).expect("read");
+        let read = read_archive(&[&path]);
         assert_eq!(read.records.len(), 1);
         assert_eq!(read.report.status, ArchiveStatus::TruncatedTail);
         assert_eq!(
@@ -789,7 +810,7 @@ fn valid_prefix_plus_corrupt_or_truncated_final_record_is_never_complete() {
     bad_second[40] ^= 1;
     corrupt.extend_from_slice(&bad_second);
     write_bytes(&path, &corrupt);
-    let read = read_all(&[&path]).expect("read corrupt");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records.len(), 1);
     assert_eq!(read.report.status, ArchiveStatus::Corrupt);
     assert_eq!(read.report.physical_good_offset, first_len);
@@ -797,7 +818,7 @@ fn valid_prefix_plus_corrupt_or_truncated_final_record_is_never_complete() {
     let mut truncated = first;
     truncated.extend_from_slice(&second[..second.len() - 1]);
     write_bytes(&path, &truncated);
-    let read = read_all(&[&path]).expect("read truncated");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records.len(), 1);
     assert_eq!(read.report.status, ArchiveStatus::TruncatedTail);
     assert_eq!(read.report.physical_good_offset, first_len);
@@ -822,7 +843,7 @@ fn reader_never_sorts_opaque_raw_inputs_by_timestamp_like_payloads() {
     writer.flush().expect("flush");
     drop(writer);
 
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     let raws: Vec<Vec<u8>> = read
         .records
         .iter()
@@ -858,7 +879,7 @@ fn bounded_arbitrary_external_bytes_do_not_panic() {
             .collect();
         write_bytes(&path, &bytes);
         let result = panic::catch_unwind(|| {
-            let _ = read_all(&[&path]);
+            let _ = read_archive(&[&path]);
         });
         assert!(result.is_ok(), "reader panic at len={len}");
     }
@@ -878,7 +899,7 @@ fn middle_corruption_stops_before_valid_looking_later_magic() {
     let mut temp = TempFiles::new();
     let path = temp.path("no-rejoin");
     write_bytes(&path, &bytes);
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     assert_eq!(read.records.len(), 1);
     assert_eq!(read.records[0].record_no, record(1));
     assert_eq!(read.report.status, ArchiveStatus::Corrupt);
@@ -895,14 +916,14 @@ fn deleting_final_seals_never_promotes_a_valid_boundary_to_complete() {
     let path = temp.path("deleted-tail");
 
     write_bytes(&path, &encode_sequence(&frames[..frames.len() - 1]));
-    let no_archive_seal = read_all(&[&path]).expect("read");
+    let no_archive_seal = read_archive(&[&path]);
     assert_eq!(
         no_archive_seal.report.status,
         ArchiveStatus::SegmentSealedArchiveIncomplete
     );
 
     write_bytes(&path, &encode_sequence(&frames[..frames.len() - 2]));
-    let no_seals = read_all(&[&path]).expect("read");
+    let no_seals = read_archive(&[&path]);
     assert_eq!(
         no_seals.report.status,
         ArchiveStatus::ValidPrefixIncomplete
@@ -925,7 +946,7 @@ fn wrong_seal_values_and_trailing_data_are_explicitly_invalid() {
     let mut temp = TempFiles::new();
     let path = temp.path("wrong-seal");
     write_bytes(&path, &bytes);
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     assert_eq!(read.report.status, ArchiveStatus::Invalid);
     assert!(matches!(
         read.report.failure.as_ref().map(|failure| &failure.kind),
@@ -937,7 +958,7 @@ fn wrong_seal_values_and_trailing_data_are_explicitly_invalid() {
     let mut complete = encode_sequence(&frames);
     complete.push(0xff);
     write_bytes(&path, &complete);
-    let read = read_all(&[&path]).expect("read trailing");
+    let read = read_archive(&[&path]);
     assert_eq!(read.report.status, ArchiveStatus::Invalid);
     assert!(matches!(
         read.report.failure.as_ref().map(|failure| &failure.kind),
@@ -962,7 +983,7 @@ fn multisegment_chain_round_trips_and_wrong_segment_start_is_rejected() {
     }
     writer.finish().expect("finish");
 
-    let read = read_all(&[&path0, &path1]).expect("read multi");
+    let read = read_archive(&[&path0, &path1]);
     let mut expected = first.clone();
     expected.extend(second.iter().cloned());
     assert_eq!(read.records, expected);
@@ -978,7 +999,7 @@ fn multisegment_chain_round_trips_and_wrong_segment_start_is_rejected() {
         _ => unreachable!(),
     }
     write_bytes(&bad1, &encode_frame(&bad_start).expect("encode bad start"));
-    let bad = read_all(&[&bad0, &bad1]).expect("read bad chain");
+    let bad = read_archive(&[&bad0, &bad1]);
     assert_eq!(bad.report.status, ArchiveStatus::Invalid);
     assert!(matches!(
         bad.report.failure.as_ref().map(|failure| &failure.kind),
@@ -1122,7 +1143,7 @@ fn aggregate_crc_excludes_individual_frame_trailers() {
     let mut temp = TempFiles::new();
     let path = temp.path("trailer-crc");
     write_bytes(&path, &bytes);
-    let read = read_all(&[&path]).expect("read");
+    let read = read_archive(&[&path]);
     assert_eq!(read.report.status, ArchiveStatus::Invalid);
     assert!(matches!(
         read.report.failure.as_ref().map(|failure| &failure.kind),
