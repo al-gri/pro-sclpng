@@ -94,4 +94,4 @@ Empty snapshot структурно представим, но usability тре�
 ## 6. Примеры и граница разрешения
 
 Synthetic:price100.10/tick0.05→2002;100.11→OffGrid. Qty1.234/step0.001→1234;1.2345→OffGrid. Tick1 допускает maxPriceTicks,MAX+1→CountOutOfRange. Spot/Perpetual BTCUSDT различны; SpecVersion mismatch запрещает применение равных counts.
-D1/D2 уже согласованы только для изолированной реализации в этой же ветке/PR. Они не переоткрываются как неопределённый вопрос и не принимают остальные контракты. На этой docs-only ревизии Rust-код не изменяется. Event/health/WAL/artifact relations остаются DESIGN_REVIEW_REQUIRED; все новые документы PROPOSED до принятия workflow.
+Исторически D1/D2 были первыми согласованными для изолированной реализации; последующие review/QA приняли весь согласованный SPEC-001 scope. На принятой ревизии exact numeric types/validators реализованы в domain crate, а event/health/WAL/artifact contracts приняты через PR #10. Реальные Bitget mapping/metadata по-прежнему принадлежат MD-001.

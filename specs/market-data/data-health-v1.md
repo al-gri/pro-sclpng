@@ -121,4 +121,4 @@ Replay reconstructs state,candidates and recorded observations,NOT historical ph
 
 ## 6. Vectors and approval gate
 
-[Named vectors](../domain/review-vectors-v2.md) cover all findings with exact state,diagnostic,source/application IDs,cursors and availability. [Matrix](../domain/test-matrix-v1.md) retains numeric/full-WAL obligations. New specs/ADR PROPOSED;model/executable tests NOT_IMPLEMENTED/NOT_RUN. D1/D2 permission does not approve event/health/WAL. R1–R6 remain submitted for independent renewed review,not closed by this worker.
+[Named vectors](../domain/review-vectors-v2.md) cover the reviewed findings with exact state, diagnostic, source/application IDs, cursors and availability. [Matrix](../domain/test-matrix-v1.md) retains numeric/full-WAL obligations. The SPEC-001 reference model/executable tests are implemented and accepted; R1–R6 were closed through design review and final QA. Production supervisor/book/storage/replay behavior remains downstream.

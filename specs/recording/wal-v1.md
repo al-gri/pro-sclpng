@@ -195,4 +195,4 @@ W01 synthetic, frame/schema1; archive16x01,session16x02,clock1,SyncBeforePublish
 0040: 01 00 00 00 03 00 13 c4 02 9e
 ```
 
-CRC(header+payload)=0x9E02C413, trailer13 c4 02 9e. CRC(ASCII123456789)=0xCBF43926; empty=0. Whole-frame-with-trailer CRC=0x2144DF1C, hence aggregate excludes trailers. Original checkpoint checked zlib plus bit-loop; this revision rechecked literal bytes/length/zlib without changing the golden. Neither is Rust codec execution. Full multi-frame/segment/each-offset assertions remain required after approval and NOT_IMPLEMENTED/NOT_RUN now.
+CRC(header+payload)=0x9E02C413, trailer13 c4 02 9e. CRC(ASCII123456789)=0xCBF43926; empty=0. Whole-frame-with-trailer CRC=0x2144DF1C, hence aggregate excludes trailers. The original checkpoint checked zlib plus bit-loop before Rust codec execution existed. Final SPEC-001 includes the accepted memory-only codec plus multi-frame/segment and each-offset truncation assertions; production filesystem recorder/durability remains downstream.

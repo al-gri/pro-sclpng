@@ -100,7 +100,7 @@ The three AF links under specs/domain now use two parent traversals from that di
 
 The [finding mapping](../../specs/domain/review-vectors-v2.md#8-finding-to-change-mapping-and-remaining-review) names every finding,changed sections,exact test vectors and outstanding proof/review. It is SUBMITTED_FOR_REVIEW,not a checklist marked closed.
 
-Renewed review should confirm: source/effect/control projection and CausalBasis;frame-prefix atomicity,proof equivalence and bounded retention interface;candidate creation/supersession/fence diagnostics;exact binary descriptor/PSCO schemas/caps and verifier boundary;one-window/scope-change restrictions in local loss accounting;full expiry/fan-out/progress traces. These are independent of unverified real Bitget facts,which remain MD-001-owned. Full multi-frame golden,all truncation offsets and executable models are still NOT_IMPLEMENTED/NOT_RUN.
+Final SPEC-001 review/QA confirmed the source/effect/control, bounded retention, publication, artifact and loss-accounting contract behavior through executable reference models/tests. Unverified real Bitget facts remain MD-001-owned. Production verifier/storage/filesystem durability remains downstream and is not implied by SPEC-001 acceptance.
 
 ## Scope and next gate
 

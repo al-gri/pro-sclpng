@@ -100,4 +100,4 @@ RecordNo is authoritative admission order across raw/control, not a global excha
 
 Data readiness, immutable publication_candidate and publication_permit are distinct ([health section 5](data-health-v1.md#5-a2-publication-candidate-and-permit)). A candidate derived while processing RecordingEvidence includes that record in its causal prefix. Final StorageFence is a storage operation result, NOT a new WAL/control record, clock tick, market effect or automatic ack-generating cause. Receipt alone never permits publication. Historical state/candidates can replay; physical sync and external delivery cannot be inferred from recorded claims.
 
-New contracts remain PROPOSED. Exact negative traces are in review-vectors-v2; full runtime validators/models are NOT_IMPLEMENTED / NOT_RUN pending renewed approval.
+This contract is ACCEPTED. Exact negative traces remain in review-vectors-v2 and executable validators/reference models are covered by SPEC-001 tests; production market-data runtime behavior remains downstream of MD-001/REC-001.
