@@ -909,7 +909,6 @@ fn same_bounded_trace_is_deterministic_across_repeated_runs() {
     );
 }
 
-
 #[test]
 fn proof_expiry_is_checked_at_receipt_and_again_at_ordered_release() {
     let binding = binding(1, 1, 1, 1, "BTCUSDT");
@@ -931,7 +930,11 @@ fn proof_expiry_is_checked_at_receipt_and_again_at_ordered_release() {
         .expect("later proof becomes ready");
     assert!(ready_delta.effects.is_empty());
     assert_eq!(
-        runtime.stream_state(binding.id).expect("state").pending.frames,
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .pending
+            .frames,
         2
     );
 
@@ -986,10 +989,12 @@ fn proof_expiry_is_checked_at_receipt_and_again_at_ordered_release() {
             verify_until(&binding, 3, BookEvidenceKind::Snapshot, Some(13)),
         ))
         .expect("expired proof is semantic invalidation");
-    assert!(!receipt
-        .effects
-        .iter()
-        .any(|effect| matches!(effect, HealthEffect::SnapshotReleased { .. })));
+    assert!(
+        !receipt
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, HealthEffect::SnapshotReleased { .. }))
+    );
     assert_eq!(
         receipt.effects.last(),
         Some(&HealthEffect::StreamInvalidated {
@@ -1033,9 +1038,7 @@ fn freshness_deadline_overflow_is_unknown_with_typed_diagnostic_only() {
         .expect("snapshot release");
     assert_eq!(
         release.diagnostics,
-        vec![HealthDiagnostic::FreshnessDeadlineOverflow {
-            stream: binding.id,
-        }]
+        vec![HealthDiagnostic::FreshnessDeadlineOverflow { stream: binding.id }]
     );
     let state = runtime.stream_state(binding.id).expect("state");
     assert_eq!(state.transport, Transport::Up);
@@ -1114,7 +1117,11 @@ fn pending_output_count_overflow_is_typed_and_clears_pending() {
         })
     );
     assert_eq!(
-        runtime.stream_state(binding.id).expect("state").pending.frames,
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .pending
+            .frames,
         0
     );
 }
@@ -1160,11 +1167,7 @@ fn pending_deadline_arithmetic_overflow_fails_closed_without_wrap() {
     register_and_up(&mut runtime, &binding);
 
     let overflow = runtime
-        .step(recorded(
-            3,
-            u64::MAX - 5,
-            frame(&binding, books(SNAPSHOT)),
-        ))
+        .step(recorded(3, u64::MAX - 5, frame(&binding, books(SNAPSHOT))))
         .expect("deadline arithmetic overflow is semantic");
     assert_eq!(
         overflow.effects.last(),
@@ -1207,7 +1210,10 @@ fn second_writer_for_same_book_ref_is_rejected_transactionally() {
         error,
         HealthError::Identity(IdentityError::WriterRebindRequiresNewArchive)
     );
-    assert_eq!(runtime.last_record(), Some(RecordNo::new(1).expect("record")));
+    assert_eq!(
+        runtime.last_record(),
+        Some(RecordNo::new(1).expect("record"))
+    );
     assert_eq!(runtime.stream_state(first.id).expect("first state"), before);
     assert!(runtime.stream_state(second.id).is_none());
 }
