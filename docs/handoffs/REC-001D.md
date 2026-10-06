@@ -250,3 +250,237 @@ mark the existing PR Ready for review, post the completion record, and stop as:
 
 Worker must not merge, enable auto-merge, start #21/#22, or repair future independent-QA findings
 without a concrete QA verdict.
+
+## Independent QA CHANGES_REQUIRED remediation
+
+Independent QA reviewed exact immutable head
+`bc14ad634c17c82f2a47c9a5b4ac0fc89f87b8b8` and returned
+**CHANGES_REQUIRED**. This repair continues the same Issue #20 claim,
+`feat/REC-001D-ws-supervisor` branch and PR #34. No replacement Issue,
+claim, branch or PR was created, and no history rewrite/force-push was used.
+
+The earlier readiness/completion statements above are historical for the rejected
+head. This section supersedes them for the remediation lineage.
+
+### F1 — HIGH: previous-generation raw bypassed raw bounds
+
+Disposition: **FIXED**.
+
+All non-pong raw input, including a known previous connection generation, now
+passes the same per-stream frame/byte/message admission limits and the bounded
+global raw-item admission policy before its payload can enter the queue.
+
+A previous-generation payload that cannot be admitted no longer queues or records
+the full `Vec<u8>`. Instead the supervisor queues a small
+`RejectedStaleRaw` provenance marker. At drain it records an empty
+`RawInput` carrying the original stream/tag/`CaptureAttemptNo` followed by a
+non-loss-scoped diagnostic GAP. Empty raw is an accepted WAL diagnostic-rejection
+representation; this avoids inventing a new wire/domain record while accounting
+the attempt without retaining an oversized payload.
+
+The regression
+`previous_epoch_raw_exceeding_wal_capacity_is_bounded_as_empty_diagnostic`
+uses a **1,100,000-byte** previous-epoch payload. That exceeds both the
+supervisor hard raw-message ceiling (1,000,000 bytes) and WAL v1
+`MAX_PAYLOAD = 1,048,576`. It asserts zero queued raw-frame/raw-byte charge,
+only bounded empty-raw diagnostic persistence, preserved old tag/attempt, and no
+global halt.
+
+No source quantity semantics are inspected or inferred by this path.
+
+### F2 — HIGH: sustained overflow caused global halt / undrainable queue
+
+Disposition: **FIXED**.
+
+Queue-capacity pressure no longer sets the fatal `halted` flag. Fatal halt is
+reserved for persistence/gate failures and other fail-closed conditions for which
+publication cannot continue safely. A full ingress queue returns bounded
+`QueueExhausted` without preventing already admitted records from draining to
+the configured RecordingGate.
+
+Current-generation rejected raw attempts are represented by explicit
+`QueueOverflow` loss observations. Consecutive rejected attempts at the queue
+tail for the same stream/tag are coalesced into one bounded known range with
+checked `first_attempt`, `last_attempt`, and `loss_count`; one rejected
+frame therefore does not require an unbounded one-record-per-frame loss queue.
+
+Raw and ordinary control admission preserve bounded loss-reserve slots
+(`LOSS_RESERVE_PER_STREAM`) so already bounded work cannot consume the whole
+queue and silently prevent the first required loss observation. The global raw
+count is tracked independently from control/loss queue entries, while each
+stream retains its raw-frame/raw-byte bounds.
+
+The regression
+`sustained_overflow_coalesces_loss_and_does_not_halt_neighbor_stream` uses
+two streams with one raw frame allowed per stream, drives 32 consecutive rejected
+attempts on stream A, verifies one persisted `QueueOverflow` range
+`2..=33` / count 32, admits and drains stream B, and verifies no global halt.
+
+### F3 — HIGH: binding did not match the hard-coded wire profile
+
+Disposition: **FIXED**.
+
+`PublicWsSupervisor::new` now requires the accepted REC-001D identity/profile
+projection before emitting the hard-coded Bitget subscription:
+
+- `Channel::BookNormal`;
+- project venue token exactly `bitget`;
+- project product namespace exactly `usdt-futures`;
+- futures `MarketKind::Perpetual | MarketKind::DatedFuture`;
+- book id and book epoch present.
+
+This is a project identity validation for the already selected wire profile; it
+does not claim a new Bitget exchange guarantee or alter the accepted identity
+schema.
+
+Negative regressions reject:
+
+- wrong venue;
+- `coin-futures`;
+- `usdc-futures`;
+- another non-target futures namespace;
+- Spot market under the target namespace.
+
+A DatedFuture target-profile binding remains accepted because the accepted
+identity contract allows futures kind to be delivery or perpetual based on
+metadata.
+
+### F4 — HIGH: canonical single-writer ownership was not enforced
+
+Disposition: **FIXED**.
+
+Supervisor construction now invokes the accepted
+`StreamBinding::validate_registration(&previous)` semantics for every
+registration before local maps are committed. This preserves the canonical
+`BookRef` single-writer rule instead of creating a REC-001D-specific ownership
+contract.
+
+The regression
+`supervisor_rejects_second_writer_for_same_canonical_normal_book` uses distinct
+StreamId/ConnectionId/BookId values for two Normal bindings of the same canonical
+instrument and requires
+`IdentityError::WriterRebindRequiresNewArchive`.
+
+### F5 — MEDIUM: queued QueueOverflow crossed an epoch boundary
+
+Disposition: **FIXED without changing accepted WAL loss semantics**.
+
+The accepted WAL v1 accounting contract rejects a current local
+`QueueOverflow` target after its tag is no longer current
+(`GapScopeTransition`). REC-001D therefore does not weaken recovery validation
+or silently reinterpret the record.
+
+On disconnect/heartbeat timeout the supervisor now:
+
+1. persists `Transport::Down` immediately and marks the stream degraded;
+2. records a bounded pending-disconnect marker;
+3. drains/persists already admitted inputs for that same connection generation,
+   including their original-tag QueueOverflow provenance;
+4. only after no such ingress remains, persists the connection, subscription and
+   book epoch advances and emits the bounded reconnect command.
+
+Thus a loss observation queued behind a disconnect cannot become an invalid
+old-tag QueueOverflow before persistence, cannot revive the stream, is not lost,
+and does not trigger a configuration/global halt. The generation advance is
+preserved after the accepted old-generation inputs reach the recording boundary.
+
+The FIFO regression
+`queued_overflow_before_disconnect_drains_before_epoch_advance` covers:
+admitted raw -> queued disconnect -> queued overflow -> drain. It asserts
+Down/degraded while the old tag is still the recording scope, persistence of the
+old-tag loss, subsequent connection/subscription/book epoch advance to generation
+2, Backoff/Unknown state, and no halt.
+
+This ordering is deliberately chosen over changing the accepted domain/WAL
+contract to allow old-tag local QueueOverflow records.
+
+### F6 — LOW: architecture anti-bypass regression weakened
+
+Disposition: **FIXED**.
+
+The source guard again detects representative runtime-I/O namespace bypasses,
+including direct `std::fs/net/process`, `use std as ...`,
+`use ::std as ...`, `extern crate std as ...`, and grouped
+`std::{net,...}` / `std::{self as ...}` forms.
+
+`source_gate_rejects_namespace_import_and_alias_bypasses` provides synthetic
+negative regressions. This is still a defense-in-depth source regression, not a
+claim of formal static-analysis completeness.
+
+### Remediation changed paths
+
+Relative to the QA-reviewed `bc14ad...` head, the semantic/test remediation is
+limited to:
+
+- `crates/market-data/src/ws_supervisor.rs`;
+- `crates/market-data/tests/ws_supervisor.rs`;
+- `crates/market-data/tests/architecture.rs`;
+- this handoff file in the final documentation commit.
+
+No `crates/domain/**`, `crates/recording/**`, accepted spec/ADR, workflow,
+application, `docs/PROJECT_STATE.md`, networking dependency, canonical-book,
+strategy or execution change is part of the repair.
+
+### Verification during remediation
+
+Worker-local Rust/shell execution remains unavailable on this connector surface:
+
+- `cargo fmt --all -- --check` — **NOT_RUN locally**;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` — **NOT_RUN locally**;
+- `cargo test --workspace --locked` — **NOT_RUN locally**;
+- live public WebSocket smoke — **NOT_RUN**.
+
+Historical remediation CI:
+
+- run `37537612802` on `f6a346719106a8f4e74ba42f0428e746096a0244`
+  — **FAIL**: rust-tests PASS; rust-fmt FAIL and rust-clippy FAIL. Clippy reported
+  only the new QueueGap handler argument-count lint; formatter reported concrete
+  layout diffs.
+- run `37538060739` on `cc473e46dab7d2fe0aa5004ad90a97a7ed9c36ab`
+  — **FAIL**: rust-tests PASS, rust-clippy PASS, rust-fmt FAIL on one remaining
+  layout diff.
+- code-only remediation run **37538172160** on exact head
+  `b270da05f5627e1d262aba91476ca8a11657975f` — **SUCCESS**:
+  rust-fmt PASS, rust-clippy PASS, rust-tests PASS, Cargo.lock verification
+  PASS, workspace build PASS and clean-checkout verification PASS.
+
+The code-only PASS is historical once this handoff update is committed and is
+not transferred to the final documentation-containing head.
+
+### Preserved boundaries after remediation
+
+Unchanged:
+
+- **U-09 UNKNOWN / BLOCKED** — regular books50 quantity unit;
+- **U-10 UNKNOWN / BLOCKED** — zero/delete semantics;
+- **U-20 NOT_PROVEN / FORBIDDEN** — REST<->WS healing/stitching;
+- **C-01 BLOCKED** — RPI canonical normalization;
+- **C-03 UNKNOWN** — instruments-route relationship.
+
+No canonical `SetLevel`/`DeleteLevel`, quantity conversion, REST healing,
+RPI normalization, private/authenticated API, strategy or execution was added.
+The concrete DNS/TCP/TLS/WebSocket driver remains the previously documented
+external-driver limitation and is not changed by this remediation.
+REC-001E and REC-001F remain unimplemented.
+
+### Re-QA gate
+
+After the commit containing this section:
+
+1. obtain the exact new PR #34 head;
+2. require a **fresh exact-head** GitHub Actions SUCCESS;
+3. require rust-fmt, rust-clippy, rust-tests, Cargo.lock verification, workspace
+   build and clean checkout all PASS on that exact SHA;
+4. record the exact final SHA/run in PR #34 and Issue #20 mutable metadata;
+5. convert this existing PR from Draft back to Ready;
+6. request a **full repeated independent QA of the new immutable SHA**, with
+   explicit retest of stale oversized raw, sustained overflow/isolation, exact
+   binding profile, canonical single-writer registration, queued
+   disconnect/QueueOverflow ordering, and the architecture anti-bypass guard.
+
+The old QA verdict and old PASS run `37530660765` are not transferred to the
+repaired head.
+
+Target worker stop state after the fresh containing-head CI succeeds:
+**READY_FOR_INDEPENDENT_QA**. It is not READY_FOR_OWNER_REVIEW.
+
