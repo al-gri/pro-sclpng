@@ -1,6 +1,6 @@
 # Handoff: SPEC-001 — implementation continuation
 
-Status: **PARTIAL / QA_P2_FIX_PENDING_VERIFICATION**. All new contracts and ADR remain **PROPOSED**.
+Status: **PARTIAL / QA_P2_FIXED / FINAL_SHA_VERIFICATION_PENDING**. All new contracts and ADR remain **PROPOSED**.
 Repository: `al-gri/pro-sclpng` only. Same Issue #3, branch `feat/SPEC-001-domain-contracts`, Draft PR #10.
 [Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674).
 Base/main remains `6c520237d35865c79dba9e74fa64bd4c2c9e419f`. Approved design revision: `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
@@ -248,3 +248,26 @@ Each test covers three states using an intentionally old body scope while keepin
 - **properly resolved old scope** -> existing successful `DiagnosticCode::ObsoleteScope` behavior remains, with no proof-derived market/witness/freshness effect.
 
 The containing commit must receive fresh exact-head Linux fmt/Clippy/build/workspace CI before any further QA request. Its exact final SHA and post-commit run/job IDs are recorded in PR #10, not self-referenced in this file.
+
+
+## QA P2 implementation verification
+
+The substantive P2 fix head `18a9fee119604aeebb2d4c3bb9a4622689692e88` was verified by [Rust CI run 37413076139](https://github.com/al-gri/pro-sclpng/actions/runs/37413076139), event `pull_request`, attempt 1, **completed/success**. Every job checked out exactly that source SHA on Ubuntu 24.04.5 LTS / Linux x86_64 with Rust/Cargo 1.98.1:
+
+- rust-fmt job `112105621881`: `cargo fmt --all -- --check` **PASS**;
+- rust-clippy job `112105621831`: `cargo clippy --workspace --all-targets --locked -- -D warnings` **PASS**;
+- rust-tests job `112105621591`: Cargo.lock regeneration/comparison, `cargo build --workspace --locked`, `cargo test --workspace --locked`, and final checkout cleanliness **PASS**.
+
+Observed workspace counts on that exact source SHA: **130 domain tests passed** = 76 contracts + 9 identity + 18 numeric + 27 wire, zero failed/ignored; separately **15 BOOT-001 CLI tests passed**, zero failed/ignored.
+
+New QA regression mapping:
+
+| Evidence kind | Test | resolver missing | resolver node inapplicable | resolved old body scope |
+|---|---|---|---|---|
+| Verification | `health.rs::qa_p2_verification_resolution_precedes_body_obsolete_scope` | exact `MissingArtifact`; semantic prefix/evaluation/stream state retained | exact `ArtifactUnverified`; same retained-state guarantees | accepted only after resolution with `ObsoleteScope`; pending proof state unchanged |
+| Warmup | `health.rs::qa_p2_warmup_resolution_precedes_body_obsolete_scope` | exact `MissingArtifact`; no semantic-prefix/state advance | exact `ArtifactUnverified`; no semantic-prefix/state advance | existing `ObsoleteScope` preserved; witness/anchor/progress unchanged |
+| Freshness | `health.rs::qa_p2_freshness_resolution_precedes_body_obsolete_scope` | exact `MissingArtifact`; no semantic-prefix/state advance | exact `ArtifactUnverified`; no semantic-prefix/state advance | existing `ObsoleteScope` preserved; freshness/quiet/anchor unchanged |
+
+The negative rows intentionally preload the typed old-scope body while withholding or disabling the resolver node, proving that body scope cannot mask the artifact failure. `assert_artifact_blocked` also checks no RecordRef is accepted into the semantic prefix and no resolver binding leaks from the failed transactional step.
+
+The containing handoff-only commit changes no Rust semantics. Per repository handoff practice, its own exact SHA cannot self-reference inside this file; final containing SHA and its exact-head CI run/jobs are recorded post-commit in PR #10. Independent QA must re-review that final source head; this worker does not self-declare READY_FOR_QA.
