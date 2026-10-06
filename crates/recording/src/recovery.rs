@@ -10,7 +10,7 @@ use domain::policy::{DurabilityMode, PolicyError, WatermarkKind};
 use domain::record::*;
 
 use crate::binary::{CodecError, CodecErrorKind, Crc32};
-use crate::codec::{decode_frame, parse_header, scan_frame, Definitions, HEADER_LEN};
+use crate::codec::{Definitions, HEADER_LEN, decode_frame, parse_header, scan_frame};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArchiveStatus {
@@ -286,7 +286,7 @@ impl ObservedWatermarks {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ArchiveValidator {
     start: Option<ArchiveStart>,
     mode: Option<DurabilityMode>,
@@ -314,37 +314,6 @@ pub(crate) struct ArchiveValidator {
     input_quality: Option<InputQuality>,
 }
 
-impl Default for ArchiveValidator {
-    fn default() -> Self {
-        Self {
-            start: None,
-            mode: None,
-            active: None,
-            configs: BTreeSet::new(),
-            specs: BTreeMap::new(),
-            slot_identity: BTreeMap::new(),
-            identity_slot: BTreeMap::new(),
-            active_spec: BTreeMap::new(),
-            streams: BTreeMap::new(),
-            bindings: Vec::new(),
-            watermarks: ObservedWatermarks::default(),
-            current_segment: 0,
-            local_count: 0,
-            local_bytes: 0,
-            local_crc: Crc32::default(),
-            local_gap: false,
-            global_count: 0,
-            global_crc: Crc32::default(),
-            any_gap: false,
-            last_record: None,
-            last_kind: None,
-            last_seal: None,
-            archive_sealed: false,
-            input_quality: None,
-        }
-    }
-}
-
 impl ArchiveValidator {
     pub(crate) fn has_active(&self) -> bool {
         self.active.is_some()
@@ -354,17 +323,14 @@ impl ArchiveValidator {
         &self.specs
     }
 
-    pub(crate) fn last_record(&self) -> Option<RecordNo> {
-        self.last_record
-    }
-
     pub(crate) fn archive_sealed(&self) -> bool {
         self.archive_sealed
     }
 
     pub(crate) fn can_rotate(&self) -> bool {
-        self.last_seal
-            .is_some_and(|seal| seal.segment.get() as usize == self.current_segment && !seal.final_segment)
+        self.last_seal.is_some_and(|seal| {
+            seal.segment.get() as usize == self.current_segment && !seal.final_segment
+        })
     }
 
     pub(crate) fn eof_status(&self) -> ArchiveStatus {
@@ -407,10 +373,7 @@ impl ArchiveValidator {
         streams: impl Iterator<Item = &'a StreamState>,
     ) -> Result<(), ValidationError> {
         for stream in streams {
-            stream
-                .loss
-                .scope_change()
-                .map_err(ValidationError::Loss)?;
+            stream.loss.scope_change().map_err(ValidationError::Loss)?;
         }
         Ok(())
     }
@@ -488,10 +451,9 @@ impl ArchiveValidator {
 
         if let Some(seal) = self.last_seal
             && seal.segment.get() as usize == self.current_segment
+            && (!seal.final_segment || !matches!(frame.value, Record::ArchiveSeal(_)))
         {
-            if !seal.final_segment || !matches!(frame.value, Record::ArchiveSeal(_)) {
-                return Err(ValidationError::OrderOrChain("record_after_segment_seal"));
-            }
+            return Err(ValidationError::OrderOrChain("record_after_segment_seal"));
         }
 
         self.validate_value(frame, checksum, absolute_frame_start)?;
@@ -645,9 +607,10 @@ impl ArchiveValidator {
                 }
             }
             Record::SegmentSeal(value) => {
-                if self.last_seal.is_some_and(|seal| {
-                    seal.segment.get() as usize == self.current_segment
-                }) {
+                if self
+                    .last_seal
+                    .is_some_and(|seal| seal.segment.get() as usize == self.current_segment)
+                {
                     return Err(ValidationError::OrderOrChain("duplicate_segment_seal"));
                 }
                 if value.prefix_frame_count != self.local_count
@@ -735,9 +698,7 @@ impl ArchiveValidator {
                 }
             }
             Control::Transport {
-                connection,
-                epoch,
-                ..
+                connection, epoch, ..
             } => {
                 let mut found = false;
                 for stream in self.streams.values() {
@@ -769,9 +730,7 @@ impl ArchiveValidator {
                         return Err(ValidationError::UnknownDefinition("ConnectionId"));
                     }
                     Self::check_open_windows(
-                        affected
-                            .iter()
-                            .filter_map(|id| self.streams.get(id)),
+                        affected.iter().filter_map(|id| self.streams.get(id)),
                     )?;
                     for id in affected {
                         let stream = self
@@ -793,10 +752,7 @@ impl ArchiveValidator {
                         .streams
                         .get_mut(owner)
                         .ok_or(ValidationError::UnknownDefinition("StreamDefinition"))?;
-                    stream
-                        .loss
-                        .scope_change()
-                        .map_err(ValidationError::Loss)?;
+                    stream.loss.scope_change().map_err(ValidationError::Loss)?;
                     if stream.binding.tag.subscription != *expected || *next <= *expected {
                         return Err(ValidationError::Identity(IdentityError::EpochMismatch));
                     }
@@ -968,10 +924,7 @@ impl WalReader {
         loop {
             if self.validator.archive_sealed() {
                 let mut extra = [0_u8; 1];
-                let extra_read = match read_up_to(
-                    &mut self.files[self.segment_index],
-                    &mut extra,
-                ) {
+                let extra_read = match read_up_to(&mut self.files[self.segment_index], &mut extra) {
                     Ok(count) => count,
                     Err(error) => {
                         let failure = self.fail(
@@ -1004,33 +957,29 @@ impl WalReader {
             let frame_start_local = self.local_offset;
             let frame_start_absolute = self.absolute_offset;
             let mut header_bytes = [0_u8; HEADER_LEN];
-            let header_read = match read_up_to(
-                &mut self.files[self.segment_index],
-                &mut header_bytes,
-            ) {
-                Ok(count) => count,
-                Err(error) => {
-                    let failure = self.fail(
-                        frame_start_local,
-                        frame_start_absolute,
-                        FailureKind::Io {
-                            operation: "read_header",
-                            kind: error.kind(),
-                        },
-                        ArchiveStatus::Invalid,
-                    );
-                    return Err(failure);
-                }
-            };
+            let header_read =
+                match read_up_to(&mut self.files[self.segment_index], &mut header_bytes) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let failure = self.fail(
+                            frame_start_local,
+                            frame_start_absolute,
+                            FailureKind::Io {
+                                operation: "read_header",
+                                kind: error.kind(),
+                            },
+                            ArchiveStatus::Invalid,
+                        );
+                        return Err(failure);
+                    }
+                };
 
             if header_read == 0 {
                 if self.local_offset == 0 && self.segment_index > 0 {
                     let failure = self.fail(
                         0,
                         self.absolute_offset,
-                        FailureKind::Validation(ValidationError::OrderOrChain(
-                            "empty_segment",
-                        )),
+                        FailureKind::Validation(ValidationError::OrderOrChain("empty_segment")),
                         ArchiveStatus::Invalid,
                     );
                     return Err(failure);
@@ -1063,10 +1012,7 @@ impl WalReader {
                 let failure = self.fail(
                     frame_start_local,
                     frame_start_absolute,
-                    FailureKind::Codec(CodecError::new(
-                        header_read,
-                        CodecErrorKind::TruncatedTail,
-                    )),
+                    FailureKind::Codec(CodecError::new(header_read, CodecErrorKind::TruncatedTail)),
                     ArchiveStatus::TruncatedTail,
                 );
                 return Err(failure);
@@ -1273,4 +1219,3 @@ fn read_up_to(reader: &mut File, bytes: &mut [u8]) -> io::Result<usize> {
     }
     Ok(total)
 }
-
