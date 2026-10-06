@@ -5,9 +5,7 @@ use domain::identity::{
     FeedProfileVersion, InstrumentRef, InstrumentSlot, MarketKind, MonotonicNs, RecordNo, SpecRef,
     SpecVersion, StreamBinding, StreamId, SubscriptionEpoch, Token,
 };
-use domain::policy::{
-    DurabilityMode, HealthPolicy, PolicyFields, RecordingGate, SilenceRule,
-};
+use domain::policy::{DurabilityMode, HealthPolicy, PolicyFields, RecordingGate, SilenceRule};
 use domain::record::{
     BookEvidenceKind, EpochChange, Freshness, GapScope, GapTarget, Reason, Transport,
     VerificationEvidence, WarmupEvidence,
@@ -73,13 +71,7 @@ fn instrument(symbol: &str) -> InstrumentRef {
     }
 }
 
-fn binding(
-    stream: u32,
-    slot: u32,
-    book: u32,
-    connection: u32,
-    symbol: &str,
-) -> StreamBinding {
+fn binding(stream: u32, slot: u32, book: u32, connection: u32, symbol: &str) -> StreamBinding {
     let spec_version = SpecVersion::new(1).expect("spec");
     StreamBinding {
         id: StreamId::new(stream).expect("stream"),
@@ -128,11 +120,7 @@ fn frame(binding: &StreamBinding, value: market_data::Books50Frame) -> HealthObs
     })
 }
 
-fn verify(
-    binding: &StreamBinding,
-    raw: u64,
-    kind: BookEvidenceKind,
-) -> HealthObservation {
+fn verify(binding: &StreamBinding, raw: u64, kind: BookEvidenceKind) -> HealthObservation {
     HealthObservation::VerifiedFrame(VerificationEvidence {
         stream: binding.id,
         tag: binding.tag,
@@ -159,10 +147,7 @@ fn warmup(
     })
 }
 
-fn register_and_up(
-    reducer: &mut DataHealthReducer,
-    binding: &StreamBinding,
-) {
+fn register_and_up(reducer: &mut DataHealthReducer, binding: &StreamBinding) {
     reducer
         .step(recorded(
             1,
@@ -242,7 +227,11 @@ fn gap_barrier_blocks_old_proof_and_repeated_snapshot_is_conservative() {
         }]
     );
     assert_eq!(
-        runtime.stream_state(binding.id).expect("state").barrier.get(),
+        runtime
+            .stream_state(binding.id)
+            .expect("state")
+            .barrier
+            .get(),
         5
     );
 
@@ -277,9 +266,7 @@ fn gap_barrier_blocks_old_proof_and_repeated_snapshot_is_conservative() {
     assert_eq!(state.barrier.get(), 9);
     assert_eq!(
         state.book,
-        Some(BookValidity::Invalid(
-            BookInvalidReason::UnexpectedSnapshot
-        ))
+        Some(BookValidity::Invalid(BookInvalidReason::UnexpectedSnapshot))
     );
     assert!(!runtime.usable_data(binding.id));
 }
@@ -386,11 +373,7 @@ fn duplicate_is_noop_but_current_scope_conflict_invalidates() {
         .step(recorded(5, 2, frame(&binding, books(UPDATE))))
         .expect("update");
     runtime
-        .step(recorded(
-            6,
-            2,
-            verify(&binding, 5, BookEvidenceKind::Delta),
-        ))
+        .step(recorded(6, 2, verify(&binding, 5, BookEvidenceKind::Delta)))
         .expect("update proof");
 
     let before = runtime.stream_state(binding.id).expect("state");
@@ -450,11 +433,7 @@ fn shared_connection_registration_and_down_fanout_preserve_isolation() {
     let a_before_b = runtime.stream_state(a.id).expect("a state");
 
     runtime
-        .step(recorded(
-            5,
-            0,
-            HealthObservation::RegisterStream(b.clone()),
-        ))
+        .step(recorded(5, 0, HealthObservation::RegisterStream(b.clone())))
         .expect("register b on shared connection");
     assert_eq!(runtime.stream_state(a.id).expect("a state"), a_before_b);
     let b_state = runtime.stream_state(b.id).expect("b state");
@@ -463,11 +442,7 @@ fn shared_connection_registration_and_down_fanout_preserve_isolation() {
     assert_eq!(b_state.book, Some(BookValidity::NoSnapshot));
 
     runtime
-        .step(recorded(
-            6,
-            0,
-            HealthObservation::RegisterStream(c.clone()),
-        ))
+        .step(recorded(6, 0, HealthObservation::RegisterStream(c.clone())))
         .expect("register c");
     runtime
         .step(recorded(
@@ -562,18 +537,10 @@ fn connection_epoch_advance_resets_only_dependents_to_unknown_generation() {
     let mut runtime = reducer(policy());
 
     runtime
-        .step(recorded(
-            1,
-            0,
-            HealthObservation::RegisterStream(a.clone()),
-        ))
+        .step(recorded(1, 0, HealthObservation::RegisterStream(a.clone())))
         .expect("register a");
     runtime
-        .step(recorded(
-            2,
-            0,
-            HealthObservation::RegisterStream(b.clone()),
-        ))
+        .step(recorded(2, 0, HealthObservation::RegisterStream(b.clone())))
         .expect("register b");
     runtime
         .step(recorded(
@@ -587,11 +554,7 @@ fn connection_epoch_advance_resets_only_dependents_to_unknown_generation() {
         ))
         .expect("conn1 up");
     runtime
-        .step(recorded(
-            4,
-            0,
-            HealthObservation::RegisterStream(c.clone()),
-        ))
+        .step(recorded(4, 0, HealthObservation::RegisterStream(c.clone())))
         .expect("register c");
     runtime
         .step(recorded(
@@ -687,18 +650,10 @@ fn subscription_and_book_epoch_advances_are_owner_isolated() {
     let mut runtime = reducer(policy());
 
     runtime
-        .step(recorded(
-            1,
-            0,
-            HealthObservation::RegisterStream(a.clone()),
-        ))
+        .step(recorded(1, 0, HealthObservation::RegisterStream(a.clone())))
         .expect("register a");
     runtime
-        .step(recorded(
-            2,
-            0,
-            HealthObservation::RegisterStream(b.clone()),
-        ))
+        .step(recorded(2, 0, HealthObservation::RegisterStream(b.clone())))
         .expect("register b");
     runtime
         .step(recorded(
@@ -791,11 +746,7 @@ fn continuity_rules_warmup_and_recorded_order_ignore_source_timestamp_order() {
         }
     );
     runtime
-        .step(recorded(
-            6,
-            2,
-            verify(&binding, 5, BookEvidenceKind::Delta),
-        ))
+        .step(recorded(6, 2, verify(&binding, 5, BookEvidenceKind::Delta)))
         .expect("first update proof");
     let state = runtime.stream_state(binding.id).expect("state");
     assert_eq!(state.book, Some(BookValidity::Warming));
@@ -820,11 +771,7 @@ fn continuity_rules_warmup_and_recorded_order_ignore_source_timestamp_order() {
         }
     );
     runtime
-        .step(recorded(
-            8,
-            5,
-            verify(&binding, 7, BookEvidenceKind::Delta),
-        ))
+        .step(recorded(8, 5, verify(&binding, 7, BookEvidenceKind::Delta)))
         .expect("second update proof");
 
     let before_witness = runtime.stream_state(binding.id).expect("state");
