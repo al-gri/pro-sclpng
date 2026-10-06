@@ -20,6 +20,6 @@ pub use codec::{
 };
 pub use file::{StorageWatermarks, WalWriter, WriterError};
 pub use recovery::{
-    ArchiveStatus, CanonicalStatus, Failure, FailureKind, PhysicalReport, ReadArchive,
+    ArchiveStatus, CanonicalStatus, Failure, FailureKind, LossError, PhysicalReport, ReadArchive,
     ValidationError, WalReader, read_all,
 };
