@@ -343,8 +343,7 @@ fn decode_books50(
     let bids = parse_levels(field(payload, "b")?, "bid")?;
     let pseq = parse_sequence(field(payload, "pseq")?, "pseq")?;
     let seq = parse_sequence(field(payload, "seq")?, "seq")?;
-    let source_timestamp =
-        parse_timestamp_string(field(payload, "ts")?, "data[0].ts")?;
+    let source_timestamp = parse_timestamp_string(field(payload, "ts")?, "data[0].ts")?;
 
     Ok(BitgetMessage::Books50(Books50Frame {
         category: subscription.category,
@@ -499,10 +498,7 @@ fn parse_lexical(value: &JsonValue, field_name: &'static str) -> Result<LexicalV
     Ok(LexicalValue(text.to_owned()))
 }
 
-fn parse_nonempty_text(
-    value: &JsonValue,
-    field_name: &'static str,
-) -> Result<String, DecodeError> {
+fn parse_nonempty_text(value: &JsonValue, field_name: &'static str) -> Result<String, DecodeError> {
     let text = expect_string(value, field_name)?;
     if text.is_empty() {
         return Err(DecodeError::InvalidText { field: field_name });

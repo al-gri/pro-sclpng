@@ -218,9 +218,7 @@ impl Parser<'_> {
                     if !(0xdc00..=0xdfff).contains(&low) {
                         return Err(self.error(JsonErrorKind::InvalidUnicodeEscape));
                     }
-                    0x1_0000
-                        + ((u32::from(high) - 0xd800) << 10)
-                        + (u32::from(low) - 0xdc00)
+                    0x1_0000 + ((u32::from(high) - 0xd800) << 10) + (u32::from(low) - 0xdc00)
                 } else if (0xdc00..=0xdfff).contains(&high) {
                     return Err(self.error(JsonErrorKind::InvalidUnicodeEscape));
                 } else {
