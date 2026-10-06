@@ -805,7 +805,7 @@ fn valid_prefix_plus_corrupt_or_truncated_final_record_is_never_complete() {
 
 #[test]
 fn reader_never_sorts_opaque_raw_inputs_by_timestamp_like_payloads() {
-    let mut frames = vec![
+    let frames = vec![
         start_frame(DurabilityMode::Buffered),
         spec_frame(2, 1, 2, 2),
         stream_frame(3),
@@ -836,7 +836,6 @@ fn reader_never_sorts_opaque_raw_inputs_by_timestamp_like_payloads() {
         vec![b"exchange_ts=200".to_vec(), b"exchange_ts=100".to_vec()]
     );
 
-    frames.clear();
 }
 
 #[test]
@@ -1009,7 +1008,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
     assert!(matches!(
         error,
         WriterError::Validation(ValidationError::Loss(
-            recording::recovery::LossError::UnaccountedAttemptGap
+            LossError::UnaccountedAttemptGap
         ))
     ));
 
@@ -1027,7 +1026,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
     assert!(matches!(
         error,
         WriterError::Validation(ValidationError::Loss(
-            recording::recovery::LossError::LossCountMismatch
+            LossError::LossCountMismatch
         ))
     ));
 
@@ -1060,7 +1059,7 @@ fn local_gap_accounting_is_one_use_and_scope_changes_cannot_cross_open_window() 
     assert!(matches!(
         error,
         WriterError::Validation(ValidationError::Loss(
-            recording::recovery::LossError::GapScopeTransition
+            LossError::GapScopeTransition
         ))
     ));
 }
