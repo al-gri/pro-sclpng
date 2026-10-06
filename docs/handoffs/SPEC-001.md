@@ -1,6 +1,6 @@
 # Handoff: SPEC-001 — implementation continuation
 
-Status: **PARTIAL / WINDOWS_RETEST_REQUIRED**. All new contracts and ADR remain **PROPOSED**.
+Status: **PARTIAL / QA_P2_FIX_PENDING_VERIFICATION**. All new contracts and ADR remain **PROPOSED**.
 Repository: `al-gri/pro-sclpng` only. Same Issue #3, branch `feat/SPEC-001-domain-contracts`, Draft PR #10.
 [Packet](https://github.com/al-gri/pro-sclpng/issues/3#issuecomment-5994665559) · [Implementation approval](https://github.com/al-gri/pro-sclpng/pull/10#pullrequestreview-5418412674).
 Base/main remains `6c520237d35865c79dba9e74fa64bd4c2c9e419f`. Approved design revision: `272f6ec50cd0df3630f37ef99cb8b3bb54a967d7`.
@@ -218,3 +218,33 @@ The containing correction changes only regression construction:
 `markdown_artifact_bytes` semantics are unchanged. Normative fixtures, digests, WAL bytes, CRCs and contracts are unchanged. No dependency or production API change is introduced.
 
 This containing test-support correction requires fresh exact-head Linux fmt/Clippy/build/workspace CI. After that green SHA, the required next owner action is another `cargo test -p domain --locked` on Windows. Both Windows FAILs — `dc7af836…` (parser portability) and `387bdc624fbbae54785665374d0d8c790c7776a6` (regression construction only) — remain part of the evidence and are not rewritten as PASS.
+
+
+## Independent QA P2 — dynamic evidence resolution ordering
+
+Independent QA on exact source SHA `5cb63ff0b81da108431e9374fd5108012d773517` returned **CHANGES_REQUIRED** in [PR comment 6004343424](https://github.com/al-gri/pro-sclpng/pull/10#issuecomment-6004343424). This SHA is not rewritten as QA PASS. Its Linux CI and owner-provided Windows PASS remain historical execution evidence only.
+
+Confirmed P2 root cause: the DataHealth reference model directly inspected typed dynamic evidence bodies from `env.verifications`, `env.warmups` and `env.freshness` to decide `OBSOLETE_SCOPE` before the referenced artifact had crossed the corresponding resolver/applicability boundary. Thus a body-present but resolver-missing or unverified/inapplicable artifact could influence canonical classification and cause the semantic record to be accepted as harmless obsolete evidence.
+
+Normative ordering retained by the fix:
+1. trusted wire/current-record guards keep their existing priority (for example pre-barrier and wire-tag checks);
+2. the dynamic proof is obtained only through resolver-aware `ModelEnv::verification/warmup/freshness`;
+3. only after that call succeeds may typed body context/tag participate in old/current-scope classification;
+4. subsequent basis/scope/content guards keep their prior order.
+
+Exact implementation change is intentionally narrow:
+- `health/application.rs`: remove direct semantic read of `env.verifications`; resolve/apply artifact first, then run the same body context/tag obsolete check;
+- `health/evidence.rs`: same ordering correction for Warmup and Freshness; no change to `ModelEnv` resolver semantics or error taxonomy;
+- production API, artifact semantics, WAL/numeric/event contracts and fixtures remain unchanged.
+
+New end-to-end QA regressions in `crates/domain/tests/cases/health.rs`:
+- `qa_p2_verification_resolution_precedes_body_obsolete_scope`;
+- `qa_p2_warmup_resolution_precedes_body_obsolete_scope`;
+- `qa_p2_freshness_resolution_precedes_body_obsolete_scope`.
+
+Each test covers three states using an intentionally old body scope while keeping trusted wire scope current:
+- **resolver missing** -> exact `ModelError::Artifact(ArtifactError::MissingArtifact)`, no semantic-prefix/evaluation/stream advancement, no resolver binding;
+- **resolver node present but inapplicable** -> exact `ModelError::Artifact(ArtifactError::ArtifactUnverified)`, same retained state/prefix guarantees;
+- **properly resolved old scope** -> existing successful `DiagnosticCode::ObsoleteScope` behavior remains, with no proof-derived market/witness/freshness effect.
+
+The containing commit must receive fresh exact-head Linux fmt/Clippy/build/workspace CI before any further QA request. Its exact final SHA and post-commit run/job IDs are recorded in PR #10, not self-referenced in this file.

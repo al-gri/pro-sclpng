@@ -1,10 +1,10 @@
 //! R1/R3/C2 recorded-input model assertions; all source/evidence facts synthetic.
 
-use crate::support::bodies::VerificationBody;
+use crate::support::bodies::{FreshnessBody, VerificationBody, WarmupBody};
 use crate::support::fixtures::{self, cursor, raw_id, snapshot, update};
 use crate::support::health::*;
-use crate::support::scenario::Scenario;
-use domain::artifact::ArtifactError;
+use crate::support::scenario::{Scenario, mock_node};
+use domain::artifact::{ArtifactError, ArtifactKind};
 use domain::event::*;
 use domain::identity::*;
 use domain::policy::*;
@@ -23,6 +23,187 @@ fn assert_effect(out: &StepResult, index: usize, raw: u64, sub: u32, applied: u6
     assert_eq!(event.as_of.record_frontier.get(), applied);
     assert_eq!(event.source_ingest_order.get(), raw);
     assert_eq!(event.received.monotonic.ns.get(), raw);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DynamicResolution {
+    Missing,
+    Inapplicable,
+    Resolved,
+}
+
+fn make_body_scope_obsolete(scope: &mut EvidenceScope) {
+    scope.context.config = ConfigVersion::new(99).unwrap();
+}
+
+fn install_dynamic_node(
+    scenario: &mut Scenario,
+    mut node: crate::support::artifacts::SyntheticArtifact,
+    resolution: DynamicResolution,
+) {
+    match resolution {
+        DynamicResolution::Missing => {}
+        DynamicResolution::Inapplicable => {
+            node.applicable = false;
+            scenario.env.resolver.supplied.insert(node.reference, node);
+        }
+        DynamicResolution::Resolved => {
+            scenario.env.resolver.supplied.insert(node.reference, node);
+        }
+    }
+}
+
+fn assert_artifact_blocked(
+    scenario: &mut Scenario,
+    control: Control,
+    time: u64,
+    expected: ArtifactError,
+) {
+    let before = scenario.model.clone();
+    let bound_before = scenario.env.resolver.bound_count();
+    let record = scenario.next_record();
+    let expected_error = ModelError::Artifact(expected);
+
+    assert_eq!(
+        scenario.submit(Record::Control(ControlRecord {
+            context: scenario.context(time),
+            value: control,
+        })),
+        Err(expected_error.clone())
+    );
+    assert_eq!(scenario.model.last_record, before.last_record);
+    assert_eq!(scenario.model.evaluation_ns, before.evaluation_ns);
+    assert_eq!(scenario.model.streams, before.streams);
+    assert_eq!(scenario.model.blocked, Some(expected_error));
+    assert_eq!(scenario.env.resolver.bound_count(), bound_before);
+    assert!(!scenario.env.prefix.records.contains(&RecordRef {
+        archive: scenario.model.start.archive,
+        record,
+    }));
+}
+
+fn obsolete_verification_case(resolution: DynamicResolution) -> (Scenario, VerificationEvidence) {
+    let mut scenario = Scenario::initial(fixtures::policy());
+    scenario.raw(vec![snapshot()], 10).unwrap();
+
+    let mut body = scenario.proof_body(10);
+    make_body_scope_obsolete(&mut body.scope);
+    let current = scenario.stream().binding.clone();
+    let mut wire = scenario.put_verification(body);
+    wire.stream = current.id;
+    wire.tag = current.tag;
+    wire.profile = current.feed_profile;
+
+    let proof = wire.proof;
+    match resolution {
+        DynamicResolution::Missing => {
+            scenario.env.resolver.supplied.remove(&proof);
+        }
+        DynamicResolution::Inapplicable => {
+            scenario
+                .env
+                .resolver
+                .supplied
+                .get_mut(&proof)
+                .unwrap()
+                .applicable = false;
+        }
+        DynamicResolution::Resolved => {}
+    }
+    (scenario, wire)
+}
+
+fn obsolete_warmup_case(resolution: DynamicResolution) -> (Scenario, WarmupEvidence) {
+    let mut scenario = Scenario::recovered();
+    let mut body: WarmupBody = scenario.warmup_body(15);
+    make_body_scope_obsolete(&mut body.scope);
+
+    let logical = format!(
+        "stream/{}/anchor/{}",
+        body.scope.stream.get(),
+        body.anchor.get()
+    );
+    let revision = scenario
+        .env
+        .resolver
+        .supplied
+        .values()
+        .filter(|node| {
+            node.metadata.identity.kind == ArtifactKind::Warmup
+                && node.metadata.identity.logical.as_str() == logical
+        })
+        .count()
+        + 1;
+    let node = mock_node(
+        scenario.next_artifact,
+        ArtifactKind::Warmup,
+        &logical,
+        u32::try_from(revision).unwrap(),
+        vec![
+            scenario.model.config.as_ref().unwrap().0,
+            scenario.stream().profile_ref,
+        ],
+    );
+    scenario.next_artifact += 1;
+    let reference = node.reference;
+    let current = scenario.stream().binding.clone();
+    let wire = WarmupEvidence {
+        stream: current.id,
+        tag: current.tag,
+        anchor: body.anchor,
+        update_count: body.update_count,
+        elapsed_ns: body.elapsed_ns,
+        proof: reference,
+    };
+    scenario.env.warmups.insert(reference, body);
+    install_dynamic_node(&mut scenario, node, resolution);
+    (scenario, wire)
+}
+
+fn obsolete_freshness_case(resolution: DynamicResolution) -> (Scenario, FreshnessEvidence) {
+    let mut scenario = Scenario::recovered();
+    let mut body: FreshnessBody = scenario.freshness_body(Freshness::Fresh, 12, None, None);
+    make_body_scope_obsolete(&mut body.scope);
+
+    let logical = format!(
+        "stream/{}/basis/{}",
+        body.scope.stream.get(),
+        body.basis.get()
+    );
+    let revision = scenario
+        .env
+        .resolver
+        .supplied
+        .values()
+        .filter(|node| {
+            node.metadata.identity.kind == ArtifactKind::Freshness
+                && node.metadata.identity.logical.as_str() == logical
+        })
+        .count()
+        + 1;
+    let node = mock_node(
+        scenario.next_artifact,
+        ArtifactKind::Freshness,
+        &logical,
+        u32::try_from(revision).unwrap(),
+        vec![
+            scenario.model.config.as_ref().unwrap().0,
+            scenario.stream().profile_ref,
+        ],
+    );
+    scenario.next_artifact += 1;
+    let reference = node.reference;
+    let current = scenario.stream().binding.clone();
+    let wire = FreshnessEvidence {
+        stream: current.id,
+        tag: current.tag,
+        freshness: body.freshness,
+        basis: Some(body.basis),
+        proof: reference,
+    };
+    scenario.env.freshness.insert(reference, body);
+    install_dynamic_node(&mut scenario, node, resolution);
+    (scenario, wire)
 }
 
 #[test]
@@ -513,6 +694,104 @@ fn v_r3_old_quiet_proof_does_not_poison_new_scope() {
     assert_eq!(s.stream().anchor.as_ref().unwrap().raw, raw_id(16));
     assert_eq!(s.stream().book, Some(BookValidity::Warming));
     assert!(out.effects.is_empty());
+}
+
+
+#[test]
+fn qa_p2_verification_resolution_precedes_body_obsolete_scope() {
+    for (resolution, expected) in [
+        (DynamicResolution::Missing, ArtifactError::MissingArtifact),
+        (
+            DynamicResolution::Inapplicable,
+            ArtifactError::ArtifactUnverified,
+        ),
+    ] {
+        let (mut scenario, wire) = obsolete_verification_case(resolution);
+        assert_artifact_blocked(
+            &mut scenario,
+            Control::Verification(wire),
+            11,
+            expected,
+        );
+    }
+
+    let (mut scenario, wire) = obsolete_verification_case(DynamicResolution::Resolved);
+    let pending_before = scenario.stream().pending.clone();
+    let record = scenario.next_record();
+    let out = scenario
+        .submit(Record::Control(ControlRecord {
+            context: scenario.context(11),
+            value: Control::Verification(wire),
+        }))
+        .unwrap();
+    assert_eq!(codes(&out), [DiagnosticCode::ObsoleteScope]);
+    assert!(out.effects.is_empty());
+    assert_eq!(scenario.stream().pending, pending_before);
+    assert_eq!(scenario.model.last_record, record);
+    assert!(scenario.env.prefix.records.contains(&RecordRef {
+        archive: scenario.model.start.archive,
+        record,
+    }));
+}
+
+#[test]
+fn qa_p2_warmup_resolution_precedes_body_obsolete_scope() {
+    for (resolution, expected) in [
+        (DynamicResolution::Missing, ArtifactError::MissingArtifact),
+        (
+            DynamicResolution::Inapplicable,
+            ArtifactError::ArtifactUnverified,
+        ),
+    ] {
+        let (mut scenario, wire) = obsolete_warmup_case(resolution);
+        assert_artifact_blocked(&mut scenario, Control::Warmup(wire), 15, expected);
+    }
+
+    let (mut scenario, wire) = obsolete_warmup_case(DynamicResolution::Resolved);
+    let witness_before = scenario.stream().witness.clone();
+    let anchor_before = scenario.stream().anchor.clone();
+    let progress_before = scenario.stream().progress;
+    let out = scenario
+        .submit(Record::Control(ControlRecord {
+            context: scenario.context(15),
+            value: Control::Warmup(wire),
+        }))
+        .unwrap();
+    assert_eq!(codes(&out), [DiagnosticCode::ObsoleteScope]);
+    assert!(out.effects.is_empty());
+    assert_eq!(scenario.stream().witness, witness_before);
+    assert_eq!(scenario.stream().anchor, anchor_before);
+    assert_eq!(scenario.stream().progress, progress_before);
+}
+
+#[test]
+fn qa_p2_freshness_resolution_precedes_body_obsolete_scope() {
+    for (resolution, expected) in [
+        (DynamicResolution::Missing, ArtifactError::MissingArtifact),
+        (
+            DynamicResolution::Inapplicable,
+            ArtifactError::ArtifactUnverified,
+        ),
+    ] {
+        let (mut scenario, wire) = obsolete_freshness_case(resolution);
+        assert_artifact_blocked(&mut scenario, Control::Freshness(wire), 15, expected);
+    }
+
+    let (mut scenario, wire) = obsolete_freshness_case(DynamicResolution::Resolved);
+    let freshness_before = scenario.stream().freshness;
+    let quiet_before = scenario.stream().quiet.clone();
+    let anchor_before = scenario.stream().anchor.clone();
+    let out = scenario
+        .submit(Record::Control(ControlRecord {
+            context: scenario.context(15),
+            value: Control::Freshness(wire),
+        }))
+        .unwrap();
+    assert_eq!(codes(&out), [DiagnosticCode::ObsoleteScope]);
+    assert!(out.effects.is_empty());
+    assert_eq!(scenario.stream().freshness, freshness_before);
+    assert_eq!(scenario.stream().quiet, quiet_before);
+    assert_eq!(scenario.stream().anchor, anchor_before);
 }
 
 #[test]

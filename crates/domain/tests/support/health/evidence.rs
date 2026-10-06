@@ -18,10 +18,7 @@ impl HealthModel {
             return Ok(());
         }
         let context = self.context()?;
-        let obsolete_body = env.warmups.get(&wire.proof).is_some_and(|body| {
-            body.scope.context != context || body.scope.tag != state.binding.tag
-        });
-        if wire.tag != state.binding.tag || obsolete_body {
+        if wire.tag != state.binding.tag {
             self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
             self.streams.insert(wire.stream, state);
             return Ok(());
@@ -33,6 +30,11 @@ impl HealthModel {
             state.profile_ref,
             self.start.archive,
         )?;
+        if body.scope.context != context || body.scope.tag != state.binding.tag {
+            self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
+            self.streams.insert(wire.stream, state);
+            return Ok(());
+        }
         let mut required = vec![wire.anchor];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);
@@ -127,10 +129,7 @@ impl HealthModel {
             return Ok(());
         }
         let context = self.context()?;
-        let obsolete_body = env.freshness.get(&wire.proof).is_some_and(|body| {
-            body.scope.context != context || body.scope.tag != state.binding.tag
-        });
-        if wire.tag != state.binding.tag || obsolete_body {
+        if wire.tag != state.binding.tag {
             self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
             self.streams.insert(wire.stream, state);
             return Ok(());
@@ -142,6 +141,11 @@ impl HealthModel {
             state.profile_ref,
             self.start.archive,
         )?;
+        if body.scope.context != context || body.scope.tag != state.binding.tag {
+            self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
+            self.streams.insert(wire.stream, state);
+            return Ok(());
+        }
         let mut required = vec![basis];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);

@@ -138,13 +138,9 @@ impl HealthModel {
             return Ok(());
         }
         let context = self.context()?;
-        let old_body = env.verifications.get(&wire.proof).is_some_and(|body| {
-            body.scope.context != context || body.scope.tag != state.binding.tag
-        });
         if wire.tag != state.binding.tag
             || recorded_raw.tag != state.binding.tag
             || recorded_raw.context.context != InputContext::Active(context)
-            || old_body
         {
             self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
             self.streams.insert(wire.stream, state);
@@ -157,6 +153,11 @@ impl HealthModel {
             state.profile_ref,
             self.start.archive,
         )?;
+        if body.scope.context != context || body.scope.tag != state.binding.tag {
+            self.diagnostic(at, wire.stream, DiagnosticCode::ObsoleteScope, out);
+            self.streams.insert(wire.stream, state);
+            return Ok(());
+        }
         let mut required = vec![wire.raw];
         if state.barrier > 0 {
             required.push(RecordNo::new(state.barrier)?);
