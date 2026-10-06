@@ -53,9 +53,7 @@ fn grouped_std_runtime_namespace(compact: &str) -> bool {
         for item in compact[start..end].split(',') {
             let root = item.split("::").next().unwrap_or(item);
             let name = root.split("as").next().unwrap_or(root);
-            if matches!(name, "fs" | "net" | "process")
-                || (name == "self" && item.contains("as"))
-            {
+            if matches!(name, "fs" | "net" | "process") || (name == "self" && item.contains("as")) {
                 return true;
             }
         }
