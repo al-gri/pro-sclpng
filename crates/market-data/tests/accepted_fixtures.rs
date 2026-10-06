@@ -3,17 +3,14 @@ use market_data::{
     ContinuityRule, DecodeError, FillSide, PublicTradeFrame, RpiFlag, Topic, decode_message,
 };
 
-const SNAPSHOT: &[u8] =
-    include_bytes!("../../../tests/fixtures/bitget/books50-snapshot.json");
+const SNAPSHOT: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-snapshot.json");
 const UPDATE: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-update.json");
 const GAP: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-gap.json");
-const DUPLICATE: &[u8] =
-    include_bytes!("../../../tests/fixtures/bitget/books50-duplicate.json");
+const DUPLICATE: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-duplicate.json");
 const RESET: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-reset.json");
 const EMPTY_LEVELS: &[u8] =
     include_bytes!("../../../tests/fixtures/bitget/books50-empty-levels.json");
-const PUBLIC_TRADES: &[u8] =
-    include_bytes!("../../../tests/fixtures/bitget/public-trades.json");
+const PUBLIC_TRADES: &[u8] = include_bytes!("../../../tests/fixtures/bitget/public-trades.json");
 const ZERO_QUANTITY: &[u8] =
     include_bytes!("../../../tests/fixtures/bitget/books50-zero-quantity-unknown.json");
 const RPI_SNAPSHOT: &[u8] =

@@ -233,8 +233,8 @@ fn excessive_array_size_is_rejected_by_parser_guard() {
         max_container_items: 5,
         ..DecodeLimits::default()
     };
-    let error = decode_message_with_limits(message, limits)
-        .expect_err("container guard must reject input");
+    let error =
+        decode_message_with_limits(message, limits).expect_err("container guard must reject input");
     assert!(matches!(
         error,
         DecodeError::MalformedJson(ref json) if json.kind == JsonErrorKind::ContainerTooLarge
