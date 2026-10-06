@@ -2,8 +2,8 @@ use domain::artifact::ArtifactRef;
 use domain::event::{ClockScope, MonotonicSample};
 use domain::identity::{
     BookEpoch, BookId, CaptureSessionId, Channel, ClockId, ConnectionEpoch, ConnectionId, EpochTag,
-    FeedProfileVersion, InstrumentRef, InstrumentSlot, MarketKind, MonotonicNs, RecordNo, SpecRef,
-    SpecVersion, StreamBinding, StreamId, SubscriptionEpoch, Token,
+    FeedProfileVersion, IdentityError, InstrumentRef, InstrumentSlot, MarketKind, MonotonicNs,
+    RecordNo, SpecRef, SpecVersion, StreamBinding, StreamId, SubscriptionEpoch, Token,
 };
 use domain::policy::{DurabilityMode, HealthPolicy, PolicyFields, RecordingGate, SilenceRule};
 use domain::record::{
@@ -12,8 +12,9 @@ use domain::record::{
 };
 use market_data::{
     BitgetMessage, BookFrameObservation, BookInvalidReason, BookValidity, ContinuityOutcome,
-    ContinuityRule, DataHealthReducer, HealthDiagnostic, HealthEffect, HealthObservation,
-    PendingLimit, RecordedHealthObservation, StepResult, decode_message,
+    ContinuityRule, DataHealthReducer, HealthDiagnostic, HealthEffect, HealthError,
+    HealthObservation, PendingLimit, RecordedHealthObservation, StepResult, VerifiedFrameProof,
+    decode_message,
 };
 
 const SNAPSHOT: &[u8] = include_bytes!("../../../tests/fixtures/bitget/books50-snapshot.json");
@@ -111,23 +112,44 @@ fn recorded(record: u64, sample_ns: u64, value: HealthObservation) -> RecordedHe
 }
 
 fn frame(binding: &StreamBinding, value: market_data::Books50Frame) -> HealthObservation {
+    frame_with_bounds(binding, value, 256, 1)
+}
+
+fn frame_with_bounds(
+    binding: &StreamBinding,
+    value: market_data::Books50Frame,
+    raw_bytes: u32,
+    candidate_outputs: u32,
+) -> HealthObservation {
     HealthObservation::BookFrame(BookFrameObservation {
         stream: binding.id,
         tag: binding.tag,
-        raw_bytes: 256,
-        candidate_outputs: 1,
+        raw_bytes,
+        candidate_outputs,
         frame: value,
     })
 }
 
 fn verify(binding: &StreamBinding, raw: u64, kind: BookEvidenceKind) -> HealthObservation {
-    HealthObservation::VerifiedFrame(VerificationEvidence {
-        stream: binding.id,
-        tag: binding.tag,
-        raw: RecordNo::new(raw).expect("raw"),
-        kind,
-        profile: binding.feed_profile,
-        proof: proof(),
+    verify_until(binding, raw, kind, None)
+}
+
+fn verify_until(
+    binding: &StreamBinding,
+    raw: u64,
+    kind: BookEvidenceKind,
+    valid_until_ns: Option<u64>,
+) -> HealthObservation {
+    HealthObservation::VerifiedFrame(VerifiedFrameProof {
+        evidence: VerificationEvidence {
+            stream: binding.id,
+            tag: binding.tag,
+            raw: RecordNo::new(raw).expect("raw"),
+            kind,
+            profile: binding.feed_profile,
+            proof: proof(),
+        },
+        valid_until_ns,
     })
 }
 
