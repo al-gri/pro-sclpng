@@ -217,7 +217,11 @@ fn drain_all(supervisor: &mut PublicWsSupervisor, sink: &mut impl RecordSink) ->
 fn connect_subscribe_and_ack_are_persisted_before_accepted_state() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
 
     let commands = supervisor.start_commands().expect("start");
@@ -281,7 +285,11 @@ fn connect_subscribe_and_ack_are_persisted_before_accepted_state() {
 fn heartbeat_pong_records_transport_only_and_does_not_create_market_freshness() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 1_000);
@@ -341,7 +349,11 @@ fn heartbeat_pong_records_transport_only_and_does_not_create_market_freshness() 
 fn disconnect_reconnect_advances_connection_subscription_and_book_epochs() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 100);
@@ -374,11 +386,7 @@ fn disconnect_reconnect_advances_connection_subscription_and_book_epochs() {
     assert!((RECONNECT_BASE_NS_V1..=RECONNECT_MAX_NS_V1).contains(&delay));
 
     supervisor
-        .queue_connected(
-            binding.connection_id,
-            next_epoch,
-            stamp(200 + delay),
-        )
+        .queue_connected(binding.connection_id, next_epoch, stamp(200 + delay))
         .expect("queue reconnected");
     supervisor.drain_one(&mut sink).expect("drain reconnected");
     let reconnected = supervisor.snapshot(stream).expect("snapshot");
@@ -403,7 +411,11 @@ fn reconnect_backoff_is_deterministic_and_bounded() {
 fn subscription_failure_records_raw_then_explicit_gap() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 10);
@@ -421,7 +433,10 @@ fn subscription_failure_records_raw_then_explicit_gap() {
         .expect("drain error")
         .expect("error result");
     assert_eq!(result.records.len(), 2);
-    assert!(matches!(sink.frames[sink.frames.len() - 2].value, Record::RawInput(_)));
+    assert!(matches!(
+        sink.frames[sink.frames.len() - 2].value,
+        Record::RawInput(_)
+    ));
     assert!(matches!(
         sink.frames.last().expect("gap").value,
         Record::Gap(Gap {
@@ -494,7 +509,9 @@ fn critical_queue_overflow_records_known_attempt_gap_without_evicting_prior_raw(
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].stream, stream);
     assert_eq!(
-        targets[0].range.map(|(first, last)| (first.get(), last.get())),
+        targets[0]
+            .range
+            .map(|(first, last)| (first.get(), last.get())),
         Some((2, 2))
     );
     assert_eq!(targets[0].loss_count, Some(1));
@@ -560,7 +577,12 @@ fn global_receive_order_raw_bytes_and_receive_timestamps_reach_recording_boundar
         .queue_text(a.connection_id, a.tag.connection, stamp(100), first.clone())
         .expect("first");
     supervisor
-        .queue_text(b.connection_id, b.tag.connection, stamp(101), second.clone())
+        .queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(101),
+            second.clone(),
+        )
         .expect("second");
     drain_all(&mut supervisor, &mut sink);
 
@@ -584,7 +606,11 @@ fn global_receive_order_raw_bytes_and_receive_timestamps_reach_recording_boundar
 #[test]
 fn zero_quantity_remains_exact_raw_bytes_without_canonical_delete_semantics() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 1);
@@ -626,7 +652,11 @@ fn old_epoch_raw_is_recorded_but_cannot_revive_current_generation() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
     let old_epoch = binding.tag.connection;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 1);
@@ -665,12 +695,21 @@ fn old_epoch_raw_is_recorded_but_cannot_revive_current_generation() {
 fn continuity_gap_records_source_gap_and_never_heals_from_an_external_snapshot() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 1);
     supervisor
-        .queue_text(binding.connection_id, binding.tag.connection, stamp(2), ack("BTCUSDT"))
+        .queue_text(
+            binding.connection_id,
+            binding.tag.connection,
+            stamp(2),
+            ack("BTCUSDT"),
+        )
         .expect("ack");
     supervisor.drain_one(&mut sink).expect("ack drain");
     supervisor
@@ -687,7 +726,7 @@ fn continuity_gap_records_source_gap_and_never_heals_from_an_external_snapshot()
             binding.connection_id,
             binding.tag.connection,
             stamp(4),
-            update("BTCUSDT", 9, 11),
+            update("BTCUSDT", 11, 12),
         )
         .expect("gap update");
     let result = supervisor
@@ -712,7 +751,11 @@ fn continuity_gap_records_source_gap_and_never_heals_from_an_external_snapshot()
 fn heartbeat_timeout_records_timer_down_and_new_generation() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let stream = binding.id;
-    let mut supervisor = supervisor(vec![binding.clone()], QueuePolicy::default(), RecordingGate::Written);
+    let mut supervisor = supervisor(
+        vec![binding.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Written,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 100);
@@ -722,7 +765,9 @@ fn heartbeat_timeout_records_timer_down_and_new_generation() {
     supervisor.drain_one(&mut sink).expect("drain ping");
 
     let timeout = ping_due + PONG_TIMEOUT_NS_V1;
-    supervisor.queue_tick(stamp(timeout)).expect("queue timeout");
+    supervisor
+        .queue_tick(stamp(timeout))
+        .expect("queue timeout");
     let result = supervisor
         .drain_one(&mut sink)
         .expect("drain timeout")
