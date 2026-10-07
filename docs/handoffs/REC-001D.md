@@ -1464,3 +1464,80 @@ whole REC-001D READY_FOR_INDEPENDENT_QA or READY_FOR_OWNER_REVIEW on the strengt
 of the partial Q2 repair. After an accepted Q1 policy/remediation, the mandatory
 next gate remains full independent QA of the entire new immutable head, including
 Q1/Q2, all 63 H1 faults, H2 and every prior fix. No merge/auto-merge is authorized.
+
+## Bounded Q1 design revision — ADR 0003 proposal
+
+Current disposition: **DESIGN_PROPOSED / Q1_BLOCKED**. Architecture direction:
+**ARCHITECTURE_DIRECTION_SET / DESIGN_REVISION_REQUIRED**. Q1 remains
+**BLOCKED / NOT_FIXED**; Q2 remains **FIXED_IN_CODE / QA_PENDING**. This section
+supersedes the earlier open alternatives for the next design review, without
+changing production behavior or erasing the forensic evidence above.
+
+Existing lineage is unchanged: Issue #20 / parent #5, claim `6024304772`,
+recovery `6025249885`, branch `feat/REC-001D-ws-supervisor`, Draft PR #34,
+incoming partial-completion record `6033824631`. Preflight verified actual main
+`39ff0dba797eb010586238ef06fb80e996340401` and branch/PR head
+`91e3702f75346e0f310532359a06daa9db701829`, with zero later commits; PR was
+open/Draft, unmerged, auto-merge unset. Current GitHub policies/contracts were
+read against the immutable head. A stale local WAL-spec copy was refreshed
+from its exact GitHub blob before reasoning; no accepted file is changed in
+the proposal commit. This workspace is a materialized snapshot rather than a
+git checkout; the commit uses the existing head tree with an expected-head
+lease, and its exact two-path diff must be verified remotely.
+
+The selected proposal is [ADR 0003 — terminal capture saturation and archive
+session authority](../adr/0003-ws-capture-saturation.md). It specifies:
+
+- irreversible affected-stream termination, one exact diagnostic first-failure
+  identity and consumed candidate without Raw/GAP/accounted-frontier fiction;
+- an archive/session-wide recording-failure latch, diagnostic-only admitted
+  drain/neighbor recording, and revocation of all publication/finalization;
+- a full `W + N + 1 <= M` ledger including reserved stream/archive owners,
+  pending/in-flight jobs and leases, explicit metadata/payload/buffer bounds,
+  reporting API, legal cap5/cap9 and mixed/F2 progressions;
+- existing RecordingEvidence as an optional truthful earlier-watermark failure
+  observation after the admitted record-bearing ingress prefix, never missing-attempt/GAP
+  coverage; marker failure remains explicit without a durability/rollback claim;
+- owner-bound sink/writer, unique borrowed SessionTurn, opaque command leases,
+  sealed current-state publication guard, one-use quiescence and enforced seal
+  checks. Mandatory Close remains dispatchable through storage/closure failure;
+- a one-segment bounded owner profile, pollable diagnostic-close lifecycle, truthful
+  reader status/quality separation and crash/external-inventory limits;
+- complete API outcomes, compatibility/minimum future-path matrix and an
+  acceptance matrix for independent QA after approved implementation.
+
+The proposal explicitly names deltas requiring approval: saturation policy v2,
+envelopes/borrowed input/bound sink, scoped CaptureAttempt exhaustion instead
+of the prior global-Halted H2 disposition, Close-dispatch-dependent H1 completion
+ownership, terminal admission Close without a claimed durable Down, irreversible
+replay failure classification and canonical owner boundaries. Existing H1
+durable-result, H2 checked-error/frontier/no-wrap/no-reuse and Q2 cancellation
+invariants remain required. No test assertion change is made in this docs task.
+
+Allowed/changed paths in this revision are exactly:
+
+- `docs/adr/0003-ws-capture-saturation.md` (new proposal);
+- `docs/handoffs/REC-001D.md` (this delivery record).
+
+No source, domain/recording/composition implementation, existing accepted
+spec/ADR, workflow or other path changes. No new claim/Issue/branch/PR,
+force-push, merge, auto-merge, REC-001F, networking, REST healing, RPI,
+quantity/delete inference, private API or execution. U-09/U-10 stay
+UNKNOWN/BLOCKED, U-20 NOT_PROVEN/FORBIDDEN, C-01 BLOCKED, C-03 UNKNOWN.
+
+Verification for this proposal: local fmt, clippy and workspace test commands
+were attempted; each returned exit 127 (`cargo: command not found`), therefore
+**NOT_RUN locally**. No new Rust tests or behavioral acceptance tests were
+executed locally. Proposal link/path/provenance/content and exact remote diff
+checks are reported factually in PR #34 / Issue #20 along with fresh exact-head
+CI results. Every ADR acceptance row is **REQUIRED / NOT_RUN** for future
+implementation. Passing docs-only CI (including unchanged Rust tests) cannot
+prove Q1 repaired. Historical production-head CI is not a proposal acceptance.
+
+The containing proposal SHA is recorded in existing PR/Issue metadata after
+commit, avoiding a self-referential SHA. PR #34 remains Draft. The next gate is
+**exact-SHA Integrator/Architecture review of ADR 0003**. Production remediation
+starts only after explicit **DESIGN_APPROVED_FOR_IMPLEMENTATION** naming approved
+API semantics and allowed paths. Then the complete implemented result requires
+full independent QA of a new immutable head, including Q1/Q2, H1/H2 and all
+previous regressions. No self-approval or READY_FOR_OWNER_REVIEW is claimed.
