@@ -1180,10 +1180,12 @@ impl PublicWsSupervisor {
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
         let (connection, current_epoch, active) = {
-            let runtime = self
-                .streams
-                .get(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration("missing timer stream"))?;
+            let runtime =
+                self.streams
+                    .get(&stream)
+                    .ok_or(SupervisorError::InvalidConfiguration(
+                        "missing timer stream",
+                    ))?;
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,

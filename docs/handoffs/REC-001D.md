@@ -1438,6 +1438,14 @@ fmt, clippy -D warnings, Cargo.lock verification, workspace build, workspace
 tests/real CLI and clean checkout on that exact final SHA. Historical
 `37587058448` belongs only to rejected `82742c2e...` and does not transfer.
 
+Intermediate run `37591605000` on `0dcf18b7a1269c2822311c2ceed2db88cd0d4f58`
+executed all 56 supervisor integration tests, the H2 private tests, full
+workspace tests/real CLI, Cargo.lock verification, workspace build and that
+job's clean checkout: **PASS**. The three Q1 forensic reproductions confirmed
+required behavior **FAIL**. Rust-fmt was **FAIL**; its exact formatter diffs
+were applied before this containing commit. Clippy was still in progress at
+file authorship. No intermediate result transfers to the final head.
+
 Preserved: U-09 UNKNOWN/BLOCKED, U-10 UNKNOWN/BLOCKED,
 U-20 NOT_PROVEN/FORBIDDEN, C-01 BLOCKED, C-03 UNKNOWN.
 No REST healing, RPI normalization, quantity inference, zero-to-DeleteLevel,

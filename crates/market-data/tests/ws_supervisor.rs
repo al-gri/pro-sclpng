@@ -3280,10 +3280,12 @@ fn q2_ping_count(results: &[DrainResult]) -> usize {
     results
         .iter()
         .flat_map(|result| &result.commands)
-        .filter(|command| matches!(
-            command,
-            TransportCommand::SendText { text, .. } if text == "ping"
-        ))
+        .filter(|command| {
+            matches!(
+                command,
+                TransportCommand::SendText { text, .. } if text == "ping"
+            )
+        })
         .count()
 }
 
@@ -3300,16 +3302,16 @@ fn q2_assert_no_terminal_records(frames: &[RecordFrame]) {
     assert!(!frames.iter().any(|frame| matches!(
         &frame.value,
         Record::Control(ControlRecord {
-            value: Control::Transport { value: Transport::Down, .. }
-                | Control::EpochAdvance { .. },
+            value: Control::Transport {
+                value: Transport::Down,
+                ..
+            } | Control::EpochAdvance { .. },
             ..
         })
     )));
 }
 
-fn q2_connected_fixture(
-    binding: &StreamBinding,
-) -> (PublicWsSupervisor, MemorySink, u64) {
+fn q2_connected_fixture(binding: &StreamBinding) -> (PublicWsSupervisor, MemorySink, u64) {
     let mut supervisor = supervisor(
         vec![binding.clone()],
         QueuePolicy::default(),
@@ -3327,7 +3329,9 @@ fn q2_send_initial_ping(
     ping_due: u64,
 ) -> u64 {
     supervisor.queue_tick(stamp(ping_due)).expect("queue ping");
-    supervisor.queue_tick(stamp(ping_due)).expect("repeat ping tick");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("repeat ping tick");
     assert_eq!(supervisor.queued_items(), 1);
     let ping = supervisor
         .drain_one(sink)
@@ -3343,7 +3347,10 @@ fn pong_before_queued_timeout_preserves_heartbeat_at_deadline_boundaries() {
     let deadline = 100 + HEARTBEAT_INTERVAL_NS + PONG_TIMEOUT_NS_V1;
     for pong_at in [deadline - 1, deadline, deadline + 1] {
         let (mut supervisor, mut sink, ping_due) = q2_connected_fixture(&binding);
-        assert_eq!(q2_send_initial_ping(&mut supervisor, &mut sink, ping_due), deadline);
+        assert_eq!(
+            q2_send_initial_ping(&mut supervisor, &mut sink, ping_due),
+            deadline
+        );
         let prefix_len = sink.frames.len();
         supervisor
             .queue_text(
@@ -3368,10 +3375,11 @@ fn pong_before_queued_timeout_preserves_heartbeat_at_deadline_boundaries() {
             .expect("drain Pong")
             .expect("Pong outcome");
         assert!(pong.commands.is_empty());
-        assert!(pong.events.iter().any(|event| matches!(
-            event,
-            SupervisorEvent::PongRecorded { .. }
-        )));
+        assert!(
+            pong.events
+                .iter()
+                .any(|event| matches!(event, SupervisorEvent::PongRecorded { .. }))
+        );
         let timer = supervisor
             .drain_one(&mut sink)
             .expect("drain canceled timeout")
@@ -3382,7 +3390,12 @@ fn pong_before_queued_timeout_preserves_heartbeat_at_deadline_boundaries() {
         let current = supervisor.snapshot(binding.id).expect("current state");
         assert_eq!(current.tag, binding.tag);
         assert_eq!(current.transport, Transport::Up);
-        assert!(supervisor.drain_one(&mut sink).expect("empty queue").is_none());
+        assert!(
+            supervisor
+                .drain_one(&mut sink)
+                .expect("empty queue")
+                .is_none()
+        );
 
         let next_ping = pong_at + HEARTBEAT_INTERVAL_NS;
         supervisor
@@ -3413,12 +3426,16 @@ fn pong_cancels_old_ping_timer_without_clearing_equal_deadline_new_owner() {
             b"pong".to_vec(),
         )
         .expect("queue Pong recreating the same deadline");
-    supervisor.queue_tick(stamp(ping_due)).expect("old ping timer");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("old ping timer");
     supervisor
         .drain_one(&mut sink)
         .expect("Pong accepted")
         .expect("Pong outcome");
-    supervisor.queue_tick(stamp(ping_due)).expect("new ping owner");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("new ping owner");
     supervisor.queue_tick(stamp(ping_due)).expect("repeat tick");
     assert_eq!(supervisor.queued_items(), 2);
 
@@ -3431,7 +3448,9 @@ fn pong_cancels_old_ping_timer_without_clearing_equal_deadline_new_owner() {
         old.events.as_slice(),
         [SupervisorEvent::HeartbeatTimerRecorded { timer_id: 1, .. }]
     ));
-    supervisor.queue_tick(stamp(ping_due)).expect("owner remains queued");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("owner remains queued");
     assert_eq!(supervisor.queued_items(), 1);
     let active = supervisor
         .drain_one(&mut sink)
@@ -3443,7 +3462,10 @@ fn pong_cancels_old_ping_timer_without_clearing_equal_deadline_new_owner() {
     ));
     assert_eq!(q2_ping_count(&[active]), 1);
     assert!(!supervisor.is_halted());
-    assert_eq!(supervisor.snapshot(binding.id).expect("Up").tag, binding.tag);
+    assert_eq!(
+        supervisor.snapshot(binding.id).expect("Up").tag,
+        binding.tag
+    );
     supervisor
         .queue_tick(stamp(ping_due + PONG_TIMEOUT_NS_V1 - 1))
         .expect("before actual pong deadline");
@@ -3455,16 +3477,22 @@ fn pong_cancels_old_ping_timer_without_clearing_equal_deadline_new_owner() {
         .drain_one(&mut sink)
         .expect("active timeout")
         .expect("terminal outcome");
-    assert_eq!(down.commands, vec![TransportCommand::Close {
-        connection: binding.connection_id,
-        epoch: binding.tag.connection,
-    }]);
+    assert_eq!(
+        down.commands,
+        vec![TransportCommand::Close {
+            connection: binding.connection_id,
+            epoch: binding.tag.connection,
+        }]
+    );
     let completion = supervisor
         .drain_one(&mut sink)
         .expect("completion")
         .expect("completion outcome");
     assert_eq!(completion.commands.len(), 1);
-    assert!(matches!(completion.commands[0], TransportCommand::ReconnectAfter { .. }));
+    assert!(matches!(
+        completion.commands[0],
+        TransportCommand::ReconnectAfter { .. }
+    ));
 }
 
 #[test]
@@ -3480,20 +3508,26 @@ fn canceled_timeout_does_not_change_new_heartbeat_cycle_or_queued_owner() {
             b"pong".to_vec(),
         )
         .expect("cancel old outstanding cycle");
-    supervisor.queue_tick(stamp(old_deadline)).expect("queue old timeout");
+    supervisor
+        .queue_tick(stamp(old_deadline))
+        .expect("queue old timeout");
     supervisor
         .drain_one(&mut sink)
         .expect("accept Pong")
         .expect("Pong outcome");
     let new_due = old_deadline - 1 + HEARTBEAT_INTERVAL_NS;
-    supervisor.queue_tick(stamp(new_due)).expect("queue new heartbeat");
+    supervisor
+        .queue_tick(stamp(new_due))
+        .expect("queue new heartbeat");
     assert_eq!(supervisor.queued_items(), 2);
     let old = supervisor
         .drain_one(&mut sink)
         .expect("obsolete timeout")
         .expect("timer outcome");
     q2_assert_timer_only(&old);
-    supervisor.queue_tick(stamp(new_due)).expect("new owner remains queued");
+    supervisor
+        .queue_tick(stamp(new_due))
+        .expect("new owner remains queued");
     assert_eq!(supervisor.queued_items(), 1);
     let ping = supervisor
         .drain_one(&mut sink)
@@ -3501,19 +3535,43 @@ fn canceled_timeout_does_not_change_new_heartbeat_cycle_or_queued_owner() {
         .expect("ping outcome");
     assert_eq!(q2_ping_count(&[ping]), 1);
     let new_deadline = new_due + PONG_TIMEOUT_NS_V1;
-    supervisor.queue_tick(stamp(new_deadline - 1)).expect("new deadline not due");
+    supervisor
+        .queue_tick(stamp(new_deadline - 1))
+        .expect("new deadline not due");
     assert_eq!(supervisor.queued_items(), 0);
-    supervisor.queue_tick(stamp(new_deadline)).expect("new timeout");
-    supervisor.queue_tick(stamp(new_deadline + 1)).expect("repeat new timeout");
+    supervisor
+        .queue_tick(stamp(new_deadline))
+        .expect("new timeout");
+    supervisor
+        .queue_tick(stamp(new_deadline + 1))
+        .expect("repeat new timeout");
     assert_eq!(supervisor.queued_items(), 1);
     let results = drain_all(&mut supervisor, &mut sink);
-    assert_eq!(results.iter().flat_map(|result| &result.commands).filter(|command|
-        matches!(command, TransportCommand::Close { .. })
-    ).count(), 1);
-    assert_eq!(results.iter().flat_map(|result| &result.commands).filter(|command|
-        matches!(command, TransportCommand::ReconnectAfter { .. })
-    ).count(), 1);
-    assert_eq!(supervisor.snapshot(binding.id).expect("advanced once").tag.connection.get(), 2);
+    assert_eq!(
+        results
+            .iter()
+            .flat_map(|result| &result.commands)
+            .filter(|command| matches!(command, TransportCommand::Close { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        results
+            .iter()
+            .flat_map(|result| &result.commands)
+            .filter(|command| matches!(command, TransportCommand::ReconnectAfter { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        supervisor
+            .snapshot(binding.id)
+            .expect("advanced once")
+            .tag
+            .connection
+            .get(),
+        2
+    );
 }
 
 #[test]
@@ -3537,7 +3595,9 @@ fn obsolete_timers_skip_impossible_operational_time_and_epoch_preflight() {
                 b"pong".to_vec(),
             )
             .expect("queue schedule replacement");
-        supervisor.queue_tick(stamp(u64::MAX)).expect("queue old timer at MAX");
+        supervisor
+            .queue_tick(stamp(u64::MAX))
+            .expect("queue old timer at MAX");
         supervisor
             .drain_one(&mut sink)
             .expect("Pong replaces owner")
@@ -3563,7 +3623,11 @@ fn obsolete_timers_skip_impossible_operational_time_and_epoch_preflight() {
 fn timer_cancellation_of_one_stream_preserves_neighbor_timeout() {
     let a = stream_binding(1, 1, 1, "BTCUSDT");
     let b = stream_binding(2, 2, 2, "ETHUSDT");
-    let mut supervisor = supervisor(vec![a.clone(), b.clone()], QueuePolicy::default(), RecordingGate::Durable);
+    let mut supervisor = supervisor(
+        vec![a.clone(), b.clone()],
+        QueuePolicy::default(),
+        RecordingGate::Durable,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &a, 100);
@@ -3572,24 +3636,70 @@ fn timer_cancellation_of_one_stream_preserves_neighbor_timeout() {
     supervisor.queue_tick(stamp(due)).expect("both pings due");
     assert_eq!(q2_ping_count(&drain_all(&mut supervisor, &mut sink)), 2);
     let deadline = due + PONG_TIMEOUT_NS_V1;
-    supervisor.queue_text(a.connection_id, a.tag.connection, stamp(deadline - 1), b"pong".to_vec()).expect("A Pong");
-    supervisor.queue_tick(stamp(deadline)).expect("both timeout observations");
-    supervisor.queue_tick(stamp(deadline + 1)).expect("repeat timeout tick");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(deadline - 1),
+            b"pong".to_vec(),
+        )
+        .expect("A Pong");
+    supervisor
+        .queue_tick(stamp(deadline))
+        .expect("both timeout observations");
+    supervisor
+        .queue_tick(stamp(deadline + 1))
+        .expect("repeat timeout tick");
     assert_eq!(supervisor.queued_items(), 3);
-    supervisor.drain_one(&mut sink).expect("A Pong drain").expect("Pong outcome");
-    let obsolete_a = supervisor.drain_one(&mut sink).expect("A canceled timeout").expect("timer outcome");
+    supervisor
+        .drain_one(&mut sink)
+        .expect("A Pong drain")
+        .expect("Pong outcome");
+    let obsolete_a = supervisor
+        .drain_one(&mut sink)
+        .expect("A canceled timeout")
+        .expect("timer outcome");
     q2_assert_timer_only(&obsolete_a);
-    let b_down = supervisor.drain_one(&mut sink).expect("B active timeout").expect("B terminal outcome");
-    assert_eq!(b_down.commands, vec![TransportCommand::Close { connection: b.connection_id, epoch: b.tag.connection }]);
-    let b_completion = supervisor.drain_one(&mut sink).expect("B completion").expect("B completion outcome");
-    assert!(matches!(b_completion.commands.as_slice(), [TransportCommand::ReconnectAfter { connection, .. }] if *connection == b.connection_id));
+    let b_down = supervisor
+        .drain_one(&mut sink)
+        .expect("B active timeout")
+        .expect("B terminal outcome");
+    assert_eq!(
+        b_down.commands,
+        vec![TransportCommand::Close {
+            connection: b.connection_id,
+            epoch: b.tag.connection
+        }]
+    );
+    let b_completion = supervisor
+        .drain_one(&mut sink)
+        .expect("B completion")
+        .expect("B completion outcome");
+    assert!(
+        matches!(b_completion.commands.as_slice(), [TransportCommand::ReconnectAfter { connection, .. }] if *connection == b.connection_id)
+    );
     let a_now = supervisor.snapshot(a.id).expect("A remains operational");
     assert_eq!(a_now.tag, a.tag);
     assert_eq!(a_now.transport, Transport::Up);
-    assert_eq!(supervisor.snapshot(b.id).expect("B advanced").tag.connection.get(), 2);
-    supervisor.queue_tick(stamp(deadline - 1 + HEARTBEAT_INTERVAL_NS)).expect("A next heartbeat");
-    let a_ping = supervisor.drain_one(&mut sink).expect("A ping").expect("A outcome");
-    assert!(matches!(a_ping.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }] if *connection == a.connection_id && text == "ping"));
+    assert_eq!(
+        supervisor
+            .snapshot(b.id)
+            .expect("B advanced")
+            .tag
+            .connection
+            .get(),
+        2
+    );
+    supervisor
+        .queue_tick(stamp(deadline - 1 + HEARTBEAT_INTERVAL_NS))
+        .expect("A next heartbeat");
+    let a_ping = supervisor
+        .drain_one(&mut sink)
+        .expect("A ping")
+        .expect("A outcome");
+    assert!(
+        matches!(a_ping.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }] if *connection == a.connection_id && text == "ping")
+    );
 }
 
 #[test]
@@ -3599,17 +3709,55 @@ fn timeout_before_queued_pong_remains_terminal_under_fifo_policy() {
     for pong_at in [deadline - 1, deadline, deadline + 1] {
         let (mut supervisor, mut sink, ping_due) = q2_connected_fixture(&binding);
         q2_send_initial_ping(&mut supervisor, &mut sink, ping_due);
-        supervisor.queue_tick(stamp(deadline)).expect("timeout first");
-        supervisor.queue_text(binding.connection_id, binding.tag.connection, stamp(pong_at), b"pong".to_vec()).expect("Pong admitted later");
-        let down = supervisor.drain_one(&mut sink).expect("timeout drain").expect("Down outcome");
-        assert_eq!(down.commands, vec![TransportCommand::Close { connection: binding.connection_id, epoch: binding.tag.connection }]);
-        let pong = supervisor.drain_one(&mut sink).expect("obsolete Pong").expect("Pong diagnostic");
+        supervisor
+            .queue_tick(stamp(deadline))
+            .expect("timeout first");
+        supervisor
+            .queue_text(
+                binding.connection_id,
+                binding.tag.connection,
+                stamp(pong_at),
+                b"pong".to_vec(),
+            )
+            .expect("Pong admitted later");
+        let down = supervisor
+            .drain_one(&mut sink)
+            .expect("timeout drain")
+            .expect("Down outcome");
+        assert_eq!(
+            down.commands,
+            vec![TransportCommand::Close {
+                connection: binding.connection_id,
+                epoch: binding.tag.connection
+            }]
+        );
+        let pong = supervisor
+            .drain_one(&mut sink)
+            .expect("obsolete Pong")
+            .expect("Pong diagnostic");
         assert!(pong.records.is_empty());
         assert!(pong.commands.is_empty());
-        assert!(matches!(pong.events.as_slice(), [SupervisorEvent::ObsoleteControl { .. }]));
-        let completion = supervisor.drain_one(&mut sink).expect("completion").expect("completion outcome");
-        assert!(matches!(completion.commands.as_slice(), [TransportCommand::ReconnectAfter { .. }]));
-        assert_eq!(supervisor.snapshot(binding.id).expect("advanced").tag.connection.get(), 2);
+        assert!(matches!(
+            pong.events.as_slice(),
+            [SupervisorEvent::ObsoleteControl { .. }]
+        ));
+        let completion = supervisor
+            .drain_one(&mut sink)
+            .expect("completion")
+            .expect("completion outcome");
+        assert!(matches!(
+            completion.commands.as_slice(),
+            [TransportCommand::ReconnectAfter { .. }]
+        ));
+        assert_eq!(
+            supervisor
+                .snapshot(binding.id)
+                .expect("advanced")
+                .tag
+                .connection
+                .get(),
+            2
+        );
         assert!(supervisor.drain_one(&mut sink).expect("empty").is_none());
     }
 }
@@ -3618,14 +3766,30 @@ fn timeout_before_queued_pong_remains_terminal_under_fifo_policy() {
 fn connected_schedule_replacement_cancels_already_queued_ping_timer() {
     let binding = stream_binding(1, 1, 1, "BTCUSDT");
     let (mut supervisor, mut sink, old_due) = q2_connected_fixture(&binding);
-    supervisor.queue_connected(binding.connection_id, binding.tag.connection, stamp(old_due - 1)).expect("queued Connected");
-    supervisor.queue_tick(stamp(old_due)).expect("old ping schedule");
-    let connected = supervisor.drain_one(&mut sink).expect("Connected replacement").expect("Connected outcome");
+    supervisor
+        .queue_connected(
+            binding.connection_id,
+            binding.tag.connection,
+            stamp(old_due - 1),
+        )
+        .expect("queued Connected");
+    supervisor
+        .queue_tick(stamp(old_due))
+        .expect("old ping schedule");
+    let connected = supervisor
+        .drain_one(&mut sink)
+        .expect("Connected replacement")
+        .expect("Connected outcome");
     assert_eq!(connected.commands.len(), 1);
-    let obsolete = supervisor.drain_one(&mut sink).expect("obsolete timer").expect("timer outcome");
+    let obsolete = supervisor
+        .drain_one(&mut sink)
+        .expect("obsolete timer")
+        .expect("timer outcome");
     q2_assert_timer_only(&obsolete);
     let new_due = old_due - 1 + HEARTBEAT_INTERVAL_NS;
-    supervisor.queue_tick(stamp(new_due - 1)).expect("before replaced due");
+    supervisor
+        .queue_tick(stamp(new_due - 1))
+        .expect("before replaced due");
     assert_eq!(supervisor.queued_items(), 0);
     supervisor.queue_tick(stamp(new_due)).expect("replaced due");
     assert_eq!(q2_ping_count(&drain_all(&mut supervisor, &mut sink)), 1);
@@ -3644,30 +3808,89 @@ fn disconnect_cancels_queued_timeout_without_duplicate_down_or_close() {
     let deadline = q2_send_initial_ping(&mut supervisor, &mut sink, ping_due);
     let prefix_len = sink.frames.len();
     supervisor
-        .queue_disconnected(binding.connection_id, binding.tag.connection, stamp(deadline - 1))
+        .queue_disconnected(
+            binding.connection_id,
+            binding.tag.connection,
+            stamp(deadline - 1),
+        )
         .expect("disconnect before timeout observation");
-    supervisor.queue_tick(stamp(deadline)).expect("queued timeout behind Down");
-    let down = supervisor.drain_one(&mut sink).expect("Down").expect("Down outcome");
-    assert_eq!(down.commands, vec![TransportCommand::Close { connection: binding.connection_id, epoch: binding.tag.connection }]);
-    let timer = supervisor.drain_one(&mut sink).expect("canceled timeout").expect("Timer outcome");
+    supervisor
+        .queue_tick(stamp(deadline))
+        .expect("queued timeout behind Down");
+    let down = supervisor
+        .drain_one(&mut sink)
+        .expect("Down")
+        .expect("Down outcome");
+    assert_eq!(
+        down.commands,
+        vec![TransportCommand::Close {
+            connection: binding.connection_id,
+            epoch: binding.tag.connection
+        }]
+    );
+    let timer = supervisor
+        .drain_one(&mut sink)
+        .expect("canceled timeout")
+        .expect("Timer outcome");
     q2_assert_timer_only(&timer);
-    assert_eq!(supervisor.snapshot(binding.id).expect("pending").tag, binding.tag);
-    let completed = supervisor.drain_one(&mut sink).expect("completion").expect("completion outcome");
-    assert!(matches!(completed.commands.as_slice(), [TransportCommand::ReconnectAfter { .. }]));
-    assert_eq!(supervisor.snapshot(binding.id).expect("advanced").tag.connection.get(), 2);
-    assert_eq!(sink.frames[prefix_len..].iter().filter(|frame| matches!(
-        &frame.value,
-        Record::Control(ControlRecord { value: Control::Transport { value: Transport::Down, .. }, .. })
-    )).count(), 1);
+    assert_eq!(
+        supervisor.snapshot(binding.id).expect("pending").tag,
+        binding.tag
+    );
+    let completed = supervisor
+        .drain_one(&mut sink)
+        .expect("completion")
+        .expect("completion outcome");
+    assert!(matches!(
+        completed.commands.as_slice(),
+        [TransportCommand::ReconnectAfter { .. }]
+    ));
+    assert_eq!(
+        supervisor
+            .snapshot(binding.id)
+            .expect("advanced")
+            .tag
+            .connection
+            .get(),
+        2
+    );
+    assert_eq!(
+        sink.frames[prefix_len..]
+            .iter()
+            .filter(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Transport {
+                        value: Transport::Down,
+                        ..
+                    },
+                    ..
+                })
+            ))
+            .count(),
+        1
+    );
     assert!(supervisor.drain_one(&mut sink).expect("empty").is_none());
 }
 
 impl RecordSink for Q2TimerFaultSink {
-    fn persist(&mut self, frame: &RecordFrame, required_gate: RecordingGate) -> Result<PersistenceReceipt, PersistError> {
+    fn persist(
+        &mut self,
+        frame: &RecordFrame,
+        required_gate: RecordingGate,
+    ) -> Result<PersistenceReceipt, PersistError> {
         self.attempts.push(frame.clone());
-        assert!(matches!(&frame.value, Record::Control(ControlRecord { value: Control::Timer { .. }, .. })));
+        assert!(matches!(
+            &frame.value,
+            Record::Control(ControlRecord {
+                value: Control::Timer { .. },
+                ..
+            })
+        ));
         match self.fault {
-            EpochPersistenceFault::Persist => Err(PersistError::new("injected timer persistence error")),
+            EpochPersistenceFault::Persist => {
+                Err(PersistError::new("injected timer persistence error"))
+            }
             EpochPersistenceFault::ReceiptMismatch => Ok(PersistenceReceipt {
                 through: frame.record_no.checked_next().expect("mismatch"),
                 achieved: required_gate,
@@ -3684,7 +3907,11 @@ impl RecordSink for Q2TimerFaultSink {
 fn active_and_canceled_timers_preserve_all_storage_failure_dispositions() {
     for timeout in [false, true] {
         for canceled in [false, true] {
-            for fault in [EpochPersistenceFault::Persist, EpochPersistenceFault::ReceiptMismatch, EpochPersistenceFault::InsufficientGate] {
+            for fault in [
+                EpochPersistenceFault::Persist,
+                EpochPersistenceFault::ReceiptMismatch,
+                EpochPersistenceFault::InsufficientGate,
+            ] {
                 let binding = stream_binding(1, 1, 1, "BTCUSDT");
                 let (mut supervisor, mut memory, ping_due) = q2_connected_fixture(&binding);
                 let due = if timeout {
@@ -3693,31 +3920,85 @@ fn active_and_canceled_timers_preserve_all_storage_failure_dispositions() {
                     ping_due
                 };
                 if canceled {
-                    supervisor.queue_text(binding.connection_id, binding.tag.connection, stamp(due - 1), b"pong".to_vec()).expect("Pong before timer");
+                    supervisor
+                        .queue_text(
+                            binding.connection_id,
+                            binding.tag.connection,
+                            stamp(due - 1),
+                            b"pong".to_vec(),
+                        )
+                        .expect("Pong before timer");
                 }
-                supervisor.queue_tick(stamp(due)).expect("timer observation");
+                supervisor
+                    .queue_tick(stamp(due))
+                    .expect("timer observation");
                 if canceled {
-                    supervisor.drain_one(&mut memory).expect("accept Pong").expect("Pong outcome");
+                    supervisor
+                        .drain_one(&mut memory)
+                        .expect("accept Pong")
+                        .expect("Pong outcome");
                 }
-                let before = supervisor.snapshot(binding.id).expect("state before failure");
+                let before = supervisor
+                    .snapshot(binding.id)
+                    .expect("state before failure");
                 let durable_prefix = memory.frames;
-                let mut sink = Q2TimerFaultSink { fault, attempts: Vec::new(), confirmed: durable_prefix.clone() };
-                let error = supervisor.drain_one(&mut sink).expect_err("timer error is explicit");
-                let attempted = sink.attempts.first().expect("one unconfirmed Timer attempt");
+                let mut sink = Q2TimerFaultSink {
+                    fault,
+                    attempts: Vec::new(),
+                    confirmed: durable_prefix.clone(),
+                };
+                let error = supervisor
+                    .drain_one(&mut sink)
+                    .expect_err("timer error is explicit");
+                let attempted = sink
+                    .attempts
+                    .first()
+                    .expect("one unconfirmed Timer attempt");
                 let expected = match fault {
-                    EpochPersistenceFault::Persist => SupervisorError::Persistence(PersistError::new("injected timer persistence error")),
-                    EpochPersistenceFault::ReceiptMismatch => SupervisorError::PersistenceReceiptMismatch { expected: attempted.record_no, actual: attempted.record_no.checked_next().expect("actual") },
-                    EpochPersistenceFault::InsufficientGate => SupervisorError::PersistenceGateTooWeak { required: RecordingGate::Durable, achieved: RecordingGate::Written },
+                    EpochPersistenceFault::Persist => SupervisorError::Persistence(
+                        PersistError::new("injected timer persistence error"),
+                    ),
+                    EpochPersistenceFault::ReceiptMismatch => {
+                        SupervisorError::PersistenceReceiptMismatch {
+                            expected: attempted.record_no,
+                            actual: attempted.record_no.checked_next().expect("actual"),
+                        }
+                    }
+                    EpochPersistenceFault::InsufficientGate => {
+                        SupervisorError::PersistenceGateTooWeak {
+                            required: RecordingGate::Durable,
+                            achieved: RecordingGate::Written,
+                        }
+                    }
                 };
                 assert_eq!(error, expected);
                 assert!(supervisor.is_halted());
-                assert_eq!(supervisor.snapshot(binding.id).expect("no operation committed"), before);
+                assert_eq!(
+                    supervisor
+                        .snapshot(binding.id)
+                        .expect("no operation committed"),
+                    before
+                );
                 assert_eq!(sink.confirmed, durable_prefix);
                 assert_eq!(sink.attempts.len(), 1);
                 for _ in 0..3 {
-                    assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
-                    assert_eq!(supervisor.queue_tick(stamp(due + 1)), Err(SupervisorError::Halted));
-                    assert_eq!(supervisor.queue_text(binding.connection_id, binding.tag.connection, stamp(due + 1), b"pong".to_vec()), Err(SupervisorError::Halted));
+                    assert_eq!(
+                        supervisor.drain_one(&mut sink),
+                        Err(SupervisorError::Halted)
+                    );
+                    assert_eq!(
+                        supervisor.queue_tick(stamp(due + 1)),
+                        Err(SupervisorError::Halted)
+                    );
+                    assert_eq!(
+                        supervisor.queue_text(
+                            binding.connection_id,
+                            binding.tag.connection,
+                            stamp(due + 1),
+                            b"pong".to_vec()
+                        ),
+                        Err(SupervisorError::Halted)
+                    );
                 }
                 assert_eq!(sink.attempts.len(), 1);
                 assert_eq!(sink.confirmed, durable_prefix);
@@ -3739,7 +4020,12 @@ fn q1_blocker_capture(
 ) {
     connect_one(supervisor, sink, binding, at);
     supervisor
-        .queue_text(binding.connection_id, binding.tag.connection, stamp(at + 1), ack(symbol))
+        .queue_text(
+            binding.connection_id,
+            binding.tag.connection,
+            stamp(at + 1),
+            ack(symbol),
+        )
         .expect("ack ingress");
     drain_all(supervisor, sink);
     supervisor
@@ -3776,7 +4062,10 @@ fn q1_blocker_next_generation(
         1
     );
     let mut next = binding.clone();
-    next.tag = supervisor.snapshot(binding.id).expect("advanced stream").tag;
+    next.tag = supervisor
+        .snapshot(binding.id)
+        .expect("advanced stream")
+        .tag;
     assert_eq!(next.tag.connection.get(), 2);
     next
 }
@@ -3814,7 +4103,13 @@ fn q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse() {
     let current = q1_blocker_next_generation(&mut supervisor, &mut sink, &old, 1);
     let at = RECONNECT_MAX_NS_V1 + 100;
     q1_blocker_capture(&mut supervisor, &mut sink, &current, "BTCUSDT", at);
-    assert_eq!(supervisor.snapshot(old.id).expect("state").capture_attempt_frontier, 2);
+    assert_eq!(
+        supervisor
+            .snapshot(old.id)
+            .expect("state")
+            .capture_attempt_frontier,
+        2
+    );
     let persisted_before = sink.frames.len();
 
     for index in 0..5 {
@@ -3838,12 +4133,20 @@ fn q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse() {
     let consumed_candidate = before_loss.capture_attempt_frontier + 1;
     assert_eq!(consumed_candidate, 8);
     assert_eq!(
-        supervisor.queue_text(current.connection_id, current.tag.connection, stamp(at + 20), b"{".to_vec()),
+        supervisor.queue_text(
+            current.connection_id,
+            current.tag.connection,
+            stamp(at + 20),
+            b"{".to_vec()
+        ),
         Err(SupervisorError::QueueExhausted { stream: old.id })
     );
     // Required behavior is FAIL: the current received input has no retained GAP,
     // no frontier commit, no invalidation, and no terminal capture disposition.
-    assert_eq!(supervisor.snapshot(old.id).expect("unsafe unchanged state"), before_loss);
+    assert_eq!(
+        supervisor.snapshot(old.id).expect("unsafe unchanged state"),
+        before_loss
+    );
     assert_eq!(supervisor.queued_items(), 5);
     assert!(!supervisor.is_halted());
     let results = drain_all(&mut supervisor, &mut sink);
@@ -3855,13 +4158,17 @@ fn q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse() {
     assert_eq!(diagnostics.len(), 10);
     assert_eq!(q1_blocker_retained_raw_bytes(diagnostics), 0);
     for (index, pair) in diagnostics.chunks_exact(2).enumerate() {
-        let Record::RawInput(raw) = &pair[0].value else { panic!("empty stale raw first"); };
+        let Record::RawInput(raw) = &pair[0].value else {
+            panic!("empty stale raw first");
+        };
         assert_eq!(raw.stream, old.id);
         assert_eq!(raw.tag, old.tag);
         assert_eq!(raw.attempt.get(), 3 + index as u64);
         assert_eq!(raw.context.monotonic_ns.get(), at + 10 + index as u64);
         assert!(raw.bytes.is_empty());
-        let Record::Gap(gap) = &pair[1].value else { panic!("diagnostic follows raw"); };
+        let Record::Gap(gap) = &pair[1].value else {
+            panic!("diagnostic follows raw");
+        };
         assert_eq!(gap.reason, Reason::Unknown);
         let target = q1_blocker_target(gap);
         assert_eq!(target.stream, old.id);
@@ -3874,17 +4181,29 @@ fn q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse() {
 
     let suffix = update("BTCUSDT", 10, 11);
     supervisor
-        .queue_text(current.connection_id, current.tag.connection, stamp(at + 30), suffix.clone())
+        .queue_text(
+            current.connection_id,
+            current.tag.connection,
+            stamp(at + 30),
+            suffix.clone(),
+        )
         .expect("unsafe suffix still admitted");
-    let suffix_result = supervisor.drain_one(&mut sink).expect("suffix drain").expect("suffix result");
+    let suffix_result = supervisor
+        .drain_one(&mut sink)
+        .expect("suffix drain")
+        .expect("suffix result");
     assert!(suffix_result.events.iter().any(|event| matches!(event,
         SupervisorEvent::RawBookRecorded { attempt, continuity: ContinuityOutcome::Continuous { .. }, .. }
         if attempt.get() == consumed_candidate)));
-    let Record::RawInput(raw) = &sink.frames.last().expect("suffix raw").value else { panic!("suffix raw"); };
+    let Record::RawInput(raw) = &sink.frames.last().expect("suffix raw").value else {
+        panic!("suffix raw");
+    };
     assert_eq!(raw.attempt.get(), consumed_candidate);
     assert_eq!(raw.bytes, suffix);
     assert_eq!(raw.tag, current.tag);
-    let state = supervisor.snapshot(old.id).expect("unsafe continuing capture");
+    let state = supervisor
+        .snapshot(old.id)
+        .expect("unsafe continuing capture");
     assert_eq!(state.capture_attempt_frontier, consumed_candidate);
     assert_eq!(state.subscription, SubscriptionState::CapturingRaw);
     assert_eq!(state.queued_raw_frames, 0);
@@ -3903,7 +4222,11 @@ fn q1_blocker_two_stream_legal_nine_stale_a_suppresses_first_b_loss() {
         max_raw_message_bytes: 65536,
         max_total_items: 9,
     };
-    let mut supervisor = supervisor(vec![old_a.clone(), b.clone()], policy, RecordingGate::Durable);
+    let mut supervisor = supervisor(
+        vec![old_a.clone(), b.clone()],
+        policy,
+        RecordingGate::Durable,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     let a = q1_blocker_next_generation(&mut supervisor, &mut sink, &old_a, 1);
@@ -3915,20 +4238,40 @@ fn q1_blocker_two_stream_legal_nine_stale_a_suppresses_first_b_loss() {
 
     for index in 0..9 {
         supervisor
-            .queue_text(old_a.connection_id, old_a.tag.connection, stamp(at + 10 + index), vec![b'x'; 1_100_000])
+            .queue_text(
+                old_a.connection_id,
+                old_a.tag.connection,
+                stamp(at + 10 + index),
+                vec![b'x'; 1_100_000],
+            )
             .expect("stale a diagnostic");
         assert_eq!(supervisor.queued_items(), index as usize + 1);
         let state = supervisor.snapshot(a.id).expect("a bounded");
         assert_eq!(state.capture_attempt_frontier, 3 + index);
         assert_eq!(state.queued_raw_frames, 0);
         assert_eq!(state.queued_raw_bytes, 0);
-        assert_eq!(supervisor.snapshot(b.id).expect("b unaffected before rejection"), b_before);
+        assert_eq!(
+            supervisor
+                .snapshot(b.id)
+                .expect("b unaffected before rejection"),
+            b_before
+        );
     }
     assert_eq!(
-        supervisor.queue_text(b.connection_id, b.tag.connection, stamp(at + 20), b"{".to_vec()),
+        supervisor.queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(at + 20),
+            b"{".to_vec()
+        ),
         Err(SupervisorError::QueueExhausted { stream: b.id })
     );
-    assert_eq!(supervisor.snapshot(b.id).expect("b lost attempt not committed"), b_before);
+    assert_eq!(
+        supervisor
+            .snapshot(b.id)
+            .expect("b lost attempt not committed"),
+        b_before
+    );
     assert!(!supervisor.is_halted());
     let results = drain_all(&mut supervisor, &mut sink);
     assert_eq!(results.len(), 9);
@@ -3937,27 +4280,42 @@ fn q1_blocker_two_stream_legal_nine_stale_a_suppresses_first_b_loss() {
     assert_eq!(diagnostics.len(), 18);
     assert_eq!(q1_blocker_retained_raw_bytes(diagnostics), 0);
     for (index, pair) in diagnostics.chunks_exact(2).enumerate() {
-        let Record::RawInput(raw) = &pair[0].value else { panic!("a stale raw"); };
+        let Record::RawInput(raw) = &pair[0].value else {
+            panic!("a stale raw");
+        };
         assert_eq!(raw.stream, a.id);
         assert_eq!(raw.tag, old_a.tag);
         assert_eq!(raw.attempt.get(), 3 + index as u64);
         assert_eq!(raw.context.monotonic_ns.get(), at + 10 + index as u64);
-        let Record::Gap(gap) = &pair[1].value else { panic!("a diagnostic"); };
+        let Record::Gap(gap) = &pair[1].value else {
+            panic!("a diagnostic");
+        };
         assert_eq!(gap.reason, Reason::Unknown);
         assert_eq!(q1_blocker_target(gap).stream, a.id);
     }
     assert!(diagnostics.iter().all(|frame| !matches!(&frame.value,
         Record::Gap(gap) if q1_blocker_target(gap).stream == b.id)));
     supervisor
-        .queue_text(b.connection_id, b.tag.connection, stamp(at + 30), update("ETHUSDT", 10, 11))
+        .queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(at + 30),
+            update("ETHUSDT", 10, 11),
+        )
         .expect("b unsafe continuation");
-    let result = supervisor.drain_one(&mut sink).expect("b drain").expect("b result");
+    let result = supervisor
+        .drain_one(&mut sink)
+        .expect("b drain")
+        .expect("b result");
     assert!(result.events.iter().any(|event| matches!(event,
         SupervisorEvent::RawBookRecorded { stream, attempt, continuity: ContinuityOutcome::Continuous { .. }, .. }
         if *stream == b.id && attempt.get() == b_before.capture_attempt_frontier + 1)));
     let state = supervisor.snapshot(b.id).expect("b suffix state");
     assert_eq!(state.subscription, SubscriptionState::CapturingRaw);
-    assert_eq!(state.capture_attempt_frontier, b_before.capture_attempt_frontier + 1);
+    assert_eq!(
+        state.capture_attempt_frontier,
+        b_before.capture_attempt_frontier + 1
+    );
     assert_eq!(state.queued_raw_frames, 0);
     assert_eq!(state.queued_raw_bytes, 0);
     assert_eq!(supervisor.queued_items(), 0);
@@ -3974,7 +4332,11 @@ fn q1_blocker_noncoalescing_saturation_preserves_admitted_raw_control_and_exact_
         max_raw_message_bytes: 65536,
         max_total_items: 9,
     };
-    let mut supervisor = supervisor(vec![old_a.clone(), old_b.clone()], policy, RecordingGate::Durable);
+    let mut supervisor = supervisor(
+        vec![old_a.clone(), old_b.clone()],
+        policy,
+        RecordingGate::Durable,
+    );
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     let a = q1_blocker_next_generation(&mut supervisor, &mut sink, &old_a, 1);
@@ -3984,15 +4346,73 @@ fn q1_blocker_noncoalescing_saturation_preserves_admitted_raw_control_and_exact_
     q1_blocker_capture(&mut supervisor, &mut sink, &b, "ETHUSDT", at + 3);
     let persisted_before = sink.frames.len();
     let raw = update("BTCUSDT", 10, 11);
-    supervisor.queue_text(a.connection_id, a.tag.connection, stamp(at + 10), raw.clone()).expect("raw admitted");
-    supervisor.queue_connected(b.connection_id, b.tag.connection, stamp(at + 11)).expect("control barrier");
-    supervisor.queue_text(a.connection_id, old_a.tag.connection, stamp(at + 12), vec![b'x'; 1_100_000]).expect("old a attempt4");
-    supervisor.queue_text(a.connection_id, a.tag.connection, stamp(at + 13), b"{".to_vec()).expect("a loss5");
-    supervisor.queue_text(b.connection_id, b.tag.connection, stamp(at + 14), b"{".to_vec()).expect("b loss3");
-    supervisor.queue_text(a.connection_id, old_a.tag.connection, stamp(at + 15), vec![b'x'; 1_100_000]).expect("old a attempt6");
-    supervisor.queue_text(a.connection_id, a.tag.connection, stamp(at + 16), b"{".to_vec()).expect("a loss7");
-    supervisor.queue_text(b.connection_id, old_b.tag.connection, stamp(at + 17), vec![b'x'; 1_100_000]).expect("old b attempt4");
-    supervisor.queue_text(b.connection_id, b.tag.connection, stamp(at + 18), b"{".to_vec()).expect("b loss5");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(at + 10),
+            raw.clone(),
+        )
+        .expect("raw admitted");
+    supervisor
+        .queue_connected(b.connection_id, b.tag.connection, stamp(at + 11))
+        .expect("control barrier");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            old_a.tag.connection,
+            stamp(at + 12),
+            vec![b'x'; 1_100_000],
+        )
+        .expect("old a attempt4");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(at + 13),
+            b"{".to_vec(),
+        )
+        .expect("a loss5");
+    supervisor
+        .queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(at + 14),
+            b"{".to_vec(),
+        )
+        .expect("b loss3");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            old_a.tag.connection,
+            stamp(at + 15),
+            vec![b'x'; 1_100_000],
+        )
+        .expect("old a attempt6");
+    supervisor
+        .queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(at + 16),
+            b"{".to_vec(),
+        )
+        .expect("a loss7");
+    supervisor
+        .queue_text(
+            b.connection_id,
+            old_b.tag.connection,
+            stamp(at + 17),
+            vec![b'x'; 1_100_000],
+        )
+        .expect("old b attempt4");
+    supervisor
+        .queue_text(
+            b.connection_id,
+            b.tag.connection,
+            stamp(at + 18),
+            b"{".to_vec(),
+        )
+        .expect("b loss5");
     assert_eq!(supervisor.queued_items(), 9);
     let a_before = supervisor.snapshot(a.id).expect("a charged");
     assert_eq!(a_before.capture_attempt_frontier, 7);
@@ -4002,12 +4422,34 @@ fn q1_blocker_noncoalescing_saturation_preserves_admitted_raw_control_and_exact_
     assert_eq!(b_before.capture_attempt_frontier, 5);
     assert_eq!(b_before.queued_raw_frames, 0);
     assert_eq!(b_before.queued_raw_bytes, 0);
-    assert_eq!(supervisor.queue_text(a.connection_id, a.tag.connection, stamp(at + 19), b"{".to_vec()),
-        Err(SupervisorError::QueueExhausted { stream: a.id }));
-    assert_eq!(supervisor.snapshot(a.id).expect("uncommitted attempt8"), a_before);
-    assert_eq!(supervisor.queue_text(a.connection_id, a.tag.connection, stamp(at + 20), b"{".to_vec()),
-        Err(SupervisorError::QueueExhausted { stream: a.id }));
-    assert_eq!(supervisor.snapshot(a.id).expect("second consumed input also reuses candidate8"), a_before);
+    assert_eq!(
+        supervisor.queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(at + 19),
+            b"{".to_vec()
+        ),
+        Err(SupervisorError::QueueExhausted { stream: a.id })
+    );
+    assert_eq!(
+        supervisor.snapshot(a.id).expect("uncommitted attempt8"),
+        a_before
+    );
+    assert_eq!(
+        supervisor.queue_text(
+            a.connection_id,
+            a.tag.connection,
+            stamp(at + 20),
+            b"{".to_vec()
+        ),
+        Err(SupervisorError::QueueExhausted { stream: a.id })
+    );
+    assert_eq!(
+        supervisor
+            .snapshot(a.id)
+            .expect("second consumed input also reuses candidate8"),
+        a_before
+    );
     assert_eq!(supervisor.queued_items(), 9);
     assert!(!supervisor.is_halted());
 
@@ -4015,33 +4457,63 @@ fn q1_blocker_noncoalescing_saturation_preserves_admitted_raw_control_and_exact_
     assert_eq!(results.len(), 9);
     let returned_commands: Vec<_> = results.iter().flat_map(|result| &result.commands).collect();
     assert_eq!(returned_commands.len(), 1);
-    assert!(matches!(returned_commands[0], TransportCommand::SendText { connection, epoch, text }
-        if *connection == b.connection_id && *epoch == b.tag.connection && text.contains("subscribe")));
+    assert!(
+        matches!(returned_commands[0], TransportCommand::SendText { connection, epoch, text }
+        if *connection == b.connection_id && *epoch == b.tag.connection && text.contains("subscribe"))
+    );
     let frames = &sink.frames[persisted_before..];
     assert_eq!(frames.len(), 12);
     assert_eq!(q1_blocker_retained_raw_bytes(frames), raw.len());
-    let Record::RawInput(admitted) = &frames[0].value else { panic!("raw must not be evicted/reordered"); };
+    let Record::RawInput(admitted) = &frames[0].value else {
+        panic!("raw must not be evicted/reordered");
+    };
     assert_eq!(admitted.bytes, raw);
     assert_eq!(admitted.attempt.get(), 3);
     assert!(matches!(&frames[1].value, Record::Control(ControlRecord {
         value: Control::Transport { connection, epoch, value: Transport::Up }, ..
     }) if *connection == b.connection_id && *epoch == b.tag.connection));
 
-    let loss_ranges: Vec<_> = frames.iter().filter_map(|frame| match &frame.value {
-        Record::Gap(gap) if gap.reason == Reason::QueueOverflow => {
-            let target = q1_blocker_target(gap);
-            let (first, last) = target.range.expect("known exact range");
-            assert_eq!(target.loss_count, Some(1));
-            Some((target.stream, target.tag, first.get(), last.get()))
-        }
-        _ => None,
-    }).collect();
-    assert_eq!(loss_ranges, vec![(a.id, a.tag, 5, 5), (b.id, b.tag, 3, 3), (a.id, a.tag, 7, 7), (b.id, b.tag, 5, 5)]);
-    let stale_raw: Vec<_> = frames.iter().filter_map(|frame| match &frame.value {
-        Record::RawInput(raw) if raw.bytes.is_empty() => Some((raw.stream, raw.tag, raw.attempt.get(), raw.context.monotonic_ns.get())),
-        _ => None,
-    }).collect();
-    assert_eq!(stale_raw, vec![(a.id, old_a.tag, 4, at + 12), (a.id, old_a.tag, 6, at + 15), (b.id, old_b.tag, 4, at + 17)]);
+    let loss_ranges: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match &frame.value {
+            Record::Gap(gap) if gap.reason == Reason::QueueOverflow => {
+                let target = q1_blocker_target(gap);
+                let (first, last) = target.range.expect("known exact range");
+                assert_eq!(target.loss_count, Some(1));
+                Some((target.stream, target.tag, first.get(), last.get()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        loss_ranges,
+        vec![
+            (a.id, a.tag, 5, 5),
+            (b.id, b.tag, 3, 3),
+            (a.id, a.tag, 7, 7),
+            (b.id, b.tag, 5, 5)
+        ]
+    );
+    let stale_raw: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match &frame.value {
+            Record::RawInput(raw) if raw.bytes.is_empty() => Some((
+                raw.stream,
+                raw.tag,
+                raw.attempt.get(),
+                raw.context.monotonic_ns.get(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stale_raw,
+        vec![
+            (a.id, old_a.tag, 4, at + 12),
+            (a.id, old_a.tag, 6, at + 15),
+            (b.id, old_b.tag, 4, at + 17)
+        ]
+    );
     assert_eq!(supervisor.queued_items(), 0);
     for binding in [&a, &b] {
         let state = supervisor.snapshot(binding.id).expect("drained accounting");
