@@ -718,3 +718,315 @@ Target worker stop state after the containing-head CI succeeds:
 **READY_FOR_INDEPENDENT_QA**. The worker does not declare
 READY_FOR_OWNER_REVIEW.
 
+## Third independent-QA CHANGES_REQUIRED remediation
+
+The third full independent QA reviewed exact immutable head
+`ac6f0b74776ad597ce523a5825bd9fa3c4fa1352` and returned
+**CHANGES_REQUIRED** for three transition-safety findings:
+
+- **N1 HIGH** — reconnect/control completion was not atomic with respect to late deterministic time arithmetic failures;
+- **N2 HIGH** — already queued same-generation control ingress could revive a generation after terminal Down;
+- **N3 MEDIUM** — epoch/RecordNo exhaustion could leave a non-halted or endlessly retryable incomplete transition.
+
+The same QA explicitly confirmed the earlier remediation set as fixed: F1 stale
+raw boundedness, F2 sustained overflow/no global halt, F3 exact target identity,
+F4 canonical single writer, original QueueOverflow-before-advance ordering, F6
+architecture anti-bypass, repeated disconnect ownership, timeout+disconnect
+ownership, empty-queue completion, and stale post-transition disconnect rejection.
+
+This remediation continues the existing Issue #20 / claim / branch / PR #34
+lineage with fast-forward commits only. No replacement claim, Issue, branch or
+PR was created. No force-push, merge or auto-merge was performed.
+
+### N1 — transition atomicity / derived-time failures
+
+Disposition: **FIXED**.
+
+Transition-critical deterministic calculations are now performed before the
+irreversible part of their transition.
+
+For ordinary live controls:
+
+- connected path computes `receive + HEARTBEAT_INTERVAL_NS` before persisting
+  `Transport::Up`;
+- pong path computes the next heartbeat deadline before persisting a new Up;
+- ping-timer path computes `receive + PONG_TIMEOUT_NS_V1` before persisting the
+  timer or emitting `SendText("ping")`;
+- overflow in any of those calculations sets the supervisor to explicit
+  fail-closed `halted` and returns `TimeOverflow` before the corresponding
+  new control record/state/live command.
+
+For disconnect/reconnect:
+
+`preflight_disconnect()` constructs a complete bounded pending plan before the
+first terminal Down record for a new transition. The plan contains:
+
+- the expected connection epoch;
+- BookId;
+- checked next connection epoch;
+- checked next subscription epoch;
+- checked next book epoch;
+- checked increment of the reconnect-failure counter;
+- deterministic reconnect delay;
+- checked reconnect-not-before monotonic time.
+
+It also preflights the required RecordNo capacity for the Down plus all three
+epoch-advance records (or the smaller duplicate-Down case).
+
+`finish_disconnect()` then:
+
+1. validates the stored plan against still-current identity before persistence;
+2. preflights capacity for all three epoch records;
+3. persists connection/subscription/book epoch advances without mutating runtime
+   identity between those persistence calls;
+4. only after all three RecordingGate receipts succeed mutates the runtime to the
+   new generation, clears pending ownership and exposes the single
+   `ReconnectAfter` command.
+
+There is no reconnect deadline/counter/epoch arithmetic after the epoch records
+or runtime generation have been committed.
+
+If a storage persistence/gate operation itself fails during the multi-record
+completion, the existing persistence failure path halts fail-closed; in-memory
+runtime is not partially advanced. Any already persisted WAL prefix remains an
+honest incomplete prefix rather than being hidden or retried as if unrecorded.
+
+Timer admission was also tightened: TimerId is checked before queue mutation,
+and timer frontier/queued flags are committed only after bounded ingress
+admission succeeds.
+
+### N1 targeted regressions
+
+Added and executed:
+
+- `disconnect_at_max_monotonic_halts_before_down_or_generation_commit`;
+- `disconnect_near_reconnect_deadline_overflow_halts_before_down`;
+- `connected_heartbeat_deadline_overflow_halts_before_up_or_subscribe`;
+- `pong_heartbeat_deadline_overflow_halts_before_new_up_record`;
+- `ping_timer_pong_deadline_overflow_halts_before_timer_or_ping`.
+
+They cover exact `u64::MAX`, near reconnect-deadline overflow, connected,
+pong and ping-timer deadline overflow. Each requires either no irreversible
+transition record/state at all or explicit fail-closed halt; none leaves a
+non-halted stranded generation or loses a required command after a late
+deterministic calculation.
+
+### N2 — terminal-generation control rule
+
+Disposition: **FIXED**.
+
+After the first accepted terminal Down for connection epoch N, already queued
+ingress for epoch N is separated into diagnostic persistence from operational
+effects.
+
+- queued `Connected(N)` no longer persists a new `Transport::Up`, no longer
+  sets runtime Up/AwaitingAck, and never emits a stale subscribe;
+- queued `Pong(N)` no longer persists a new Up, changes heartbeat state, or
+  emits a live effect;
+- both are consumed explicitly as
+  `SupervisorEvent::ObsoleteControl { stream, epoch }`;
+- queued `PingTimer(N)` remains truthfully recordable through the accepted
+  `Control::Timer`, but does not emit ping and does not install a pong deadline;
+- a queued PongTimeout remains recordable as Timer plus the existing duplicate
+  terminal Down semantics and cannot own a second transition;
+- raw input admitted for the pending terminal generation is still persisted with
+  exact raw provenance, but is returned as `ObsoleteRawRecorded` and is not
+  decoded into subscription/market-state progression;
+- QueueOverflow provenance remains recorded/degraded under the previously fixed
+  ordering and still acts as a persistence barrier.
+
+The accepted WAL/domain contract has no no-effect "obsolete connected/pong"
+transport record. Persisting `Transport::Up` before epoch advance would replay
+as an operational Up and violate the terminal-generation rule. REC-001D therefore
+does **not** invent a new WAL/domain record or falsely encode the observation as
+Up/Down/Gap. It surfaces the consumed control explicitly at the supervisor API
+as `ObsoleteControl`, with no WAL Up and no live command. Timer observations,
+which do have a truthful existing no-revive record, continue to be persisted.
+
+This is an explicit runtime diagnostic boundary, not a claim that an obsolete
+Connected/Pong has a replayable WAL record kind.
+
+### N2 targeted regressions
+
+Added and executed:
+
+- `terminal_down_suppresses_queued_connected_without_subscribe_or_up_record`;
+- `terminal_timeout_suppresses_queued_pong_without_up_or_heartbeat_revival`;
+- `terminal_down_records_queued_ping_timer_without_sending_ping`;
+- `terminal_control_barrier_between_duplicate_disconnects_finishes_once`;
+- `terminal_control_of_one_stream_does_not_block_neighbor_operational_control`.
+
+The tests cover the requested
+`Disconnected -> Connected -> Disconnected`,
+`PongTimeout -> Pong`,
+`Disconnected -> PingTimer`,
+control-as-barrier ordering, and multi-stream isolation. They prove one logical
+generation advance/reconnect, terminal Down preservation, no stale subscribe or
+ping, and independent neighbor control.
+
+The prior raw barrier regression remains in the same suite and now also benefits
+from terminal raw diagnostic treatment.
+
+### N3 — epoch / RecordNo / transition-critical counter exhaustion
+
+Disposition: **FIXED**.
+
+Counter exhaustion is now explicit terminal safety behavior.
+
+Epoch exhaustion:
+
+- ConnectionEpoch, SubscriptionEpoch and BookEpoch next values are checked in
+  disconnect preflight before terminal Down persistence;
+- any exhaustion sets `halted=true` and returns the accepted
+  `IdentityError::CounterExhausted` without wrapping/resetting the epoch and
+  without starting a partial disconnect transaction.
+
+Reconnect attempt exhaustion:
+
+- `reconnect_failures` no longer uses saturation for transition ownership;
+- the next reconnect attempt uses checked `u32::checked_add`;
+- failure is fail-closed `CounterExhausted("ReconnectAttempt")` before Down.
+
+RecordNo exhaustion:
+
+- supervisor persistence requires a checked successor RecordNo before writing the
+  current frame; it never wraps and does not silently turn the frontier into
+  `None` after a successful max record;
+- `ensure_record_capacity(count)` preflights multi-record disconnect work;
+- insufficient capacity for Down + the complete three-record epoch transition
+  halts before Down;
+- insufficient capacity at a later completion boundary halts before any epoch
+  record from that completion;
+- after an exhaustion error, `ensure_running` makes repeated drain attempts
+  return `Halted`, so there is no non-halted infinite retry loop and no duplicate
+  transition records/live commands.
+
+This is a conservative supervisor safety policy; it does not wrap/reset counters,
+start a new archive, or change the accepted WAL/domain counter contract.
+
+### N3 targeted regressions
+
+Added and executed:
+
+- `max_connection_epoch_disconnect_halts_before_down`;
+- `max_subscription_epoch_disconnect_halts_before_down`;
+- `max_book_epoch_disconnect_halts_before_down`;
+- `max_record_frontier_terminal_disconnect_halts_without_partial_down`;
+- `insufficient_record_capacity_for_full_disconnect_halts_before_down`.
+
+The RecordNo tests also assert repeated drain after exhaustion returns terminal
+Halted behavior without adding records.
+
+### Transition atomicity audit result
+
+The post-repair supervisor was audited specifically for:
+
+- `persist_record(...)?` followed by transition-critical checked time/counter arithmetic;
+- runtime identity mutation between the three epoch persistence operations;
+- pending ownership cleared before the last fallible transition operation;
+- live commands accumulated before a later deterministic calculation could fail;
+- timer/counter mutation before queue admission.
+
+The remaining checked arithmetic after this repair is either pre-persistence
+transition validation or bounded ingress/accounting logic that has not committed
+a reconnect/epoch transition. Reconnect deadline/counter/epoch computations no
+longer occur after the durable transition records or generation mutation.
+
+### Previously fixed coverage retained
+
+The same exact-head test run continues to execute the earlier independently
+confirmed regressions, including:
+
+- 1.1 MB previous-generation oversized payload bounded diagnostic;
+- sustained 32-overflow coalescing to `2..=33` / count 32;
+- neighbor-stream serviceability;
+- exact `bitget/usdt-futures/books50` identity negatives;
+- canonical same-BookRef second-writer rejection;
+- original QueueOverflow-before-epoch-advance regression;
+- repeated same-epoch disconnect ownership;
+- timeout + duplicate disconnect ownership;
+- raw old-generation barrier;
+- empty-queue pending completion;
+- stale post-transition disconnect rejection;
+- architecture namespace/alias/grouped-import anti-bypass tests;
+- accepted `WalWriter/WalReader` definition/control/raw ordering regression.
+
+### Third-remediation changed paths
+
+Relative to third-QA-rejected head
+`ac6f0b74776ad597ce523a5825bd9fa3c4fa1352`, the code/test remediation before
+this documentation commit changes only:
+
+- `crates/market-data/src/ws_supervisor.rs`;
+- `crates/market-data/tests/ws_supervisor.rs`.
+
+This handoff file is the only additional path changed by the final documentation
+commit.
+
+No `crates/domain/**`, `crates/recording/**`, accepted spec/ADR,
+architecture test, workflow, application composition, networking dependency,
+`docs/PROJECT_STATE.md`, canonical-book, strategy or execution path is changed
+by the third remediation.
+
+### Verification during third remediation
+
+Worker-local Rust/shell execution remains unavailable on this connector surface:
+
+- `cargo fmt --all -- --check` — **NOT_RUN locally**;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` —
+  **NOT_RUN locally**;
+- `cargo test --workspace --locked` — **NOT_RUN locally**;
+- live public WebSocket smoke — **NOT_RUN**.
+
+Historical third-remediation runs:
+
+- `37582711865` on
+  `70a72ea4386ad734d20456b8d81cb4fbd75e5ffc` — **FAIL** only because
+  rust-fmt reported layout changes; rust-clippy and rust-tests were **PASS**;
+- `37582833822` on
+  `91e40db756d985ab9e5e3fdbbfc2a661f2ce44f5` — **FAIL** only because
+  rust-fmt reported one remaining layout change; rust-clippy and rust-tests were
+  **PASS**;
+- code-only exact-head run **37582919739** on
+  `5a1d3f851d68f829586010c55c8fe90b0d2c70d7` — **SUCCESS**:
+  rust-fmt PASS, rust-clippy PASS, rust-tests PASS, Cargo.lock verification
+  PASS, workspace build PASS and clean-checkout verification PASS.
+
+The code-only PASS becomes historical after this handoff commit and is not
+transferred to the final documentation-containing SHA.
+
+The earlier run `37541263829` remains historical PASS evidence only for the
+third QA-rejected `ac6f0b...` head.
+
+### Preserved boundaries after third remediation
+
+Unchanged:
+
+- **U-09 UNKNOWN / BLOCKED** — regular books50 quantity unit;
+- **U-10 UNKNOWN / BLOCKED** — zero/delete semantics;
+- **U-20 NOT_PROVEN / FORBIDDEN** — REST<->WS healing/stitching;
+- **C-01 BLOCKED** — RPI canonical normalization;
+- **C-03 UNKNOWN** — instruments-route relationship.
+
+No quantity interpretation, `qty=0 -> DeleteLevel`, REST healing, RPI
+normalization, private/authenticated API, strategy, execution, REC-001E or
+REC-001F was introduced. Concrete DNS/TCP/TLS/WebSocket ownership remains the
+documented external-driver limitation and is not a finding/remediation here.
+
+### Third re-QA gate
+
+After the commit containing this section:
+
+1. obtain the new immutable PR #34 head;
+2. require fresh exact-head GitHub Actions **SUCCESS** for rust-fmt,
+   rust-clippy and rust-tests;
+3. require Cargo.lock verification, workspace build and clean checkout all PASS;
+4. record the exact final SHA/run in PR #34 and Issue #20 mutable metadata;
+5. return the existing PR from Draft to Ready;
+6. run a **full independent QA of the complete new immutable SHA**, not patch-only,
+   with mandatory retest of N1/N2/N3 and all previously fixed findings.
+
+Target worker stop state after containing-head CI succeeds:
+**READY_FOR_INDEPENDENT_QA**. The worker does not declare
+READY_FOR_OWNER_REVIEW.
+
