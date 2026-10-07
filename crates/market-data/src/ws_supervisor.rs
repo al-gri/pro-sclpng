@@ -1781,9 +1781,14 @@ impl PublicWsSupervisor {
                     ))?;
             (runtime.binding.connection_id, runtime.binding.tag, pending)
         };
+        let Some(old_book) = old_tag.book else {
+            return self.halt_with(SupervisorError::InvalidConfiguration(
+                "missing book epoch",
+            ));
+        };
         if old_tag.connection != pending.epoch
             || old_tag.subscription.checked_next().ok() != Some(pending.next_subscription)
-            || old_tag.book.and_then(|book| book.checked_next().ok()) != Some(pending.next_book)
+            || old_book.checked_next().ok() != Some(pending.next_book)
             || old_tag.connection.checked_next().ok() != Some(pending.next_connection)
         {
             return self.halt_with(SupervisorError::InvalidConfiguration(
@@ -1832,11 +1837,7 @@ impl PublicWsSupervisor {
                 value: Control::EpochAdvance {
                     change: EpochChange::Book {
                         owner: pending.book_id,
-                        expected: old_tag
-                            .book
-                            .ok_or(SupervisorError::InvalidConfiguration(
-                                "missing book epoch",
-                            ))?,
+                        expected: old_book,
                         next: pending.next_book,
                     },
                     reason: Reason::Reconnect,
@@ -2031,11 +2032,7 @@ impl PublicWsSupervisor {
         Ok(())
     }
 
-    fn checked_time_add_or_halt(
-        &mut self,
-        base: u64,
-        delta: u64,
-    ) -> Result<u64, SupervisorError> {
+    fn checked_time_add_or_halt(&mut self, base: u64, delta: u64) -> Result<u64, SupervisorError> {
         match base.checked_add(delta) {
             Some(value) => Ok(value),
             None => self.halt_with(SupervisorError::TimeOverflow),

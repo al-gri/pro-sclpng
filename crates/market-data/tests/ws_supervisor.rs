@@ -163,12 +163,7 @@ fn supervisor_config(
     queue_policy: QueuePolicy,
     gate: RecordingGate,
 ) -> WsSupervisorConfig {
-    supervisor_config_with_record(
-        streams,
-        queue_policy,
-        gate,
-        id(RecordNo::new(5)),
-    )
+    supervisor_config_with_record(streams, queue_policy, gate, id(RecordNo::new(5)))
 }
 
 fn supervisor(
@@ -1665,7 +1660,11 @@ fn connected_heartbeat_deadline_overflow_halts_before_up_or_subscribe() {
     let mut sink = MemorySink::default();
     supervisor.start_commands().expect("start");
     supervisor
-        .queue_connected(binding.connection_id, binding.tag.connection, stamp(u64::MAX))
+        .queue_connected(
+            binding.connection_id,
+            binding.tag.connection,
+            stamp(u64::MAX),
+        )
         .expect("queue connected");
 
     assert_eq!(
@@ -1722,7 +1721,9 @@ fn ping_timer_pong_deadline_overflow_halts_before_timer_or_ping() {
     connect_one(&mut supervisor, &mut sink, &binding, connected_at);
     let before_records = sink.frames.len();
 
-    supervisor.queue_tick(stamp(u64::MAX)).expect("queue ping timer");
+    supervisor
+        .queue_tick(stamp(u64::MAX))
+        .expect("queue ping timer");
     assert_eq!(
         supervisor.drain_one(&mut sink),
         Err(SupervisorError::TimeOverflow)
@@ -1848,7 +1849,9 @@ fn terminal_timeout_suppresses_queued_pong_without_up_or_heartbeat_revival() {
         .expect("drain ping")
         .expect("ping result");
     let timeout = ping_due + PONG_TIMEOUT_NS_V1;
-    supervisor.queue_tick(stamp(timeout)).expect("queue timeout");
+    supervisor
+        .queue_tick(stamp(timeout))
+        .expect("queue timeout");
     supervisor
         .queue_text(
             binding.connection_id,
@@ -1862,10 +1865,12 @@ fn terminal_timeout_suppresses_queued_pong_without_up_or_heartbeat_revival() {
         .drain_one(&mut sink)
         .expect("timeout drain")
         .expect("timeout result");
-    assert!(!timed_out.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::EpochAdvanced { .. }
-    )));
+    assert!(
+        !timed_out
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::EpochAdvanced { .. }))
+    );
     assert_eq!(
         supervisor.snapshot(binding.id).expect("pending").transport,
         Transport::Down
@@ -1880,10 +1885,12 @@ fn terminal_timeout_suppresses_queued_pong_without_up_or_heartbeat_revival() {
         SupervisorEvent::ObsoleteControl { stream, epoch }
             if *stream == binding.id && *epoch == old_epoch
     )));
-    assert!(!late.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::PongRecorded { .. }
-    )));
+    assert!(
+        !late
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::PongRecorded { .. }))
+    );
     assert_eq!(
         late.commands
             .iter()
@@ -1929,7 +1936,9 @@ fn terminal_down_records_queued_ping_timer_without_sending_ping() {
     supervisor
         .queue_disconnected(binding.connection_id, old_epoch, stamp(ping_due - 1))
         .expect("queue down");
-    supervisor.queue_tick(stamp(ping_due)).expect("queue ping timer");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("queue ping timer");
 
     supervisor
         .drain_one(&mut sink)
@@ -1943,10 +1952,12 @@ fn terminal_down_records_queued_ping_timer_without_sending_ping() {
         command,
         TransportCommand::SendText { text, .. } if text == "ping"
     )));
-    assert!(timer.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::HeartbeatTimerRecorded { .. }
-    )));
+    assert!(
+        timer
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::HeartbeatTimerRecorded { .. }))
+    );
     assert_eq!(
         timer
             .commands
@@ -1977,7 +1988,9 @@ fn terminal_control_barrier_between_duplicate_disconnects_finishes_once() {
     supervisor
         .queue_disconnected(binding.connection_id, old_epoch, stamp(ping_due - 2))
         .expect("first down");
-    supervisor.queue_tick(stamp(ping_due)).expect("control barrier");
+    supervisor
+        .queue_tick(stamp(ping_due))
+        .expect("control barrier");
     supervisor
         .queue_disconnected(binding.connection_id, old_epoch, stamp(ping_due + 1))
         .expect("second down");
@@ -1990,12 +2003,17 @@ fn terminal_control_barrier_between_duplicate_disconnects_finishes_once() {
         .drain_one(&mut sink)
         .expect("timer drain")
         .expect("timer result");
-    assert!(!timer.events.iter().any(|event| matches!(
-        event,
-        SupervisorEvent::EpochAdvanced { .. }
-    )));
+    assert!(
+        !timer
+            .events
+            .iter()
+            .any(|event| matches!(event, SupervisorEvent::EpochAdvanced { .. }))
+    );
     assert_eq!(
-        supervisor.snapshot(binding.id).expect("still pending").transport,
+        supervisor
+            .snapshot(binding.id)
+            .expect("still pending")
+            .transport,
         Transport::Down
     );
 
@@ -2106,7 +2124,12 @@ fn max_connection_epoch_disconnect_halts_before_down() {
     assert!(supervisor.is_halted());
     assert_eq!(sink.frames.len(), before);
     assert_eq!(
-        supervisor.snapshot(binding.id).expect("state").tag.connection.get(),
+        supervisor
+            .snapshot(binding.id)
+            .expect("state")
+            .tag
+            .connection
+            .get(),
         u64::MAX
     );
 }
