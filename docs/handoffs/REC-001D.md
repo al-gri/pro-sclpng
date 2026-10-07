@@ -1541,3 +1541,74 @@ starts only after explicit **DESIGN_APPROVED_FOR_IMPLEMENTATION** naming approve
 API semantics and allowed paths. Then the complete implemented result requires
 full independent QA of a new immutable head, including Q1/Q2, H1/H2 and all
 previous regressions. No self-approval or READY_FOR_OWNER_REVIEW is claimed.
+
+## Architecture-review revision — ADR 0003 R1–R3
+
+Disposition: **DESIGN_PROPOSED / Q1_BLOCKED**. Incoming Architecture verdict:
+**DESIGN_REVISION_REQUIRED / Q1_BLOCKED**. Q1 remains **BLOCKED / NOT_FIXED**;
+Q2 remains **FIXED_IN_CODE / QA_PENDING**. **DESIGN_APPROVED_FOR_IMPLEMENTATION
+has not been issued**. This is a docs-only continuation of the same lineage,
+with the selected terminal affected capture / irreversible archive failure /
+bounded diagnostic drain direction preserved.
+
+Starting reviewed proposal head:
+`750e85a7ecdd65b0c788726d05a4302b0b42225d`.
+Actual main/base: `39ff0dba797eb010586238ef06fb80e996340401`.
+Issue #20 / parent #5; claim `6024304772`; recovery `6025249885`;
+branch `feat/REC-001D-ws-supervisor`; existing Draft PR #34;
+previous proposal-delivery record `6034472539`.
+Preflight independently confirmed branch/PR head equals the reviewed SHA,
+base equals the supplied reference, zero later/intervening commits, Draft/open,
+unmerged and auto-merge unset. All 106 available materialized file blobs matched
+that exact remote tree before edits. Current policies/accepted contracts were
+read without modifying them. The supplied R1–R3 Architecture task packet is
+the review evidence used here; no unseen review content is claimed.
+
+[Revised ADR 0003](../adr/0003-ws-capture-saturation.md) contains this mapping:
+
+| Review finding | Normative revision | Required future acceptance evidence |
+|---|---|---|
+| R1 — pre-cut GAP must not absorb post-cut loss | Sections4–5 fix CutSide by admission order, include already-admitted/in-flight record-bearing owners/timers, freeze pre-cut stamps/ranges/counts, and require a separate counted PostCut owner or neighbor's reserved exact failure. Marker failure never reopens the cut. | Pre-cut tail B GAP -> A failure/cut -> contiguous B loss before marker, free-W and W-exhausted variants; exact counts/frontiers/cap9 plus marker-failure immutability. |
+| R2 — mandatory Close lacks concrete recovery API | Sections3/3.2 define bounded outstanding_close_owners, authority-bound reclaim_close/confirm_closed and Pending->Leased->Settled. Drop/error returns the same owner to Pending; double reclaim/foreign ref cannot mutate it. No new nonce/counter or hidden owner. Idempotent epoch-bound retry may follow ambiguous physical effect. | Drop/error reclaim, double reclaim, foreign authority/owner, stop/Closing/DiagnosticClosed, settled/stale owner and reuse of existing Down W owner; unchanged ledger during reclaim and at most one active lease. |
+| R3 — quiescence must not lose ticket on NotReady | Sections3/6 use quiesce(&mut SessionTurn, &CloseTicket)->QuiescenceReport. Bounded NotReady performs no drain and preserves ticket/generation; first Ready atomically consumes issuance and yields one proof. Foreign errors preserve rightful state; Closing failure enters DiagnosticClosing without reopening admission and invalidates ticket/proof terminally. | Repeated NotReady, drain/Close settlement then sole proof, duplicate issuance, foreign ticket, failure during Closing before/after proof, one-use finalize/proof reuse. |
+
+API signatures, owner state tables, full item/metadata/byte bounds, cut/marker
+order, diagnostic closure and compatibility/acceptance matrices are revised
+together. Already-admitted generated required records remain pre-cut; only
+still-unadmitted generated completion output can be deferred behind marker.
+Transferred Down/Close/plan ownership stays counted until fully settled; inline
+Close stays inside its reserved terminal owner. Diagnostic descriptor closure
+does not make a pending Close disappear. No consuming-quiesce or unspecified
+Close-retry contract remains in the current ADR.
+
+Only two files change in this revision:
+
+- `docs/adr/0003-ws-capture-saturation.md`;
+- `docs/handoffs/REC-001D.md` (this appended history; earlier sections preserved).
+
+Production source/tests, existing accepted specs/ADR, domain/recording,
+dependencies, workflow and composition remain unchanged. No new
+claim/Issue/branch/PR, force-push, merge, auto-merge, REC-001F, networking,
+REST healing, RPI, quantity/delete inference, private API or execution.
+U-09/U-10 UNKNOWN/BLOCKED, U-20 NOT_PROVEN/FORBIDDEN,
+C-01 CONTRACT_CONFLICT/BLOCKED, C-03 DOC_CONFLICT/UNKNOWN remain.
+
+Actual local Rust attempts in this revision: fmt, clippy -D warnings and
+workspace tests each returned exit127 (`cargo: command not found`), so all are
+**NOT_RUN locally**. No new behavioral acceptance scenario/Rust test was run
+locally. Every ADR acceptance row, including R1–R3, remains
+**REQUIRED / NOT_RUN** for approved implementation; design consistency/link/
+provenance checks are not execution evidence. Exact two-doc diff and fresh
+exact-head CI are verified/reported in PR/Issue metadata after commit; historical
+`37596622811` belongs only to the reviewed starting SHA. Docs-only CI cannot
+prove Q1 fixed, and no Q2/whole-task independent-QA acceptance is claimed.
+
+The new immutable proposal head and actual CI result are recorded in existing
+PR #34 / Issue #20 metadata after commit, avoiding a self-referential SHA.
+PR remains Draft. Next gate: **repeat Architecture review of the whole new
+proposal SHA, with mandatory R1–R3 retest and ADR consistency review**.
+**DESIGN_APPROVED_FOR_IMPLEMENTATION has not been issued**; production
+remediation waits for explicit approval of API semantics and allowed paths.
+After implementation the new immutable head requires full independent QA of
+Q1/Q2, H1/H2 and all prior regressions. No worker self-approval or owner/merge
+readiness is declared.
