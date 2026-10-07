@@ -8,12 +8,12 @@ use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::rc::{Rc, Weak};
 
-use crate::event::{ActiveContext, EventId};
+use crate::event::{ActiveContext, EventId, InputContext};
 use crate::identity::*;
 use crate::policy::{DurabilityMode, RecordingGate, WatermarkKind};
 use crate::record::{
-    Control, EpochChange, Freshness, Reason, Record, RecordFrame, RecordKind, RecordingHealth,
-    Transport, WireContext,
+    Control, EpochChange, Freshness, GapScope, Reason, Record, RecordFrame, RecordKind,
+    RecordingHealth, Transport, WireContext,
 };
 
 pub const MAX_CAPTURE_SCOPES: usize = 4;
@@ -310,6 +310,45 @@ enum ObligationOrigin {
     Generated,
 }
 
+/// Distinct authenticated stages inside one bounded original obligation.
+/// Timer effect eligibility is not represented by ObservationIdentity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReceivedProgress {
+    Unconfirmed,
+    Raw,
+    RawDiagnostic,
+    StaleRaw,
+    StaleDiagnostic,
+    Gap,
+    Up,
+    Down,
+    Timer,
+    TimerDown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GeneratedPlan {
+    connection: ConnectionId,
+    book: BookId,
+    original: EpochTag,
+    next_connection: ConnectionEpoch,
+    next_subscription: SubscriptionEpoch,
+    next_book: BookEpoch,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GeneratedProgress {
+    Unconfirmed,
+    Connection,
+    Subscription,
+    Book,
+}
+
+enum OwnedProgress {
+    Received(ReceivedProgress),
+    Generated(GeneratedProgress),
+}
+
 struct WorkCell {
     sequence: Cell<u64>,
     close_scope: Cell<Option<StreamId>>,
@@ -319,6 +358,9 @@ struct WorkCell {
     obligation: Cell<ObservationObligation>,
     observation: Cell<Option<ObservationIdentity>>,
     confirmed_records: Cell<usize>,
+    received_progress: Cell<ReceivedProgress>,
+    generated_plan: Cell<Option<GeneratedPlan>>,
+    generated_progress: Cell<GeneratedProgress>,
     abandoned_kind: Cell<Option<WorkKind>>,
     obligation_origin: Cell<ObligationOrigin>,
 }
@@ -858,7 +900,7 @@ impl BoundRecordSink {
         owner: &WorkOwner,
     ) -> Result<PersistenceReceipt, PersistBoundaryError> {
         self.authority
-            .synchronize_obligations(turn)
+            .validate_turn(turn)
             .map_err(PersistBoundaryError::Authority)?;
         if matches!(&frame.value,Record::Control(record) if matches!(&record.value,Control::Recording(evidence) if evidence.health==RecordingHealth::Failed))
         {
@@ -882,6 +924,9 @@ impl BoundRecordSink {
                 AuthorityError::InvalidOwner,
             ));
         }
+        self.authority
+            .synchronize_obligations(turn)
+            .map_err(PersistBoundaryError::Authority)?;
         let state = self.authority.state.borrow();
         let generated = owner.cell.obligation_origin.get() == ObligationOrigin::Generated
             || (owner.cell.obligation.get() == ObservationObligation::None
@@ -918,6 +963,259 @@ impl BoundRecordSink {
         }
         drop(state);
         self.persist_checked(turn, frame, gate, Some(owner))
+    }
+
+    fn next_owned_progress(
+        &self,
+        frame: &RecordFrame,
+        owner: &WorkOwner,
+    ) -> Result<Option<OwnedProgress>, AuthorityError> {
+        if owner.cell.obligation.get() == ObservationObligation::None {
+            return Ok(None);
+        }
+        if owner.cell.obligation_origin.get() == ObligationOrigin::Generated {
+            return self
+                .next_generated_progress(frame, owner)
+                .map(|progress| Some(OwnedProgress::Generated(progress)));
+        }
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        if owner.cell.obligation.get() != ObservationObligation::Pending {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        let state = self.authority.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        let context = frame
+            .value
+            .context()
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if context.unix_ns.get() != identity.stamp.unix_ns
+            || context.monotonic_ns.get() != identity.stamp.monotonic_ns
+            || context.context
+                != InputContext::Active(state.prefix.ok_or(AuthorityError::InvalidBinding)?.context)
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let progress = owner.cell.received_progress.get();
+        let raw_identity = identity
+            .tag
+            .is_some_and(|tag| tag.connection == identity.epoch)
+            && identity.attempts.is_some_and(|(first, last)| first == last)
+            && identity.loss_count.is_none();
+        let exact_raw = |raw: &crate::record::RawInput| {
+            raw_identity
+                && raw.stream == identity.stream
+                && Some(raw.tag) == identity.tag
+                && identity.attempts == Some((raw.attempt, raw.attempt))
+        };
+        let exact_gap = |gap: &crate::record::Gap,
+                         range: Option<(CaptureAttemptNo, CaptureAttemptNo)>,
+                         loss_count: Option<u64>| {
+            identity
+                .tag
+                .is_some_and(|tag| tag.connection == identity.epoch)
+                && matches!(
+                    &gap.scope,
+                    GapScope::ExplicitTargets(targets)
+                        if targets.len() == 1
+                            && targets[0].stream == identity.stream
+                            && Some(targets[0].tag) == identity.tag
+                            && targets[0].range == range
+                            && targets[0].loss_count == loss_count
+                )
+        };
+        let control_identity =
+            identity.tag.is_none() && identity.attempts.is_none() && identity.loss_count.is_none();
+        let next = match (identity.class, progress, &frame.value) {
+            (ObservationClass::Raw, ReceivedProgress::Unconfirmed, Record::RawInput(raw))
+                if exact_raw(raw) =>
+            {
+                ReceivedProgress::Raw
+            }
+            (ObservationClass::Raw, ReceivedProgress::Raw, Record::Gap(gap))
+                if raw_identity
+                    && matches!(
+                        gap.reason,
+                        Reason::Unknown | Reason::DecodeRejected | Reason::SourceGap
+                    )
+                    && exact_gap(gap, None, None) =>
+            {
+                ReceivedProgress::RawDiagnostic
+            }
+            (
+                ObservationClass::RejectedStaleRaw,
+                ReceivedProgress::Unconfirmed,
+                Record::RawInput(raw),
+            ) if exact_raw(raw) && raw.bytes.is_empty() => ReceivedProgress::StaleRaw,
+            (ObservationClass::RejectedStaleRaw, ReceivedProgress::StaleRaw, Record::Gap(gap))
+                if raw_identity && gap.reason == Reason::Unknown && exact_gap(gap, None, None) =>
+            {
+                ReceivedProgress::StaleDiagnostic
+            }
+            (ObservationClass::Gap, ReceivedProgress::Unconfirmed, Record::Gap(gap))
+                if identity.attempts.is_some()
+                    && identity.loss_count.is_some()
+                    && gap.reason == Reason::QueueOverflow
+                    && exact_gap(gap, identity.attempts, identity.loss_count) =>
+            {
+                ReceivedProgress::Gap
+            }
+            (
+                ObservationClass::Connected | ObservationClass::Pong,
+                ReceivedProgress::Unconfirmed,
+                Record::Control(record),
+            ) if control_identity
+                && scope.confirmed_down != Some(identity.epoch)
+                && matches!(record.value, Control::Transport { connection, epoch, value: Transport::Up }
+                    if connection == scope.binding.connection && epoch == identity.epoch) =>
+            {
+                ReceivedProgress::Up
+            }
+            (
+                ObservationClass::Disconnected,
+                ReceivedProgress::Unconfirmed,
+                Record::Control(record),
+            ) if control_identity
+                && matches!(record.value, Control::Transport { connection, epoch, value: Transport::Down }
+                    if connection == scope.binding.connection && epoch == identity.epoch) =>
+            {
+                ReceivedProgress::Down
+            }
+            (
+                ObservationClass::Timer {
+                    timer_id,
+                    deadline_ns,
+                },
+                ReceivedProgress::Unconfirmed,
+                Record::Control(record),
+            ) if control_identity
+                && matches!(record.value, Control::Timer { stream, timer_id: actual_id, deadline_ns: actual_deadline }
+                    if stream == identity.stream && actual_id == timer_id && actual_deadline == deadline_ns) =>
+            {
+                ReceivedProgress::Timer
+            }
+            (ObservationClass::Timer { .. }, ReceivedProgress::Timer, Record::Control(record))
+                if control_identity
+                    && matches!(record.value, Control::Transport { connection, epoch, value: Transport::Down }
+                    if connection == scope.binding.connection && epoch == identity.epoch) =>
+            {
+                // The exact optional Down is represented, but admission has no
+                // timer kind/active association proving its effect eligibility.
+                ReceivedProgress::TimerDown
+            }
+            _ => return Err(AuthorityError::InvalidBinding),
+        };
+        Ok(Some(OwnedProgress::Received(next)))
+    }
+
+    fn next_generated_progress(
+        &self,
+        frame: &RecordFrame,
+        owner: &WorkOwner,
+    ) -> Result<GeneratedProgress, AuthorityError> {
+        if owner.cell.obligation.get() != ObservationObligation::Pending {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let plan = owner
+            .cell
+            .generated_plan
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let state = self.authority.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if scope.binding.epoch != identity.epoch
+            || scope.current_tag != Some(plan.original)
+            || scope.close.state.get() != CloseState::Settled
+            || !scope.close.identity.get().is_some_and(|close| {
+                close.stream == identity.stream
+                    && close.connection == plan.connection
+                    && close.epoch == identity.epoch
+                    && close.storage == CloseStorage::WorkOwner(owner.id())
+            })
+        {
+            return Err(AuthorityError::NotQuiescent);
+        }
+        let Record::Control(record) = &frame.value else {
+            return Err(AuthorityError::InvalidBinding);
+        };
+        if record.context.unix_ns.get() != identity.stamp.unix_ns
+            || record.context.monotonic_ns.get() != identity.stamp.monotonic_ns
+            || record.context.context
+                != InputContext::Active(state.prefix.ok_or(AuthorityError::InvalidBinding)?.context)
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let next = match (owner.cell.generated_progress.get(), &record.value) {
+            (
+                GeneratedProgress::Unconfirmed,
+                Control::EpochAdvance {
+                    change:
+                        EpochChange::Connection {
+                            owner: connection,
+                            expected,
+                            next,
+                        },
+                    reason: Reason::Reconnect,
+                },
+            ) if *connection == plan.connection
+                && *expected == plan.original.connection
+                && *next == plan.next_connection =>
+            {
+                GeneratedProgress::Connection
+            }
+            (
+                GeneratedProgress::Connection,
+                Control::EpochAdvance {
+                    change:
+                        EpochChange::Subscription {
+                            owner: stream,
+                            expected,
+                            next,
+                        },
+                    reason: Reason::Reconnect,
+                },
+            ) if *stream == identity.stream
+                && *expected == plan.original.subscription
+                && *next == plan.next_subscription =>
+            {
+                GeneratedProgress::Subscription
+            }
+            (
+                GeneratedProgress::Subscription,
+                Control::EpochAdvance {
+                    change:
+                        EpochChange::Book {
+                            owner: book,
+                            expected,
+                            next,
+                        },
+                    reason: Reason::Reconnect,
+                },
+            ) if *book == plan.book
+                && Some(*expected) == plan.original.book
+                && *next == plan.next_book =>
+            {
+                GeneratedProgress::Book
+            }
+            _ => return Err(AuthorityError::InvalidBinding),
+        };
+        Ok(next)
     }
 
     fn raise_watermarks(watermarks: &mut [Option<RecordNo>; 5], receipt: PersistenceReceipt) {
@@ -1043,6 +1341,12 @@ impl BoundRecordSink {
                 ));
             }
         }
+        let owned_progress = match owner {
+            Some(owner) => self
+                .next_owned_progress(frame, owner)
+                .map_err(PersistBoundaryError::Authority)?,
+            None => None,
+        };
         let next = frame.record_no.checked_next().map_err(|_| {
             let _ = self.authority.storage_stopped(
                 turn,
@@ -1123,6 +1427,15 @@ impl BoundRecordSink {
         self.authority.confirm_persisted_frame(frame);
         if let (Some(owner), Some(confirmed_records)) = (owner, confirmed_records) {
             owner.cell.confirmed_records.set(confirmed_records);
+            match owned_progress {
+                Some(OwnedProgress::Received(progress)) => {
+                    owner.cell.received_progress.set(progress)
+                }
+                Some(OwnedProgress::Generated(progress)) => {
+                    owner.cell.generated_progress.set(progress)
+                }
+                None => {}
+            }
         }
         Ok(receipt)
     }
@@ -1273,9 +1586,10 @@ impl SupervisorSessionHandle {
         owner: &WorkOwner,
         identity: ObservationIdentity,
     ) -> Result<(), AuthorityError> {
+        self.authority.validate_turn(turn)?;
+        self.validate_work(owner)?;
         self.authority.synchronize_obligations(turn)?;
         self.authority.ensure_admission_open(turn)?;
-        self.validate_work(owner)?;
         let state = self.authority.state.borrow();
         if owner.cell.obligation.get() != ObservationObligation::None
             || owner.cell.kind.get() != WorkKind::QueuedObservation
@@ -1287,6 +1601,16 @@ impl SupervisorSessionHandle {
             return Err(AuthorityError::InvalidOwner);
         }
         owner.cell.observation.set(Some(identity));
+        owner.cell.confirmed_records.set(0);
+        owner.cell.generated_plan.set(None);
+        owner
+            .cell
+            .generated_progress
+            .set(GeneratedProgress::Unconfirmed);
+        owner
+            .cell
+            .received_progress
+            .set(ReceivedProgress::Unconfirmed);
         owner.cell.obligation.set(ObservationObligation::Pending);
         owner.cell.obligation_origin.set(ObligationOrigin::Received);
         Ok(())
@@ -1298,8 +1622,9 @@ impl SupervisorSessionHandle {
         owner: &WorkOwner,
         identity: ObservationIdentity,
     ) -> Result<(), AuthorityError> {
-        self.authority.synchronize_obligations(turn)?;
+        self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
+        self.authority.synchronize_obligations(turn)?;
         let old = owner
             .cell
             .observation
@@ -1307,6 +1632,8 @@ impl SupervisorSessionHandle {
             .ok_or(AuthorityError::InvalidOwner)?;
         let state = self.authority.state.borrow();
         if owner.cell.obligation.get() != ObservationObligation::Pending
+            || owner.cell.received_progress.get() != ReceivedProgress::Unconfirmed
+            || owner.cell.confirmed_records.get() != 0
             || old.class != ObservationClass::Gap
             || old.stream != identity.stream
             || old.epoch != identity.epoch
@@ -1350,11 +1677,12 @@ impl SupervisorSessionHandle {
         owner: &WorkOwner,
         obsolete: Option<(StreamId, ConnectionEpoch)>,
     ) -> Result<(), AuthorityError> {
-        self.authority.synchronize_obligations(turn)?;
+        self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
         if !self.authority.same_authority(&sink.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
+        self.authority.synchronize_obligations(turn)?;
         if owner.cell.obligation.get() != ObservationObligation::Pending {
             return Err(AuthorityError::InvalidOwner);
         }
@@ -1364,26 +1692,51 @@ impl SupervisorSessionHandle {
             .observation
             .get()
             .ok_or(AuthorityError::InvalidOwner)?;
-        let required = if owner.cell.obligation_origin.get() == ObligationOrigin::Generated {
-            3
-        } else if identity.class == ObservationClass::RejectedStaleRaw {
-            2
+        let generated = owner.cell.obligation_origin.get() == ObligationOrigin::Generated;
+        let authenticated = if generated {
+            owner.cell.generated_progress.get() == GeneratedProgress::Book
         } else {
-            1
+            match identity.class {
+                ObservationClass::Raw => matches!(
+                    owner.cell.received_progress.get(),
+                    ReceivedProgress::Raw | ReceivedProgress::RawDiagnostic
+                ),
+                ObservationClass::RejectedStaleRaw => {
+                    owner.cell.received_progress.get() == ReceivedProgress::StaleDiagnostic
+                }
+                ObservationClass::Gap => {
+                    owner.cell.received_progress.get() == ReceivedProgress::Gap
+                }
+                ObservationClass::Connected | ObservationClass::Pong => {
+                    owner.cell.received_progress.get() == ReceivedProgress::Up
+                }
+                ObservationClass::Disconnected => {
+                    owner.cell.received_progress.get() == ReceivedProgress::Down
+                }
+                // Admission does not distinguish Ping from active/inactive
+                // Timeout, so requiring/authorizing Down still needs an ADR.
+                ObservationClass::Timer { .. } => matches!(
+                    owner.cell.received_progress.get(),
+                    ReceivedProgress::Timer | ReceivedProgress::TimerDown
+                ),
+            }
         };
-        if owner.cell.confirmed_records.get() == 0 {
-            if !matches!(
+        if !authenticated
+            && (!matches!(
                 identity.class,
                 ObservationClass::Connected | ObservationClass::Pong
-            ) || obsolete != Some((identity.stream, identity.epoch))
+            ) || generated
+                || owner.cell.received_progress.get() != ReceivedProgress::Unconfirmed
+                || owner.cell.confirmed_records.get() != 0
+                || identity.tag.is_some()
+                || identity.attempts.is_some()
+                || identity.loss_count.is_some()
+                || obsolete != Some((identity.stream, identity.epoch))
                 || !self.authority.state.borrow().scopes.iter().any(|scope| {
                     scope.binding.stream == identity.stream
                         && scope.confirmed_down == Some(identity.epoch)
-                })
-            {
-                return Err(AuthorityError::NotQuiescent);
-            }
-        } else if owner.cell.confirmed_records.get() < required {
+                }))
+        {
             return Err(AuthorityError::NotQuiescent);
         }
         owner.cell.obligation.set(ObservationObligation::Settled);
@@ -1395,19 +1748,85 @@ impl SupervisorSessionHandle {
         turn: &mut SessionTurn,
         owner: &WorkOwner,
     ) -> Result<(), AuthorityError> {
-        self.authority.synchronize_obligations(turn)?;
+        self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
+        self.authority.synchronize_obligations(turn)?;
         if owner.cell.obligation.get() != ObservationObligation::Settled
             || owner.cell.kind.get() != WorkKind::PendingPlan
+            || owner.cell.obligation_origin.get() != ObligationOrigin::Received
         {
             return Err(AuthorityError::InvalidOwner);
         }
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        if !matches!(
+            (identity.class, owner.cell.received_progress.get()),
+            (ObservationClass::Disconnected, ReceivedProgress::Down)
+                | (ObservationClass::Timer { .. }, ReceivedProgress::TimerDown)
+        ) {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        let state = self.authority.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        let original = scope.current_tag.ok_or(AuthorityError::InvalidBinding)?;
+        if scope.binding.epoch != identity.epoch
+            || original.connection != identity.epoch
+            || !scope.close.identity.get().is_some_and(|close| {
+                close.stream == identity.stream
+                    && close.connection == scope.binding.connection
+                    && close.epoch == identity.epoch
+                    && close.storage == CloseStorage::WorkOwner(owner.id())
+            })
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        let book = state
+            .accepted_bindings
+            .iter()
+            .find(|binding| binding.id == identity.stream)
+            .and_then(|binding| binding.book_id)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        let plan = GeneratedPlan {
+            connection: scope.binding.connection,
+            book,
+            original,
+            next_connection: original
+                .connection
+                .checked_next()
+                .map_err(|_| AuthorityError::CounterExhausted("ConnectionEpoch"))?,
+            next_subscription: original
+                .subscription
+                .checked_next()
+                .map_err(|_| AuthorityError::CounterExhausted("SubscriptionEpoch"))?,
+            next_book: original
+                .book
+                .ok_or(AuthorityError::InvalidBinding)?
+                .checked_next()
+                .map_err(|_| AuthorityError::CounterExhausted("BookEpoch"))?,
+        };
+        drop(state);
         owner.cell.obligation.set(ObservationObligation::Pending);
         owner
             .cell
             .obligation_origin
             .set(ObligationOrigin::Generated);
         owner.cell.confirmed_records.set(0);
+        owner.cell.generated_plan.set(Some(plan));
+        owner
+            .cell
+            .generated_progress
+            .set(GeneratedProgress::Unconfirmed);
+        owner
+            .cell
+            .received_progress
+            .set(ReceivedProgress::Unconfirmed);
         Ok(())
     }
 
@@ -2215,6 +2634,9 @@ impl CaptureSessionAuthority {
                     obligation: Cell::new(ObservationObligation::None),
                     observation: Cell::new(None),
                     confirmed_records: Cell::new(0),
+                    received_progress: Cell::new(ReceivedProgress::Unconfirmed),
+                    generated_plan: Cell::new(None),
+                    generated_progress: Cell::new(GeneratedProgress::Unconfirmed),
                     abandoned_kind: Cell::new(None),
                     obligation_origin: Cell::new(ObligationOrigin::Received),
                 })
@@ -2508,6 +2930,9 @@ impl CaptureSessionAuthority {
         cell.obligation.set(ObservationObligation::None);
         cell.observation.set(None);
         cell.confirmed_records.set(0);
+        cell.received_progress.set(ReceivedProgress::Unconfirmed);
+        cell.generated_plan.set(None);
+        cell.generated_progress.set(GeneratedProgress::Unconfirmed);
         cell.abandoned_kind.set(None);
         cell.obligation_origin.set(ObligationOrigin::Received);
         cell.kind.set(kind);

@@ -8,9 +8,10 @@ use domain::artifact::ArtifactRef;
 use domain::capture_session::{
     AmbiguousEffect, AttemptIdentity, AuthorityError, BoundRecordSink, CloseLease,
     CloseLeaseReport, CloseOwnerRef, CloseState, CloseStorage, CommandKind, DispatchReport,
-    FailureCause, InputClass, MarkerState, PersistBoundaryError, PersistError, PersistErrorKind,
-    QuiescenceReport, ReceiveStamp, RetentionBudget, ScopeBinding, SessionLifecycle, SessionTurn,
-    SupervisorSessionHandle, TerminalFailure, WorkKind,
+    FailureCause, InputClass, MarkerState, ObservationClass, ObservationIdentity,
+    PersistBoundaryError, PersistError, PersistErrorKind, QuiescenceReport, ReceiveStamp,
+    RetentionBudget, ScopeBinding, SessionLifecycle, SessionTurn, SupervisorSessionHandle,
+    TerminalFailure, WorkKind, WorkOwner,
 };
 use domain::event::{ActiveContext, InputContext};
 use domain::identity::*;
@@ -1516,4 +1517,1318 @@ fn physically_valid_legacy_sealed_bytes_are_not_relabelled_by_failed_observation
     assert_eq!(recovered, records);
     // This file is physically complete but violates the canonical capture-owner
     // policy. Recovery describes its bytes; it cannot erase a real ArchiveSeal.
+}
+
+// Independent QA, 2026-10-07. The four supplied normative test names are retained.
+// Written is supplemental concrete-backend evidence; Durable counterparts keep
+// the original Unix metadata requirement and are never weakened or ignored.
+fn qa_original_identity(class: ObservationClass) -> ObservationIdentity {
+    let bound = binding();
+    let attempts = positive(CaptureAttemptNo::new(1));
+    let raw_or_gap = matches!(
+        class,
+        ObservationClass::Raw | ObservationClass::RejectedStaleRaw | ObservationClass::Gap
+    );
+    ObservationIdentity {
+        stream: bound.id,
+        epoch: bound.tag.connection,
+        stamp: ReceiveStamp {
+            unix_ns: 5,
+            monotonic_ns: 5,
+        },
+        class,
+        tag: raw_or_gap.then_some(bound.tag),
+        attempts: raw_or_gap.then_some((attempts, attempts)),
+        loss_count: (class == ObservationClass::Gap).then_some(1),
+    }
+}
+
+fn qa_context(identity: ObservationIdentity) -> WireContext {
+    WireContext {
+        unix_ns: LocalUnixNs::new(identity.stamp.unix_ns),
+        monotonic_ns: MonotonicNs::new(identity.stamp.monotonic_ns),
+        context: InputContext::Active(active()),
+    }
+}
+
+fn qa_raw(number: u64, identity: ObservationIdentity, empty: bool) -> RecordFrame {
+    frame(
+        number,
+        Record::RawInput(RawInput {
+            context: qa_context(identity),
+            stream: identity.stream,
+            tag: identity.tag.expect("original Raw tag"),
+            attempt: identity.attempts.expect("original Raw attempt").0,
+            bytes: if empty {
+                Vec::new()
+            } else {
+                b"original received payload".to_vec()
+            },
+        }),
+    )
+}
+
+fn qa_gap(number: u64, identity: ObservationIdentity, reason: Reason) -> RecordFrame {
+    let queue_loss = identity.class == ObservationClass::Gap;
+    frame(
+        number,
+        Record::Gap(Gap {
+            context: qa_context(identity),
+            scope: GapScope::ExplicitTargets(vec![GapTarget {
+                stream: identity.stream,
+                tag: identity.tag.expect("original GAP target tag"),
+                range: if queue_loss { identity.attempts } else { None },
+                loss_count: if queue_loss {
+                    identity.loss_count
+                } else {
+                    None
+                },
+            }]),
+            reason,
+        }),
+    )
+}
+
+fn qa_admit(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    identity: ObservationIdentity,
+) -> WorkOwner {
+    let work = handle
+        .reserve_work(turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle.admit_observation(turn, &work, identity).unwrap();
+    work.set_kind(turn, WorkKind::InFlightObservation).unwrap();
+    work
+}
+
+fn qa_reject_preserving(
+    boundary: (&TempWal, &CaptureSessionOwner, &SupervisorSessionHandle),
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    work: &WorkOwner,
+    gate: RecordingGate,
+    submitted: &RecordFrame,
+) {
+    let (wal, owner, handle) = boundary;
+    let ledger = handle.authority().ownership_report();
+    let status = owner.session_status();
+    let prefix = handle.prefix();
+    let close = owner.outstanding_close_owners();
+    let watermarks = owner.watermarks();
+    let physical = fs::read(&wal.0).unwrap();
+    assert!(
+        matches!(
+            sink.persist_owned(turn, submitted, gate, work),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidBinding | AuthorityError::InvalidOwner
+            ))
+        ),
+        "metadata/stage substitution must reject before backend write: {submitted:?}"
+    );
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(owner.session_status(), status);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.outstanding_close_owners(), close);
+    assert_eq!(owner.watermarks(), watermarks);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+}
+
+fn qa_settle_once(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &BoundRecordSink,
+    work: &WorkOwner,
+) {
+    handle.complete_observation(turn, sink, work, None).unwrap();
+    let settled = handle.authority().ownership_report();
+    assert_eq!(
+        handle.complete_observation(turn, sink, work, None),
+        Err(AuthorityError::InvalidOwner)
+    );
+    assert_eq!(handle.authority().ownership_report(), settled);
+}
+
+fn independent_qa_raw_receipt_probe(gate: RecordingGate, substitution: u8) {
+    let wal = TempWal::new("independent-unrelated-raw");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = qa_raw(5, identity, false);
+    let submitted = if substitution == 1 {
+        frame(
+            5,
+            Record::Control(ControlRecord {
+                context: context(5, false),
+                value: Control::Timer {
+                    stream: identity.stream,
+                    timer_id: 99,
+                    deadline_ns: 5,
+                },
+            }),
+        )
+    } else if substitution == 2 {
+        let mut replacement = original.clone();
+        let Record::RawInput(raw) = &mut replacement.value else {
+            unreachable!()
+        };
+        raw.context = context(6, false);
+        replacement
+    } else {
+        original.clone()
+    };
+    println!("gate={gate:?}; substitution={substitution}");
+    if substitution != 0 {
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &submitted,
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        let before = handle.authority().ownership_report();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::NotReady(_)
+        ));
+        assert_eq!(handle.authority().ownership_report(), before);
+        assert_eq!(read_all(&wal.0).0.len(), 4);
+        sink.persist_owned(&mut turn, &original, gate, &work)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        drop(work);
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::Ready(_)
+        ));
+    } else {
+        sink.persist_owned(&mut turn, &submitted, gate, &work)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        drop(work);
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::Ready(_)
+        ));
+    }
+    let (records, report) = read_all(&wal.0);
+    assert_eq!(records.len(), 5);
+    assert_eq!(records.last(), Some(&original));
+    assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+}
+
+#[test]
+fn independent_qa_unrelated_authenticated_timer_does_not_settle_received_raw() {
+    independent_qa_raw_receipt_probe(RecordingGate::Written, 1);
+}
+
+#[test]
+fn independent_qa_replacement_stamp_does_not_settle_original_received_raw() {
+    independent_qa_raw_receipt_probe(RecordingGate::Written, 2);
+}
+
+#[test]
+fn independent_qa_matching_authenticated_raw_settles_exact_original_obligation() {
+    independent_qa_raw_receipt_probe(RecordingGate::Written, 0);
+}
+
+#[test]
+fn independent_qa_original_durable_profile_unrelated_timer_probe() {
+    independent_qa_raw_receipt_probe(RecordingGate::Durable, 1);
+}
+
+fn qa_raw_metadata_family(gate: RecordingGate) {
+    // Twelve substitutions; each retains one rightful Raw and a separate result W.
+    for variant in 0..12 {
+        let wal = TempWal::new("qa-new-raw-metadata");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let identity = qa_original_identity(ObservationClass::Raw);
+        let work = qa_admit(&handle, &mut turn, identity);
+        let protected = handle.reserve_work(&mut turn, WorkKind::Result).unwrap();
+        let original = qa_raw(5, identity, false);
+        let mut wrong = original.clone();
+        let Record::RawInput(raw) = &mut wrong.value else {
+            unreachable!()
+        };
+        match variant {
+            0 => raw.context.unix_ns = LocalUnixNs::new(6),
+            1 => raw.context.monotonic_ns = MonotonicNs::new(6),
+            2 => raw.stream = positive(StreamId::new(2)),
+            3 => raw.tag.connection = positive(ConnectionEpoch::new(2)),
+            4 => raw.tag.spec = positive(SpecVersion::new(2)),
+            5 => raw.tag.subscription = positive(SubscriptionEpoch::new(2)),
+            6 => raw.tag.book = Some(positive(BookEpoch::new(2))),
+            7 => raw.tag.book = None,
+            8 => raw.attempt = positive(CaptureAttemptNo::new(2)),
+            9 => raw.context.context = InputContext::Bootstrap,
+            10 => wrong = qa_gap(5, identity, Reason::Unknown),
+            11 => {
+                wrong = frame(
+                    5,
+                    Record::Control(ControlRecord {
+                        context: qa_context(identity),
+                        value: Control::Timer {
+                            stream: identity.stream,
+                            timer_id: 9,
+                            deadline_ns: 5,
+                        },
+                    }),
+                )
+            }
+            _ => unreachable!(),
+        }
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong,
+        );
+        assert_eq!(
+            handle.authority().ownership_report().pending_observations,
+            1
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+        sink.persist_owned(&mut turn, &original, gate, &work)
+            .unwrap();
+        let mut duplicate = original.clone();
+        duplicate.record_no = record(6);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &duplicate,
+        );
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        assert_eq!(handle.authority().ownership_report().work_used, 2);
+        assert_eq!(
+            handle.authority().ownership_report().pending_observations,
+            0
+        );
+        drop(work);
+        assert_eq!(handle.authority().ownership_report().work_used, 1);
+        drop(protected);
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::Ready(_)
+        ));
+        assert_eq!(read_all(&wal.0).0.last(), Some(&original));
+        assert_eq!(read_all(&wal.0).0.len(), 5);
+    }
+}
+
+#[test]
+fn qa_new_written_raw_metadata_rejection_preserves_rightful_once_only_completion() {
+    qa_raw_metadata_family(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_raw_metadata_rejection_preserves_rightful_once_only_completion() {
+    qa_raw_metadata_family(RecordingGate::Durable);
+}
+
+fn qa_missing_original_abandonment(gate: RecordingGate) {
+    let wal = TempWal::new("qa-new-missing-original");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let work_id = work.id();
+    let mut wrong = qa_raw(5, identity, false);
+    let Record::RawInput(raw) = &mut wrong.value else {
+        unreachable!()
+    };
+    raw.context.unix_ns = LocalUnixNs::new(6);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &wrong,
+    );
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let before = handle.authority().ownership_report();
+    let before_bytes = fs::read(&wal.0).unwrap();
+    for _ in 0..3 {
+        let QuiescenceReport::NotReady(summary) = handle.quiesce(&mut turn, &ticket) else {
+            panic!("original Pending obligation must deny proof")
+        };
+        assert_eq!(summary.work_total, 1);
+        assert_eq!(summary.in_flight, 1);
+        assert_eq!(handle.authority().ownership_report(), before);
+    }
+    drop(work);
+    let abandoned = handle.authority().ownership_report();
+    assert_eq!(abandoned.work_used, 1);
+    assert_eq!(abandoned.abandoned_work, 1);
+    assert_eq!(abandoned.pending_observations, 0);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+    ));
+    let status = owner.session_status();
+    assert_eq!(
+        status.storage_stopped.unwrap().kind,
+        PersistErrorKind::OwnershipAbandoned
+    );
+    let lost = status.first_abandonment.unwrap();
+    assert_eq!(lost.work_id, work_id);
+    assert_eq!(lost.identity, identity);
+    assert_eq!(lost.kind, WorkKind::InFlightObservation);
+    assert_eq!(lost.cut_side, domain::capture_session::CutSide::PreCut);
+    let close_snapshot = owner.outstanding_close_owners();
+    let close = close_snapshot
+        .iter()
+        .next()
+        .expect("abandonment retains mandatory Close");
+    assert_eq!(close_snapshot.iter().count(), 1);
+    assert_eq!(close.owner.stream(), identity.stream);
+    assert_eq!(close.owner.epoch(), identity.epoch);
+    assert_eq!(close.owner.storage(), CloseStorage::ReservedTerminal);
+    assert_eq!(close.state, CloseState::Pending);
+    let reconciled = handle.authority().ownership_report();
+    for _ in 0..3 {
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+        ));
+        assert_eq!(owner.session_status(), status);
+        assert_eq!(owner.outstanding_close_owners(), close_snapshot);
+        assert_eq!(handle.authority().ownership_report(), reconciled);
+    }
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    assert_eq!(owner.watermarks().written, Some(record(4)));
+    assert_eq!(fs::read(&wal.0).unwrap(), before_bytes);
+    let (records, report) = read_all(&wal.0);
+    assert_eq!(records.len(), 4);
+    assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+    assert_eq!(report.input_quality, None);
+    assert!(
+        !records
+            .iter()
+            .any(|frame| matches!(frame.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+    );
+}
+
+#[test]
+fn qa_new_written_missing_original_retains_abandoned_identity_and_denies_seals() {
+    qa_missing_original_abandonment(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_missing_original_retains_abandoned_identity_and_denies_seals() {
+    qa_missing_original_abandonment(RecordingGate::Durable);
+}
+
+fn qa_stale_two_stage(gate: RecordingGate) {
+    let wal = TempWal::new("qa-new-stale-stages");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::RejectedStaleRaw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let gap_first = qa_gap(5, identity, Reason::Unknown);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &gap_first,
+    );
+    let nonempty = qa_raw(5, identity, false);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &nonempty,
+    );
+    let original = qa_raw(5, identity, true);
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    let duplicate = qa_raw(6, identity, true);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &duplicate,
+    );
+    for variant in 0..4 {
+        let mut wrong = qa_gap(6, identity, Reason::Unknown);
+        let Record::Gap(gap) = &mut wrong.value else {
+            unreachable!()
+        };
+        match variant {
+            0 => gap.reason = Reason::DecodeRejected,
+            1 => gap.context.monotonic_ns = MonotonicNs::new(6),
+            2 => {
+                let GapScope::ExplicitTargets(targets) = &mut gap.scope else {
+                    unreachable!()
+                };
+                targets[0].tag.subscription = positive(SubscriptionEpoch::new(2));
+            }
+            3 => gap.scope = GapScope::AllDeclaredStreams,
+            _ => unreachable!(),
+        }
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong,
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+    }
+    let diagnostic = qa_gap(6, identity, Reason::Unknown);
+    sink.persist_owned(&mut turn, &diagnostic, gate, &work)
+        .unwrap();
+    let mut duplicate_gap = diagnostic.clone();
+    duplicate_gap.record_no = record(7);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &duplicate_gap,
+    );
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    assert_eq!(
+        handle.authority().ownership_report().pending_observations,
+        0
+    );
+    assert_eq!(&read_all(&wal.0).0[4..], &[original, diagnostic]);
+}
+
+#[test]
+fn qa_new_written_stale_raw_requires_distinct_exact_empty_raw_and_diagnostic_gap() {
+    qa_stale_two_stage(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_stale_raw_requires_distinct_exact_empty_raw_and_diagnostic_gap() {
+    qa_stale_two_stage(RecordingGate::Durable);
+}
+
+fn qa_queue_gap_metadata(gate: RecordingGate) {
+    let wal = TempWal::new("qa-new-gap-identity");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let first = positive(CaptureAttemptNo::new(1));
+    let mut identity = qa_original_identity(ObservationClass::Gap);
+    let work = qa_admit(&handle, &mut turn, identity);
+    identity.attempts = Some((first, positive(CaptureAttemptNo::new(3))));
+    identity.loss_count = Some(3);
+    handle
+        .extend_gap_observation(&mut turn, &work, identity)
+        .unwrap();
+    let original = qa_gap(5, identity, Reason::QueueOverflow);
+    // Thirteen substitutions against the coalesced original range/stamp.
+    for variant in 0..13 {
+        let mut wrong = original.clone();
+        let Record::Gap(gap) = &mut wrong.value else {
+            unreachable!()
+        };
+        let GapScope::ExplicitTargets(targets) = &mut gap.scope else {
+            unreachable!()
+        };
+        match variant {
+            0 => gap.context.unix_ns = LocalUnixNs::new(6),
+            1 => gap.context.monotonic_ns = MonotonicNs::new(6),
+            2 => targets[0].stream = positive(StreamId::new(2)),
+            3 => targets[0].tag.connection = positive(ConnectionEpoch::new(2)),
+            4 => targets[0].tag.spec = positive(SpecVersion::new(2)),
+            5 => targets[0].tag.subscription = positive(SubscriptionEpoch::new(2)),
+            6 => targets[0].tag.book = Some(positive(BookEpoch::new(2))),
+            7 => {
+                targets[0].range = Some((
+                    positive(CaptureAttemptNo::new(2)),
+                    positive(CaptureAttemptNo::new(4)),
+                ))
+            }
+            8 => {
+                targets[0].range = Some((first, positive(CaptureAttemptNo::new(4))));
+                targets[0].loss_count = Some(4);
+            }
+            9 => targets[0].loss_count = Some(2),
+            10 => gap.scope = GapScope::AllDeclaredStreams,
+            11 => {
+                let mut extra = targets[0].clone();
+                extra.stream = positive(StreamId::new(2));
+                targets.push(extra);
+            }
+            12 => {
+                gap.reason = Reason::Unknown;
+                targets[0].range = None;
+                targets[0].loss_count = None;
+            }
+            _ => unreachable!(),
+        }
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong,
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+    }
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    let before = handle.authority().ownership_report();
+    let mut later_identity = identity;
+    later_identity.attempts = Some((first, positive(CaptureAttemptNo::new(4))));
+    later_identity.loss_count = Some(4);
+    assert_eq!(
+        handle.extend_gap_observation(&mut turn, &work, later_identity),
+        Err(AuthorityError::InvalidOwner)
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    let mut duplicate = original.clone();
+    duplicate.record_no = record(6);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &duplicate,
+    );
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    assert_eq!(read_all(&wal.0).0.last(), Some(&original));
+    assert_eq!(read_all(&wal.0).0.len(), 5);
+}
+
+#[test]
+fn qa_new_written_queue_gap_requires_original_target_range_count_stamp_and_stage() {
+    qa_queue_gap_metadata(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_queue_gap_requires_original_target_range_count_stamp_and_stage() {
+    qa_queue_gap_metadata(RecordingGate::Durable);
+}
+
+fn qa_raw_diagnostic_controls(gate: RecordingGate) {
+    for reason in [Reason::Unknown, Reason::DecodeRejected, Reason::SourceGap] {
+        let wal = TempWal::new("qa-new-raw-diagnostic");
+        let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let identity = qa_original_identity(ObservationClass::Raw);
+        let work = qa_admit(&handle, &mut turn, identity);
+        let primary = qa_raw(5, identity, false);
+        let before_primary = qa_gap(5, identity, reason);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &before_primary,
+        );
+        sink.persist_owned(&mut turn, &primary, gate, &work)
+            .unwrap();
+        let wrong_reason = qa_gap(6, identity, Reason::Reconnect);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong_reason,
+        );
+        let mut wrong_target = qa_gap(6, identity, reason);
+        let Record::Gap(gap) = &mut wrong_target.value else {
+            unreachable!()
+        };
+        let GapScope::ExplicitTargets(targets) = &mut gap.scope else {
+            unreachable!()
+        };
+        targets[0].tag.book = Some(positive(BookEpoch::new(2)));
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong_target,
+        );
+        let diagnostic = qa_gap(6, identity, reason);
+        sink.persist_owned(&mut turn, &diagnostic, gate, &work)
+            .unwrap();
+        let mut repeated = diagnostic.clone();
+        repeated.record_no = record(7);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &repeated,
+        );
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        assert_eq!(&read_all(&wal.0).0[4..], &[primary, diagnostic]);
+    }
+}
+
+#[test]
+fn qa_new_written_raw_allows_one_exact_same_observation_diagnostic_gap() {
+    qa_raw_diagnostic_controls(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_raw_allows_one_exact_same_observation_diagnostic_gap() {
+    qa_raw_diagnostic_controls(RecordingGate::Durable);
+}
+
+fn qa_transport(number: u64, identity: ObservationIdentity, value: Transport) -> RecordFrame {
+    frame(
+        number,
+        Record::Control(ControlRecord {
+            context: qa_context(identity),
+            value: Control::Transport {
+                connection: binding().connection_id,
+                epoch: identity.epoch,
+                value,
+            },
+        }),
+    )
+}
+
+fn qa_received_control_metadata(gate: RecordingGate) {
+    for class in [
+        ObservationClass::Connected,
+        ObservationClass::Pong,
+        ObservationClass::Disconnected,
+    ] {
+        let wal = TempWal::new("qa-new-control-identity");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let identity = qa_original_identity(class);
+        let work = qa_admit(&handle, &mut turn, identity);
+        let value = if class == ObservationClass::Disconnected {
+            Transport::Down
+        } else {
+            Transport::Up
+        };
+        let original = qa_transport(5, identity, value);
+        for variant in 0..4 {
+            let mut wrong = original.clone();
+            let Record::Control(control) = &mut wrong.value else {
+                unreachable!()
+            };
+            let Control::Transport {
+                connection,
+                epoch,
+                value,
+            } = &mut control.value
+            else {
+                unreachable!()
+            };
+            match variant {
+                0 => control.context.unix_ns = LocalUnixNs::new(6),
+                1 => *connection = positive(ConnectionId::new(2)),
+                2 => *epoch = positive(ConnectionEpoch::new(2)),
+                3 => *value = Transport::Unknown,
+                _ => unreachable!(),
+            }
+            qa_reject_preserving(
+                (&wal, &owner, &handle),
+                &mut turn,
+                &mut sink,
+                &work,
+                gate,
+                &wrong,
+            );
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, &work, None),
+                Err(AuthorityError::NotQuiescent)
+            );
+        }
+        sink.persist_owned(&mut turn, &original, gate, &work)
+            .unwrap();
+        let close = if class == ObservationClass::Disconnected {
+            Some(
+                handle
+                    .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let mut duplicate = original.clone();
+        duplicate.record_no = record(6);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &duplicate,
+        );
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        if let Some(close) = close {
+            assert_eq!(close.storage(), CloseStorage::WorkOwner(work.id()));
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            drop(lease);
+            assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+            assert_eq!(handle.authority().ownership_report().work_used, 1);
+            let lease = leased(owner.reclaim_close(&mut turn, close));
+            assert!(matches!(
+                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                DispatchReport::Dispatched
+            ));
+        }
+        drop(work);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert_eq!(read_all(&wal.0).0.last(), Some(&original));
+    }
+}
+
+#[test]
+fn qa_new_written_received_controls_require_original_up_or_down_identity() {
+    qa_received_control_metadata(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_received_controls_require_original_up_or_down_identity() {
+    qa_received_control_metadata(RecordingGate::Durable);
+}
+
+fn qa_obsolete_control_no_write(gate: RecordingGate) {
+    for class in [ObservationClass::Connected, ObservationClass::Pong] {
+        let wal = TempWal::new("qa-new-obsolete-control");
+        let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let down_identity = qa_original_identity(ObservationClass::Disconnected);
+        let down = qa_admit(&handle, &mut turn, down_identity);
+        sink.persist_owned(
+            &mut turn,
+            &qa_transport(5, down_identity, Transport::Down),
+            gate,
+            &down,
+        )
+        .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &down);
+        let mut identity = qa_original_identity(class);
+        identity.stamp = ReceiveStamp {
+            unix_ns: 6,
+            monotonic_ns: 6,
+        };
+        let work = qa_admit(&handle, &mut turn, identity);
+        let before = handle.authority().ownership_report();
+        let bytes = fs::read(&wal.0).unwrap();
+        let invented_up = qa_transport(6, identity, Transport::Up);
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &invented_up,
+        );
+        assert_eq!(
+            handle.complete_observation(
+                &mut turn,
+                &sink,
+                &work,
+                Some((identity.stream, positive(ConnectionEpoch::new(2))))
+            ),
+            Err(AuthorityError::NotQuiescent)
+        );
+        assert_eq!(handle.authority().ownership_report(), before);
+        handle
+            .complete_observation(
+                &mut turn,
+                &sink,
+                &work,
+                Some((identity.stream, identity.epoch)),
+            )
+            .unwrap();
+        assert_eq!(
+            handle.complete_observation(
+                &mut turn,
+                &sink,
+                &work,
+                Some((identity.stream, identity.epoch))
+            ),
+            Err(AuthorityError::InvalidOwner)
+        );
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        assert_eq!(owner.watermarks().written, Some(record(5)));
+        drop(work);
+        drop(down);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert_eq!(read_all(&wal.0).0.len(), 5);
+    }
+}
+
+#[test]
+fn qa_new_written_authenticated_obsolete_up_and_pong_settle_without_new_write() {
+    qa_obsolete_control_no_write(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_authenticated_obsolete_up_and_pong_settle_without_new_write() {
+    qa_obsolete_control_no_write(RecordingGate::Durable);
+}
+
+#[test]
+fn qa_new_durable_rightful_raw_after_rejection_finalizes_once_with_physical_complete() {
+    let wal = TempWal::new("qa-new-healthy-finalization");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = qa_raw(5, identity, false);
+    let mut wrong = original.clone();
+    let Record::RawInput(raw) = &mut wrong.value else {
+        unreachable!()
+    };
+    raw.context.monotonic_ns = MonotonicNs::new(6);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        RecordingGate::Durable,
+        &wrong,
+    );
+    sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    drop(work);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("healthy exact original")
+    };
+    owner.finalize(&mut turn, &mut proof).unwrap();
+    let (records, report) = read_all(&wal.0);
+    assert_eq!(report.status, ArchiveStatus::Complete);
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[4], original);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(frame.value, Record::SegmentSeal(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(frame.value, Record::ArchiveSeal(_)))
+            .count(),
+        1
+    );
+    let finalized_bytes = fs::read(&wal.0).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::TicketConsumed
+    ));
+    assert!(owner.finalize(&mut turn, &mut proof).is_err());
+    assert_eq!(fs::read(&wal.0).unwrap(), finalized_bytes);
+    assert_eq!(read_all(&wal.0).0, records);
+}
+
+fn qa_timer_identity_only(gate: RecordingGate) {
+    // This authenticates the common Timer observation only. It makes no claim
+    // about the unresolved Ping/Timeout active/obsolete effect-plan contract.
+    let wal = TempWal::new("qa-new-timer-identity");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Timer {
+        timer_id: 99,
+        deadline_ns: 5,
+    });
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = frame(
+        5,
+        Record::Control(ControlRecord {
+            context: qa_context(identity),
+            value: Control::Timer {
+                stream: identity.stream,
+                timer_id: 99,
+                deadline_ns: 5,
+            },
+        }),
+    );
+    for variant in 0..6 {
+        let mut wrong = original.clone();
+        let Record::Control(control) = &mut wrong.value else {
+            unreachable!()
+        };
+        let Control::Timer {
+            stream,
+            timer_id,
+            deadline_ns,
+        } = &mut control.value
+        else {
+            unreachable!()
+        };
+        match variant {
+            0 => *timer_id = 100,
+            1 => *deadline_ns = 4,
+            2 => control.context.unix_ns = LocalUnixNs::new(6),
+            3 => control.context.monotonic_ns = MonotonicNs::new(6),
+            4 => *stream = positive(StreamId::new(2)),
+            5 => {
+                control.value = Control::Transport {
+                    connection: binding().connection_id,
+                    epoch: identity.epoch,
+                    value: Transport::Up,
+                }
+            }
+            _ => unreachable!(),
+        }
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong,
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+    }
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    let mut repeated = original.clone();
+    repeated.record_no = record(6);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &repeated,
+    );
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    assert_eq!(read_all(&wal.0).0.len(), 5);
+    assert_eq!(read_all(&wal.0).0.last(), Some(&original));
+}
+
+#[test]
+fn qa_new_written_timer_requires_original_token_deadline_scope_stamp_and_one_stage() {
+    qa_timer_identity_only(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_timer_requires_original_token_deadline_scope_stamp_and_one_stage() {
+    qa_timer_identity_only(RecordingGate::Durable);
+}
+
+fn qa_rejection_with_failure_cut_and_close(gate: RecordingGate) {
+    let wal = TempWal::new("qa-new-cut-close-preservation");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let mut failure = terminal();
+    failure.attempt = AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2)));
+    let termination = handle.terminate(&mut turn, failure).unwrap();
+    let close = termination.close_owner;
+    drop(termination.close);
+    assert_eq!(work.cut_side(), domain::capture_session::CutSide::PreCut);
+    let held_close = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+    let before = owner.session_status();
+    let original = qa_raw(5, identity, false);
+    let mut wrong = original.clone();
+    let Record::RawInput(raw) = &mut wrong.value else {
+        unreachable!()
+    };
+    raw.context.unix_ns = LocalUnixNs::new(6);
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &wrong,
+    );
+    assert_eq!(owner.session_status().first_failure, Some(failure));
+    assert_eq!(owner.session_status().cut_sequence, before.cut_sequence);
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+    drop(held_close);
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+    assert!(matches!(
+        owner.begin_finalization(&mut turn),
+        Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+    ));
+    let (records, report) = read_all(&wal.0);
+    assert_eq!(records.len(), 5);
+    assert_eq!(records.last(), Some(&original));
+    assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+    assert!(
+        !records
+            .iter()
+            .any(|frame| matches!(frame.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+    );
+}
+
+#[test]
+fn qa_new_written_rejected_raw_preserves_fixed_pre_cut_and_held_close_identity() {
+    qa_rejection_with_failure_cut_and_close(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_rejected_raw_preserves_fixed_pre_cut_and_held_close_identity() {
+    qa_rejection_with_failure_cut_and_close(RecordingGate::Durable);
+}
+
+fn qa_epoch(number: u64, identity: ObservationIdentity, change: EpochChange) -> RecordFrame {
+    frame(
+        number,
+        Record::Control(ControlRecord {
+            context: qa_context(identity),
+            value: Control::EpochAdvance {
+                change,
+                reason: Reason::Reconnect,
+            },
+        }),
+    )
+}
+
+fn qa_generated_original_stages(gate: RecordingGate) {
+    let wal = TempWal::new("qa-new-generated-original-stages");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let bound = binding();
+    let work = qa_admit(&handle, &mut turn, identity);
+    let alias = work.share().unwrap();
+    let down = qa_transport(5, identity, Transport::Down);
+    sink.persist_owned(&mut turn, &down, gate, &work).unwrap();
+    let close = handle
+        .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    work.set_kind(&mut turn, WorkKind::PendingPlan).unwrap();
+    handle.retain_generated_plan(&mut turn, &work).unwrap();
+    // The earlier authenticated Down is not fresh generated progress.
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    let connection = EpochChange::Connection {
+        owner: bound.connection_id,
+        expected: bound.tag.connection,
+        next: bound.tag.connection.checked_next().unwrap(),
+    };
+    let subscription = EpochChange::Subscription {
+        owner: bound.id,
+        expected: bound.tag.subscription,
+        next: bound.tag.subscription.checked_next().unwrap(),
+    };
+    let book = EpochChange::Book {
+        owner: bound.book_id.unwrap(),
+        expected: bound.tag.book.unwrap(),
+        next: bound.tag.book.unwrap().checked_next().unwrap(),
+    };
+    let held_close = leased(owner.reclaim_close(&mut turn, close.clone()));
+    let before = handle.authority().ownership_report();
+    let prefix = handle.prefix();
+    let bytes = fs::read(&wal.0).unwrap();
+    assert_eq!(
+        sink.persist_owned(
+            &mut turn,
+            &qa_epoch(6, identity, connection.clone()),
+            gate,
+            &work
+        ),
+        Err(PersistBoundaryError::Authority(
+            AuthorityError::NotQuiescent
+        ))
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+    drop(held_close);
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        DispatchReport::Dispatched
+    ));
+    let connection_record = qa_epoch(6, identity, connection.clone());
+    for variant in 0..6 {
+        let mut wrong = connection_record.clone();
+        let Record::Control(control) = &mut wrong.value else {
+            unreachable!()
+        };
+        match variant {
+            0 => control.context.unix_ns = LocalUnixNs::new(6),
+            1 => {
+                control.value = Control::EpochAdvance {
+                    change: subscription.clone(),
+                    reason: Reason::Reconnect,
+                }
+            }
+            2 => {
+                control.value = Control::EpochAdvance {
+                    change: book.clone(),
+                    reason: Reason::Reconnect,
+                }
+            }
+            3 => {
+                control.value = Control::EpochAdvance {
+                    change: EpochChange::Connection {
+                        owner: positive(ConnectionId::new(2)),
+                        expected: bound.tag.connection,
+                        next: positive(ConnectionEpoch::new(2)),
+                    },
+                    reason: Reason::Reconnect,
+                }
+            }
+            4 => {
+                control.value = Control::EpochAdvance {
+                    change: EpochChange::Connection {
+                        owner: bound.connection_id,
+                        expected: bound.tag.connection,
+                        next: positive(ConnectionEpoch::new(3)),
+                    },
+                    reason: Reason::Reconnect,
+                }
+            }
+            5 => {
+                control.value = Control::EpochAdvance {
+                    change: connection.clone(),
+                    reason: Reason::Unknown,
+                }
+            }
+            _ => unreachable!(),
+        }
+        qa_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &work,
+            gate,
+            &wrong,
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+    }
+    sink.persist_owned(&mut turn, &connection_record, gate, &work)
+        .unwrap();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &qa_epoch(7, identity, connection),
+    );
+    let subscription_record = qa_epoch(7, identity, subscription.clone());
+    sink.persist_owned(&mut turn, &subscription_record, gate, &work)
+        .unwrap();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &qa_epoch(8, identity, subscription),
+    );
+    let wrong_book = qa_epoch(
+        8,
+        identity,
+        EpochChange::Book {
+            owner: positive(BookId::new(2)),
+            expected: bound.tag.book.unwrap(),
+            next: positive(BookEpoch::new(2)),
+        },
+    );
+    qa_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &wrong_book,
+    );
+    let book_record = qa_epoch(8, identity, book);
+    sink.persist_owned(&mut turn, &book_record, gate, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    handle
+        .authority()
+        .advance_epoch(
+            &mut turn,
+            identity.stream,
+            identity.epoch,
+            positive(ConnectionEpoch::new(2)),
+        )
+        .unwrap();
+    assert_eq!(
+        &read_all(&wal.0).0[4..],
+        &[down, connection_record, subscription_record, book_record]
+    );
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    drop(alias);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close),
+        CloseLeaseReport::AlreadySettled
+    ));
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::Ready(_)
+    ));
+}
+
+#[test]
+fn qa_new_written_generated_completion_needs_original_ordered_fresh_epoch_stages() {
+    qa_generated_original_stages(RecordingGate::Written);
+}
+
+#[test]
+fn qa_new_durable_generated_completion_needs_original_ordered_fresh_epoch_stages() {
+    qa_generated_original_stages(RecordingGate::Durable);
 }
