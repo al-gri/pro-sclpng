@@ -4,8 +4,9 @@ use std::fmt;
 
 use domain::event::{ActiveContext, InputContext};
 use domain::identity::{
-    CaptureAttemptNo, Channel, ConnectionEpoch, ConnectionId, EpochTag, IdentityError, LocalUnixNs,
-    MarketKind, MonotonicNs, RecordNo, SegmentNo, StreamBinding, StreamId,
+    BookEpoch, BookId, CaptureAttemptNo, Channel, ConnectionEpoch, ConnectionId, EpochTag,
+    IdentityError, LocalUnixNs, MarketKind, MonotonicNs, RecordNo, SegmentNo, StreamBinding,
+    StreamId, SubscriptionEpoch,
 };
 use domain::policy::RecordingGate;
 use domain::record::{
@@ -277,6 +278,10 @@ pub enum SupervisorEvent {
         record: RecordNo,
         tag: EpochTag,
     },
+    ObsoleteControl {
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+    },
     PongRecorded {
         stream: StreamId,
         record: RecordNo,
@@ -304,6 +309,13 @@ pub struct DrainResult {
 struct PendingDisconnect {
     epoch: ConnectionEpoch,
     stamp: ReceiveStamp,
+    book_id: BookId,
+    next_connection: ConnectionEpoch,
+    next_subscription: SubscriptionEpoch,
+    next_book: BookEpoch,
+    reconnect_attempt: u32,
+    delay_ns: u64,
+    reconnect_not_before_ns: u64,
 }
 
 struct StreamRuntime {
@@ -405,6 +417,19 @@ enum Ingress {
 }
 
 impl Ingress {
+    fn stream(&self) -> StreamId {
+        match self {
+            Self::Connected { stream, .. }
+            | Self::Disconnected { stream, .. }
+            | Self::Raw { stream, .. }
+            | Self::RejectedStaleRaw { stream, .. }
+            | Self::QueueGap { stream, .. }
+            | Self::Pong { stream, .. }
+            | Self::PingTimer { stream, .. }
+            | Self::PongTimeout { stream, .. } => *stream,
+        }
+    }
+
     fn belongs_to_connection_epoch(&self, stream: StreamId, epoch: ConnectionEpoch) -> bool {
         match self {
             Self::Connected {
@@ -769,7 +794,7 @@ impl PublicWsSupervisor {
             let candidate = {
                 let runtime = self
                     .streams
-                    .get_mut(&stream)
+                    .get(&stream)
                     .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
                 if runtime.transport != Transport::Up {
                     None
@@ -778,38 +803,64 @@ impl PublicWsSupervisor {
                     .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
                     && !runtime.pong_timeout_queued
                 {
-                    let deadline_ns = runtime.pong_deadline_ns.unwrap_or(stamp.monotonic_ns);
-                    let timer_id = next_timer_id(runtime)?;
-                    runtime.pong_timeout_queued = true;
-                    Some(Ingress::PongTimeout {
-                        stream,
-                        epoch: runtime.binding.tag.connection,
-                        stamp,
-                        timer_id,
-                        deadline_ns,
-                    })
+                    Some((
+                        true,
+                        runtime.binding.tag.connection,
+                        runtime.pong_deadline_ns.unwrap_or(stamp.monotonic_ns),
+                        runtime.timer_frontier,
+                    ))
                 } else if runtime.pong_deadline_ns.is_none()
                     && runtime
                         .next_ping_due_ns
                         .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
                     && !runtime.ping_timer_queued
                 {
-                    let deadline_ns = runtime.next_ping_due_ns.unwrap_or(stamp.monotonic_ns);
-                    let timer_id = next_timer_id(runtime)?;
-                    runtime.ping_timer_queued = true;
-                    Some(Ingress::PingTimer {
-                        stream,
-                        epoch: runtime.binding.tag.connection,
-                        stamp,
-                        timer_id,
-                        deadline_ns,
-                    })
+                    Some((
+                        false,
+                        runtime.binding.tag.connection,
+                        runtime.next_ping_due_ns.unwrap_or(stamp.monotonic_ns),
+                        runtime.timer_frontier,
+                    ))
                 } else {
                     None
                 }
             };
-            if let Some(candidate) = candidate {
-                self.push_ingress(stream, candidate)?;
+
+            let Some((is_timeout, epoch, deadline_ns, timer_frontier)) = candidate else {
+                continue;
+            };
+            let Some(timer_id) = timer_frontier.checked_add(1) else {
+                self.halted = true;
+                return Err(SupervisorError::CounterExhausted("TimerId"));
+            };
+            let ingress = if is_timeout {
+                Ingress::PongTimeout {
+                    stream,
+                    epoch,
+                    stamp,
+                    timer_id,
+                    deadline_ns,
+                }
+            } else {
+                Ingress::PingTimer {
+                    stream,
+                    epoch,
+                    stamp,
+                    timer_id,
+                    deadline_ns,
+                }
+            };
+            self.push_ingress(stream, ingress)?;
+
+            let runtime = self
+                .streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
+            runtime.timer_frontier = timer_id;
+            if is_timeout {
+                runtime.pong_timeout_queued = true;
+            } else {
+                runtime.ping_timer_queued = true;
             }
         }
         Ok(())
@@ -820,14 +871,17 @@ impl PublicWsSupervisor {
         sink: &mut impl RecordSink,
     ) -> Result<Option<DrainResult>, SupervisorError> {
         self.ensure_started()?;
+
+        let mut ready = DrainResult::default();
+        self.finish_ready_disconnects(sink, &mut ready)?;
+        if !ready.records.is_empty() || !ready.commands.is_empty() || !ready.events.is_empty() {
+            return Ok(Some(ready));
+        }
+
         let Some(ingress) = self.queue.pop_front() else {
-            let mut result = DrainResult::default();
-            self.finish_ready_disconnects(sink, &mut result)?;
-            if result.records.is_empty() && result.commands.is_empty() && result.events.is_empty() {
-                return Ok(None);
-            }
-            return Ok(Some(result));
+            return Ok(None);
         };
+        let ingress_stream = ingress.stream();
 
         let mut result = match ingress {
             Ingress::Connected {
@@ -899,7 +953,7 @@ impl PublicWsSupervisor {
                 deadline_ns,
             } => self.handle_pong_timeout(stream, epoch, stamp, timer_id, deadline_ns, sink)?,
         };
-        self.finish_ready_disconnects(sink, &mut result)?;
+        self.finish_ready_disconnect_for(ingress_stream, sink, &mut result)?;
         Ok(Some(result))
     }
 
@@ -910,7 +964,7 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, symbol, current_epoch) = {
+        let (connection, symbol, current_epoch, terminal) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -927,11 +981,24 @@ impl PublicWsSupervisor {
                     .as_str()
                     .to_owned(),
                 runtime.binding.tag.connection,
+                runtime
+                    .pending_disconnect
+                    .is_some_and(|pending| pending.epoch == epoch),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
+        if terminal {
+            return Ok(DrainResult {
+                records: Vec::new(),
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::ObsoleteControl { stream, epoch }],
+            });
+        }
+
+        let next_ping_due_ns =
+            self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?;
 
         let record = self.persist_record(
             stamp,
@@ -946,10 +1013,6 @@ impl PublicWsSupervisor {
             sink,
         )?;
 
-        let next_ping_due_ns = stamp
-            .monotonic_ns
-            .checked_add(HEARTBEAT_INTERVAL_NS)
-            .ok_or(SupervisorError::TimeOverflow)?;
         let runtime =
             self.streams
                 .get_mut(&stream)
@@ -997,7 +1060,7 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, current_epoch) = {
+        let (connection, current_epoch, terminal) = {
             let runtime = self
                 .streams
                 .get(&stream)
@@ -1005,11 +1068,24 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
+                runtime
+                    .pending_disconnect
+                    .is_some_and(|pending| pending.epoch == epoch),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
+        if terminal {
+            return Ok(DrainResult {
+                records: Vec::new(),
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::ObsoleteControl { stream, epoch }],
+            });
+        }
+
+        let next_ping_due_ns =
+            self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?;
 
         let record = self.persist_record(
             stamp,
@@ -1023,10 +1099,6 @@ impl PublicWsSupervisor {
             }),
             sink,
         )?;
-        let next_ping_due_ns = stamp
-            .monotonic_ns
-            .checked_add(HEARTBEAT_INTERVAL_NS)
-            .ok_or(SupervisorError::TimeOverflow)?;
         let runtime = self
             .streams
             .get_mut(&stream)
@@ -1060,7 +1132,7 @@ impl PublicWsSupervisor {
         deadline_ns: u64,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, current_epoch) = {
+        let (connection, current_epoch, terminal) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -1070,11 +1142,41 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
+                runtime
+                    .pending_disconnect
+                    .is_some_and(|pending| pending.epoch == epoch),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
+
+        if terminal {
+            let record = self.persist_record(
+                stamp,
+                Record::Control(ControlRecord {
+                    context: stamp.wire_context(self.active_context),
+                    value: Control::Timer {
+                        stream,
+                        timer_id,
+                        deadline_ns,
+                    },
+                }),
+                sink,
+            )?;
+            return Ok(DrainResult {
+                records: vec![record],
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::HeartbeatTimerRecorded {
+                    stream,
+                    record,
+                    timer_id,
+                }],
+            });
+        }
+
+        let pong_deadline_ns =
+            self.checked_time_add_or_halt(stamp.monotonic_ns, PONG_TIMEOUT_NS_V1)?;
 
         let record = self.persist_record(
             stamp,
@@ -1088,10 +1190,6 @@ impl PublicWsSupervisor {
             }),
             sink,
         )?;
-        let pong_deadline_ns = stamp
-            .monotonic_ns
-            .checked_add(PONG_TIMEOUT_NS_V1)
-            .ok_or(SupervisorError::TimeOverflow)?;
         let runtime =
             self.streams
                 .get_mut(&stream)
@@ -1126,6 +1224,8 @@ impl PublicWsSupervisor {
         deadline_ns: u64,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
+        let plan = self.preflight_disconnect(stream, epoch, stamp, 1)?;
+
         let timer_record = self.persist_record(
             stamp,
             Record::Control(ControlRecord {
@@ -1141,7 +1241,7 @@ impl PublicWsSupervisor {
         if let Some(runtime) = self.streams.get_mut(&stream) {
             runtime.pong_timeout_queued = false;
         }
-        let mut result = self.begin_disconnect(stream, epoch, stamp, sink)?;
+        let mut result = self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)?;
         result.records.insert(0, timer_record);
         result.events.insert(
             0,
@@ -1258,6 +1358,23 @@ impl PublicWsSupervisor {
             .binding
             .tag;
         if tag != current_tag {
+            return Ok(DrainResult {
+                records: vec![raw_record],
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::ObsoleteRawRecorded {
+                    stream,
+                    record: raw_record,
+                    tag,
+                }],
+            });
+        }
+        let terminal = self
+            .streams
+            .get(&stream)
+            .ok_or(SupervisorError::InvalidConfiguration("missing raw stream"))?
+            .pending_disconnect
+            .is_some_and(|pending| pending.epoch == tag.connection);
+        if terminal {
             return Ok(DrainResult {
                 records: vec![raw_record],
                 commands: Vec::new(),
@@ -1449,7 +1566,18 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, duplicate_pending) = {
+        let plan = self.preflight_disconnect(stream, epoch, stamp, 0)?;
+        self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)
+    }
+
+    fn preflight_disconnect(
+        &mut self,
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+        records_before_down: u64,
+    ) -> Result<Option<PendingDisconnect>, SupervisorError> {
+        let (connection, old_tag, book_id, reconnect_failures, duplicate_pending) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -1462,11 +1590,79 @@ impl PublicWsSupervisor {
                     epoch,
                 });
             }
-            let duplicate_pending = runtime
-                .pending_disconnect
-                .is_some_and(|pending| pending.epoch == epoch);
-            (runtime.binding.connection_id, duplicate_pending)
+            (
+                runtime.binding.connection_id,
+                runtime.binding.tag,
+                runtime
+                    .binding
+                    .book_id
+                    .ok_or(SupervisorError::InvalidConfiguration("missing book id"))?,
+                runtime.reconnect_failures,
+                runtime
+                    .pending_disconnect
+                    .is_some_and(|pending| pending.epoch == epoch),
+            )
         };
+
+        let required_records = records_before_down + if duplicate_pending { 1 } else { 4 };
+        self.ensure_record_capacity(required_records)?;
+        if duplicate_pending {
+            return Ok(None);
+        }
+
+        let next_connection = match old_tag.connection.checked_next() {
+            Ok(value) => value,
+            Err(error) => return self.halt_with(SupervisorError::Identity(error)),
+        };
+        let next_subscription = match old_tag.subscription.checked_next() {
+            Ok(value) => value,
+            Err(error) => return self.halt_with(SupervisorError::Identity(error)),
+        };
+        let old_book = old_tag
+            .book
+            .ok_or(SupervisorError::InvalidConfiguration("missing book epoch"))?;
+        let next_book = match old_book.checked_next() {
+            Ok(value) => value,
+            Err(error) => return self.halt_with(SupervisorError::Identity(error)),
+        };
+        let reconnect_attempt = match reconnect_failures.checked_add(1) {
+            Some(value) => value,
+            None => return self.halt_with(SupervisorError::CounterExhausted("ReconnectAttempt")),
+        };
+        let delay_ns = reconnect_delay_ns(reconnect_attempt, stream);
+        let reconnect_not_before_ns =
+            self.checked_time_add_or_halt(stamp.monotonic_ns, delay_ns)?;
+
+        let _ = connection;
+        Ok(Some(PendingDisconnect {
+            epoch,
+            stamp,
+            book_id,
+            next_connection,
+            next_subscription,
+            next_book,
+            reconnect_attempt,
+            delay_ns,
+            reconnect_not_before_ns,
+        }))
+    }
+
+    fn persist_disconnect_observation(
+        &mut self,
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+        plan: Option<PendingDisconnect>,
+        sink: &mut impl RecordSink,
+    ) -> Result<DrainResult, SupervisorError> {
+        let connection = self
+            .streams
+            .get(&stream)
+            .ok_or(SupervisorError::InvalidConfiguration(
+                "missing disconnected stream",
+            ))?
+            .binding
+            .connection_id;
 
         let down_record = self.persist_record(
             stamp,
@@ -1481,7 +1677,7 @@ impl PublicWsSupervisor {
             sink,
         )?;
 
-        if duplicate_pending {
+        let Some(plan) = plan else {
             return Ok(DrainResult {
                 records: vec![down_record],
                 commands: Vec::new(),
@@ -1491,7 +1687,7 @@ impl PublicWsSupervisor {
                     value: Transport::Down,
                 }],
             });
-        }
+        };
 
         let runtime =
             self.streams
@@ -1507,7 +1703,7 @@ impl PublicWsSupervisor {
         runtime.ping_timer_queued = false;
         runtime.pong_timeout_queued = false;
         runtime.last_market_record = None;
-        runtime.pending_disconnect = Some(PendingDisconnect { epoch, stamp });
+        runtime.pending_disconnect = Some(plan);
 
         Ok(DrainResult {
             records: vec![down_record],
@@ -1520,29 +1716,47 @@ impl PublicWsSupervisor {
         })
     }
 
+    fn disconnect_ready(&self, stream: StreamId) -> bool {
+        let Some(runtime) = self.streams.get(&stream) else {
+            return false;
+        };
+        let Some(pending) = runtime.pending_disconnect else {
+            return false;
+        };
+        !self
+            .queue
+            .iter()
+            .any(|ingress| ingress.belongs_to_connection_epoch(stream, pending.epoch))
+    }
+
+    fn finish_ready_disconnect_for(
+        &mut self,
+        stream: StreamId,
+        sink: &mut impl RecordSink,
+        result: &mut DrainResult,
+    ) -> Result<(), SupervisorError> {
+        if !self.disconnect_ready(stream) {
+            return Ok(());
+        }
+        let completed = self.finish_disconnect(stream, sink)?;
+        result.records.extend(completed.records);
+        result.commands.extend(completed.commands);
+        result.events.extend(completed.events);
+        Ok(())
+    }
+
     fn finish_ready_disconnects(
         &mut self,
         sink: &mut impl RecordSink,
         result: &mut DrainResult,
     ) -> Result<(), SupervisorError> {
-        let ready: Vec<StreamId> = self
+        let ready = self
             .streams
-            .iter()
-            .filter_map(|(stream, runtime)| {
-                let pending = runtime.pending_disconnect?;
-                let still_queued = self
-                    .queue
-                    .iter()
-                    .any(|ingress| ingress.belongs_to_connection_epoch(*stream, pending.epoch));
-                (!still_queued).then_some(*stream)
-            })
-            .collect();
-
-        for stream in ready {
-            let completed = self.finish_disconnect(stream, sink)?;
-            result.records.extend(completed.records);
-            result.commands.extend(completed.commands);
-            result.events.extend(completed.events);
+            .keys()
+            .copied()
+            .find(|stream| self.disconnect_ready(*stream));
+        if let Some(stream) = ready {
+            self.finish_ready_disconnect_for(stream, sink, result)?;
         }
         Ok(())
     }
@@ -1552,7 +1766,7 @@ impl PublicWsSupervisor {
         stream: StreamId,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, old_tag, book_id, pending) = {
+        let (connection, old_tag, pending) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -1565,29 +1779,19 @@ impl PublicWsSupervisor {
                     .ok_or(SupervisorError::InvalidConfiguration(
                         "missing pending disconnect",
                     ))?;
-            (
-                runtime.binding.connection_id,
-                runtime.binding.tag,
-                runtime
-                    .binding
-                    .book_id
-                    .ok_or(SupervisorError::InvalidConfiguration("missing book id"))?,
-                pending,
-            )
+            (runtime.binding.connection_id, runtime.binding.tag, pending)
         };
-        if old_tag.connection != pending.epoch {
-            return Err(SupervisorError::UnknownConnectionEpoch {
-                connection,
-                epoch: pending.epoch,
-            });
+        if old_tag.connection != pending.epoch
+            || old_tag.subscription.checked_next().ok() != Some(pending.next_subscription)
+            || old_tag.book.and_then(|book| book.checked_next().ok()) != Some(pending.next_book)
+            || old_tag.connection.checked_next().ok() != Some(pending.next_connection)
+        {
+            return self.halt_with(SupervisorError::InvalidConfiguration(
+                "pending disconnect plan mismatch",
+            ));
         }
 
-        let next_connection = old_tag.connection.checked_next()?;
-        let next_subscription = old_tag.subscription.checked_next()?;
-        let old_book = old_tag
-            .book
-            .ok_or(SupervisorError::InvalidConfiguration("missing book epoch"))?;
-        let next_book = old_book.checked_next()?;
+        self.ensure_record_capacity(3)?;
 
         let connection_record = self.persist_record(
             pending.stamp,
@@ -1597,16 +1801,13 @@ impl PublicWsSupervisor {
                     change: EpochChange::Connection {
                         owner: connection,
                         expected: old_tag.connection,
-                        next: next_connection,
+                        next: pending.next_connection,
                     },
                     reason: Reason::Reconnect,
                 },
             }),
             sink,
         )?;
-        if let Some(runtime) = self.streams.get_mut(&stream) {
-            runtime.binding.tag.connection = next_connection;
-        }
 
         let subscription_record = self.persist_record(
             pending.stamp,
@@ -1616,16 +1817,13 @@ impl PublicWsSupervisor {
                     change: EpochChange::Subscription {
                         owner: stream,
                         expected: old_tag.subscription,
-                        next: next_subscription,
+                        next: pending.next_subscription,
                     },
                     reason: Reason::Reconnect,
                 },
             }),
             sink,
         )?;
-        if let Some(runtime) = self.streams.get_mut(&stream) {
-            runtime.binding.tag.subscription = next_subscription;
-        }
 
         let book_record = self.persist_record(
             pending.stamp,
@@ -1633,9 +1831,13 @@ impl PublicWsSupervisor {
                 context: pending.stamp.wire_context(self.active_context),
                 value: Control::EpochAdvance {
                     change: EpochChange::Book {
-                        owner: book_id,
-                        expected: old_book,
-                        next: next_book,
+                        owner: pending.book_id,
+                        expected: old_tag
+                            .book
+                            .ok_or(SupervisorError::InvalidConfiguration(
+                                "missing book epoch",
+                            ))?,
+                        next: pending.next_book,
                     },
                     reason: Reason::Reconnect,
                 },
@@ -1643,7 +1845,7 @@ impl PublicWsSupervisor {
             sink,
         )?;
 
-        let (new_tag, delay_ns) = {
+        let new_tag = {
             let runtime =
                 self.streams
                     .get_mut(&stream)
@@ -1651,7 +1853,9 @@ impl PublicWsSupervisor {
                         "missing disconnected stream",
                     ))?;
             runtime.previous_tag = Some(old_tag);
-            runtime.binding.tag.book = Some(next_book);
+            runtime.binding.tag.connection = pending.next_connection;
+            runtime.binding.tag.subscription = pending.next_subscription;
+            runtime.binding.tag.book = Some(pending.next_book);
             runtime.transport = Transport::Unknown;
             runtime.subscription = SubscriptionState::Backoff;
             runtime.continuity.clear_for_new_generation();
@@ -1661,16 +1865,9 @@ impl PublicWsSupervisor {
             runtime.pong_timeout_queued = false;
             runtime.last_market_record = None;
             runtime.pending_disconnect = None;
-            runtime.reconnect_failures = runtime.reconnect_failures.saturating_add(1);
-            let delay_ns = reconnect_delay_ns(runtime.reconnect_failures, stream);
-            runtime.reconnect_not_before_ns = Some(
-                pending
-                    .stamp
-                    .monotonic_ns
-                    .checked_add(delay_ns)
-                    .ok_or(SupervisorError::TimeOverflow)?,
-            );
-            (runtime.binding.tag, delay_ns)
+            runtime.reconnect_failures = pending.reconnect_attempt;
+            runtime.reconnect_not_before_ns = Some(pending.reconnect_not_before_ns);
+            runtime.binding.tag
         };
 
         Ok(DrainResult {
@@ -1678,7 +1875,7 @@ impl PublicWsSupervisor {
             commands: vec![TransportCommand::ReconnectAfter {
                 connection,
                 epoch: new_tag.connection,
-                delay_ns,
+                delay_ns: pending.delay_ns,
             }],
             events: vec![SupervisorEvent::EpochAdvanced {
                 stream,
@@ -1719,9 +1916,14 @@ impl PublicWsSupervisor {
         value: Record,
         sink: &mut impl RecordSink,
     ) -> Result<RecordNo, SupervisorError> {
+        self.ensure_record_capacity(1)?;
         let record_no = self
             .next_record_no
             .ok_or(SupervisorError::CounterExhausted("RecordNo"))?;
+        let next_record_no = match record_no.checked_next() {
+            Ok(value) => value,
+            Err(_) => return self.halt_with(SupervisorError::CounterExhausted("RecordNo")),
+        };
         let frame = RecordFrame {
             record_no,
             segment_no: self.segment_no,
@@ -1748,7 +1950,7 @@ impl PublicWsSupervisor {
                 achieved: receipt.achieved,
             });
         }
-        self.next_record_no = record_no.checked_next().ok();
+        self.next_record_no = Some(next_record_no);
         Ok(record_no)
     }
 
@@ -1829,6 +2031,32 @@ impl PublicWsSupervisor {
         Ok(())
     }
 
+    fn checked_time_add_or_halt(
+        &mut self,
+        base: u64,
+        delta: u64,
+    ) -> Result<u64, SupervisorError> {
+        match base.checked_add(delta) {
+            Some(value) => Ok(value),
+            None => self.halt_with(SupervisorError::TimeOverflow),
+        }
+    }
+
+    fn ensure_record_capacity(&mut self, count: u64) -> Result<(), SupervisorError> {
+        let Some(record_no) = self.next_record_no else {
+            return self.halt_with(SupervisorError::CounterExhausted("RecordNo"));
+        };
+        if record_no.get().checked_add(count).is_none() {
+            return self.halt_with(SupervisorError::CounterExhausted("RecordNo"));
+        }
+        Ok(())
+    }
+
+    fn halt_with<T>(&mut self, error: SupervisorError) -> Result<T, SupervisorError> {
+        self.halted = true;
+        Err(error)
+    }
+
     fn ensure_running(&self) -> Result<(), SupervisorError> {
         if self.halted {
             Err(SupervisorError::Halted)
@@ -1845,15 +2073,6 @@ impl PublicWsSupervisor {
             Err(SupervisorError::NotStarted)
         }
     }
-}
-
-fn next_timer_id(runtime: &mut StreamRuntime) -> Result<u64, SupervisorError> {
-    let next = runtime
-        .timer_frontier
-        .checked_add(1)
-        .ok_or(SupervisorError::CounterExhausted("TimerId"))?;
-    runtime.timer_frontier = next;
-    Ok(next)
 }
 
 pub fn reconnect_delay_ns(attempt: u32, stream: StreamId) -> u64 {
