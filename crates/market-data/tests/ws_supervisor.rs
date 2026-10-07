@@ -9151,3 +9151,1363 @@ fn qa_d1_partial_generated_completion_retains_obligation_and_truthful_storage_st
         }
     }
 }
+
+#[test]
+fn qa8_independent_partial_completion_closing_alias_drop_preserves_original_stop() {
+    for closing in [false, true] {
+        for confirmed in [1_u64, 2] {
+            for mode in 0..3 {
+                let a = stream_binding(1, 1, 1, "BTCUSDT");
+                let mut s = canonical_supervisor(
+                    vec![a.clone()],
+                    QueuePolicy::default(),
+                    RecordingGate::Durable,
+                );
+                s.start_commands().unwrap();
+                connect_one(&mut s, &mut MemorySink::default(), &a, 1);
+                s.inner
+                    .queue_disconnected(&mut s.turn, a.connection_id, a.tag.connection, stamp(31))
+                    .outcome
+                    .unwrap();
+                let mut down = s
+                    .inner
+                    .drain_one(&mut s.turn, &mut s.bound_sink)
+                    .outcome
+                    .unwrap()
+                    .unwrap();
+                let close = std::mem::take(&mut down.commands)
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                let old_close = close.close_owner().unwrap().clone();
+                let session::CloseStorage::WorkOwner(work_id) = old_close.storage() else {
+                    panic!("transferred original work");
+                };
+                assert!(matches!(
+                    s.owner
+                        .as_mut()
+                        .unwrap()
+                        .dispatch(&mut s.turn, close, |_| Ok::<(), ()>(())),
+                    session::DispatchReport::Dispatched
+                ));
+                let ticket = closing.then(|| {
+                    s.owner
+                        .as_mut()
+                        .unwrap()
+                        .begin_finalization(&mut s.turn)
+                        .unwrap()
+                });
+                let initial = s.owner.as_ref().unwrap().watermarks().durable.unwrap();
+                let at = id(RecordNo::new(initial.get() + 1 + confirmed));
+                let kind = match mode {
+                    0 => recording::SinkFaultKind::BeforeWrite(session::PersistError::typed(
+                        session::PersistErrorKind::Io,
+                        "qa8 independent before-write",
+                    )),
+                    1 => recording::SinkFaultKind::ReceiptMismatch {
+                        through: at.checked_next().unwrap(),
+                    },
+                    _ => recording::SinkFaultKind::WeakGate {
+                        achieved: RecordingGate::Flushed,
+                    },
+                };
+                s.owner
+                    .as_mut()
+                    .unwrap()
+                    .set_sink_fault(&mut s.turn, Some(recording::SinkFault { at, kind }))
+                    .unwrap();
+                assert!(
+                    s.inner
+                        .drain_one(&mut s.turn, &mut s.bound_sink)
+                        .outcome
+                        .is_err()
+                );
+                let stopped = s.inner.session_status();
+                let first_stop = stopped.storage_stopped.unwrap();
+                assert_ne!(
+                    first_stop.kind,
+                    session::PersistErrorKind::OwnershipAbandoned
+                );
+                assert!(stopped.first_abandonment.is_none());
+                assert_eq!(s.inner.snapshot(a.id).unwrap().tag, a.tag);
+                assert_eq!(
+                    s.authority
+                        .trusted_watermark(WatermarkKind::Durable)
+                        .unwrap()
+                        .get(),
+                    initial.get() + confirmed
+                );
+                let physical = s.owner.as_ref().unwrap().watermarks();
+                assert_eq!(
+                    physical.durable.unwrap().get(),
+                    initial.get() + confirmed + u64::from(mode != 0)
+                );
+                let length = fs::metadata(&s.temp.path).unwrap().len();
+                let close_report = s.owner.as_mut().unwrap().close_diagnostic(&mut s.turn);
+                assert!(matches!(
+                    close_report.outcome,
+                    Ok(recording::DiagnosticCloseState::Closed)
+                ));
+                assert_eq!(close_report.undrained_owners.work_total, 1);
+                assert_eq!(s.inner.retention_report().pending_work, 1);
+                let PublicWsSupervisor {
+                    inner,
+                    authority,
+                    mut turn,
+                    owner,
+                    bound_sink,
+                    temp,
+                    ..
+                } = s;
+                drop(inner);
+                // Lost stewardship is visible despite the original held Down alias.
+                assert_eq!(authority.ownership_report().abandoned_work, 1);
+                let before_foreign = authority.status();
+                let (_, mut foreign) = session::CaptureSessionAuthority::new(authority.binding());
+                assert_eq!(
+                    authority.synchronize_obligations(&mut foreign),
+                    Err(session::AuthorityError::AuthorityMismatch)
+                );
+                assert_eq!(authority.status(), before_foreign);
+                authority.synchronize_obligations(&mut turn).unwrap();
+                let reconciled = authority.status();
+                assert_eq!(reconciled.storage_stopped, Some(first_stop));
+                assert_eq!(reconciled.first_failure, stopped.first_failure);
+                assert_eq!(reconciled.archive_observation, stopped.archive_observation);
+                assert_eq!(reconciled.cut_sequence, stopped.cut_sequence);
+                let abandoned = reconciled.first_abandonment.unwrap();
+                assert_eq!(abandoned.work_id, work_id);
+                assert_eq!(
+                    abandoned.identity.class,
+                    session::ObservationClass::Disconnected
+                );
+                assert_eq!(abandoned.identity.epoch, a.tag.connection);
+                assert_eq!(abandoned.identity.stamp.monotonic_ns, 31);
+                assert_eq!(abandoned.identity.stamp.unix_ns, stamp(31).unix_ns);
+                let mut owner = owner.unwrap();
+                drop(down);
+                for _ in 0..8 {
+                    let report = owner.close_diagnostic(&mut turn);
+                    assert!(matches!(
+                        report.outcome,
+                        Ok(recording::DiagnosticCloseState::Closed)
+                    ));
+                    assert_eq!(report.undrained_owners.work_total, 1);
+                    assert_eq!(authority.ownership_report().work_used, 1);
+                    assert_eq!(authority.ownership_report().pending_observations, 0);
+                    assert_eq!(authority.ownership_report().abandoned_work, 1);
+                    assert_eq!(owner.watermarks(), physical);
+                    assert_eq!(fs::metadata(&temp.path).unwrap().len(), length);
+                    assert_eq!(authority.status().storage_stopped, Some(first_stop));
+                    assert!(matches!(
+                        owner.reclaim_close(&mut turn, old_close.clone()),
+                        session::CloseLeaseReport::AlreadySettled
+                    ));
+                    if let Some(ticket) = &ticket {
+                        assert!(matches!(
+                            authority.quiesce(&mut turn, ticket),
+                            session::QuiescenceReport::FinalizationInvalidated(
+                                session::AuthorityError::ArchiveFailed
+                            )
+                        ));
+                    }
+                }
+                let mut reader = WalReader::open(&temp.path).unwrap();
+                let mut advances = 0;
+                while let Some(frame) = reader.next_record().unwrap() {
+                    match frame.value {
+                        Record::Control(ControlRecord {
+                            value: Control::EpochAdvance { .. },
+                            ..
+                        }) => advances += 1,
+                        Record::SegmentSeal(_) | Record::ArchiveSeal(_) => panic!("no seals"),
+                        _ => {}
+                    }
+                }
+                assert_eq!(advances, confirmed + u64::from(mode != 0));
+                assert_eq!(
+                    reader.report().status,
+                    recording::ArchiveStatus::ValidPrefixIncomplete
+                );
+                assert_eq!(reader.report().input_quality, None);
+                drop(bound_sink);
+            }
+        }
+    }
+}
+
+fn qa8_direct_partial_generated_cancel(confirmed: u64, mode: u8) {
+    let a = stream_binding(1, 1, 1, "BTCUSDT");
+    let temp = TempWal::new("qa8-direct-generated-cancel");
+    let prefix = bootstrap_prefix_many(std::slice::from_ref(&a), RecordingGate::Durable);
+    let (mut owner, mut turn) = CaptureSessionOwner::create_new(
+        &temp.path,
+        &prefix[0],
+        BoundedCaptureProfile::new(&prefix[1..]),
+    )
+    .unwrap();
+    let (handle, mut sink) = owner
+        .register_supervisor(
+            &mut turn,
+            &[session::ScopeBinding {
+                stream: a.id,
+                connection: a.connection_id,
+                epoch: a.tag.connection,
+            }],
+            session::RetentionBudget {
+                item_cap: 5,
+                raw_frame_limit: 1,
+                raw_byte_limit: 1024,
+                max_message_bytes: 1024,
+            },
+        )
+        .unwrap();
+    let work = handle
+        .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+        .unwrap();
+    handle
+        .admit_observation(
+            &mut turn,
+            &work,
+            session::ObservationIdentity {
+                stream: a.id,
+                epoch: a.tag.connection,
+                stamp: session::ReceiveStamp {
+                    unix_ns: stamp(31).unix_ns,
+                    monotonic_ns: 31,
+                },
+                class: session::ObservationClass::Disconnected,
+                tag: None,
+                attempts: None,
+                loss_count: None,
+            },
+        )
+        .unwrap();
+    work.set_kind(&mut turn, session::WorkKind::InFlightObservation)
+        .unwrap();
+    let frame = |n, value| RecordFrame {
+        record_no: id(RecordNo::new(n)),
+        segment_no: SegmentNo::new(0),
+        value: Record::Control(ControlRecord {
+            context: WireContext {
+                unix_ns: LocalUnixNs::new(stamp(31).unix_ns),
+                monotonic_ns: MonotonicNs::new(31),
+                context: InputContext::Active(active_context()),
+            },
+            value,
+        }),
+    };
+    let down = frame(
+        5,
+        Control::Transport {
+            connection: a.connection_id,
+            epoch: a.tag.connection,
+            value: Transport::Down,
+        },
+    );
+    sink.persist_owned(&mut turn, &down, RecordingGate::Durable, &work)
+        .unwrap();
+    handle
+        .complete_observation(&mut turn, &sink, &work, None)
+        .unwrap();
+    let close_ref = handle
+        .mandatory_close(&mut turn, a.id, a.tag.connection, Some(&work))
+        .unwrap();
+    assert_eq!(
+        close_ref.storage(),
+        session::CloseStorage::WorkOwner(work.id())
+    );
+    let session::CloseLeaseReport::Leased(close) =
+        owner.reclaim_close(&mut turn, close_ref.clone())
+    else {
+        panic!("same Down-owned Close available");
+    };
+    assert!(matches!(
+        owner.dispatch(&mut turn, close.into_command(), |_| Ok::<(), ()>(())),
+        session::DispatchReport::Dispatched
+    ));
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close_ref),
+        session::CloseLeaseReport::AlreadySettled
+    ));
+    work.set_kind(&mut turn, session::WorkKind::PendingPlan)
+        .unwrap();
+    handle.retain_generated_plan(&mut turn, &work).unwrap();
+    let first = frame(
+        6,
+        Control::EpochAdvance {
+            change: EpochChange::Connection {
+                owner: a.connection_id,
+                expected: a.tag.connection,
+                next: a.tag.connection.checked_next().unwrap(),
+            },
+            reason: Reason::Reconnect,
+        },
+    );
+    sink.persist_owned(&mut turn, &first, RecordingGate::Durable, &work)
+        .unwrap();
+    let subscription = frame(
+        7,
+        Control::EpochAdvance {
+            change: EpochChange::Subscription {
+                owner: a.id,
+                expected: a.tag.subscription,
+                next: a.tag.subscription.checked_next().unwrap(),
+            },
+            reason: Reason::Reconnect,
+        },
+    );
+    if confirmed == 2 {
+        sink.persist_owned(&mut turn, &subscription, RecordingGate::Durable, &work)
+            .unwrap();
+    }
+    let failed = if confirmed == 1 {
+        subscription
+    } else {
+        frame(
+            8,
+            Control::EpochAdvance {
+                change: EpochChange::Book {
+                    owner: a.book_id.unwrap(),
+                    expected: a.tag.book.unwrap(),
+                    next: a.tag.book.unwrap().checked_next().unwrap(),
+                },
+                reason: Reason::Reconnect,
+            },
+        )
+    };
+    let kind = match mode {
+        0 => recording::SinkFaultKind::BeforeWrite(session::PersistError::new(
+            "qa8 next epoch write",
+        )),
+        1 => recording::SinkFaultKind::ReceiptMismatch {
+            through: failed.record_no.checked_next().unwrap(),
+        },
+        _ => recording::SinkFaultKind::WeakGate {
+            achieved: RecordingGate::Flushed,
+        },
+    };
+    owner
+        .set_sink_fault(
+            &mut turn,
+            Some(recording::SinkFault {
+                at: failed.record_no,
+                kind,
+            }),
+        )
+        .unwrap();
+    assert!(
+        sink.persist_owned(&mut turn, &failed, RecordingGate::Durable, &work)
+            .is_err()
+    );
+    let first_stop = owner.session_status().storage_stopped;
+    assert!(first_stop.is_some());
+    let report = owner.close_diagnostic(&mut turn);
+    assert!(matches!(
+        report.outcome,
+        Ok(recording::DiagnosticCloseState::Closed)
+    ));
+    assert_eq!(report.undrained_owners.work_total, 1);
+    let before_cancel = owner.session_status();
+    let before_ledger = sink.authority().ownership_report();
+    let before_physical = owner.watermarks();
+    let before_bytes = fs::read(&temp.path).unwrap();
+    let cancel = handle.cancel_generated_plan(&mut turn, &work);
+    assert_eq!(cancel, Err(session::AuthorityError::StorageStopped));
+    for _ in 0..16 {
+        assert_eq!(
+            handle.cancel_generated_plan(&mut turn, &work),
+            Err(session::AuthorityError::StorageStopped)
+        );
+        assert_eq!(owner.session_status(), before_cancel);
+        assert_eq!(sink.authority().ownership_report(), before_ledger);
+        assert_eq!(owner.watermarks(), before_physical);
+        assert_eq!(fs::read(&temp.path).unwrap(), before_bytes);
+    }
+    println!(
+        "qa8 direct cancel result={cancel:?}; before_drop={:?}",
+        sink.authority().ownership_report()
+    );
+    drop(work);
+    println!(
+        "qa8 direct after_drop={:?}; stop={:?}",
+        sink.authority().ownership_report(),
+        owner.session_status().storage_stopped
+    );
+    let after = owner.close_diagnostic(&mut turn);
+    println!(
+        "qa8 confirmed={confirmed} mode={mode} after_close_undrained={:?} first_stop={first_stop:?} preserved_stop={:?}",
+        after.undrained_owners,
+        owner.session_status().storage_stopped
+    );
+    let mut reader = WalReader::open(&temp.path).unwrap();
+    let mut generated = 0;
+    while let Some(frame) = reader.next_record().unwrap() {
+        match frame.value {
+            Record::Control(ControlRecord {
+                value: Control::EpochAdvance { .. },
+                ..
+            }) => generated += 1,
+            Record::ArchiveSeal(_) | Record::SegmentSeal(_) => {
+                panic!("failed archive must retain no seals")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(generated, confirmed + u64::from(mode != 0));
+    assert_eq!(
+        reader.report().status,
+        recording::ArchiveStatus::ValidPrefixIncomplete
+    );
+    assert_eq!(reader.report().input_quality, None);
+    assert_eq!(
+        handle
+            .trusted_watermark(WatermarkKind::Durable)
+            .unwrap()
+            .get(),
+        5 + confirmed
+    );
+    println!(
+        "qa8 actual physical generated={generated}, trusted_durable={:?}, physical_durable={:?}, status={:?}, quality={:?}",
+        handle.trusted_watermark(WatermarkKind::Durable),
+        owner.watermarks().durable,
+        reader.report().status,
+        reader.report().input_quality
+    );
+    assert!(
+        cancel.is_err(),
+        "a registered genuine owner's public settlement path cannot cancel partially confirmed generated work"
+    );
+    assert_eq!(sink.authority().ownership_report().work_used, 1);
+    assert_eq!(sink.authority().ownership_report().abandoned_work, 1);
+    assert_eq!(after.undrained_owners.work_total, 1);
+    assert_eq!(
+        owner.session_status().first_failure,
+        before_cancel.first_failure
+    );
+    assert_eq!(
+        owner.session_status().cut_sequence,
+        before_cancel.cut_sequence
+    );
+    assert_eq!(
+        owner.session_status().archive_observation,
+        before_cancel.archive_observation
+    );
+    assert_eq!(owner.watermarks(), before_physical);
+    assert_eq!(fs::read(&temp.path).unwrap(), before_bytes);
+    assert_eq!(owner.session_status().storage_stopped, first_stop);
+}
+
+#[test]
+fn qa8_independent_direct_partial_one_beforewrite() {
+    qa8_direct_partial_generated_cancel(1, 0);
+}
+#[test]
+fn qa8_independent_direct_partial_two_beforewrite() {
+    qa8_direct_partial_generated_cancel(2, 0);
+}
+#[test]
+fn qa8_independent_direct_partial_one_mismatch() {
+    qa8_direct_partial_generated_cancel(1, 1);
+}
+#[test]
+fn qa8_independent_direct_partial_two_mismatch() {
+    qa8_direct_partial_generated_cancel(2, 1);
+}
+#[test]
+fn qa8_independent_direct_partial_one_weakgate() {
+    qa8_direct_partial_generated_cancel(1, 2);
+}
+#[test]
+fn qa8_independent_direct_partial_two_weakgate() {
+    qa8_direct_partial_generated_cancel(2, 2);
+}
+
+// A genuine registered public handle before transfer into PublicWsSupervisor.
+// The fixture keeps the actual owner and its concrete Durable WAL sink.
+struct QaD2Generated {
+    owner: CaptureSessionOwner,
+    turn: session::SessionTurn,
+    handle: session::SupervisorSessionHandle,
+    sink: session::BoundRecordSink,
+    binding: StreamBinding,
+    work: Option<session::WorkOwner>,
+    close_ref: session::CloseOwnerRef,
+    held_close: Option<session::CommandLease>,
+    temp: TempWal,
+}
+
+impl QaD2Generated {
+    fn new(hold_close: bool) -> Self {
+        let binding = stream_binding(1, 1, 1, "BTCUSDT");
+        let temp = TempWal::new("qa-d2-public-generated-boundary");
+        let prefix = bootstrap_prefix_many(std::slice::from_ref(&binding), RecordingGate::Durable);
+        let (mut owner, mut turn) = CaptureSessionOwner::create_new(
+            &temp.path,
+            &prefix[0],
+            BoundedCaptureProfile::new(&prefix[1..]),
+        )
+        .unwrap();
+        let (handle, mut sink) = owner
+            .register_supervisor(
+                &mut turn,
+                &[session::ScopeBinding {
+                    stream: binding.id,
+                    connection: binding.connection_id,
+                    epoch: binding.tag.connection,
+                }],
+                session::RetentionBudget {
+                    item_cap: 5,
+                    raw_frame_limit: 1,
+                    raw_byte_limit: 1024,
+                    max_message_bytes: 1024,
+                },
+            )
+            .unwrap();
+        let work = handle
+            .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(
+                &mut turn,
+                &work,
+                session::ObservationIdentity {
+                    stream: binding.id,
+                    epoch: binding.tag.connection,
+                    stamp: session::ReceiveStamp {
+                        unix_ns: stamp(31).unix_ns,
+                        monotonic_ns: 31,
+                    },
+                    class: session::ObservationClass::Disconnected,
+                    tag: None,
+                    attempts: None,
+                    loss_count: None,
+                },
+            )
+            .unwrap();
+        work.set_kind(&mut turn, session::WorkKind::InFlightObservation)
+            .unwrap();
+        let down = Self::frame(
+            5,
+            31,
+            Control::Transport {
+                connection: binding.connection_id,
+                epoch: binding.tag.connection,
+                value: Transport::Down,
+            },
+        );
+        sink.persist_owned(&mut turn, &down, RecordingGate::Durable, &work)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &work, None)
+            .unwrap();
+        let close_ref = handle
+            .mandatory_close(&mut turn, binding.id, binding.tag.connection, Some(&work))
+            .unwrap();
+        assert_eq!(
+            close_ref.storage(),
+            session::CloseStorage::WorkOwner(work.id())
+        );
+        let session::CloseLeaseReport::Leased(close) =
+            owner.reclaim_close(&mut turn, close_ref.clone())
+        else {
+            panic!("genuine Down owns mandatory Close")
+        };
+        let held_close = if hold_close {
+            Some(close.into_command())
+        } else {
+            assert!(matches!(
+                owner.dispatch(&mut turn, close.into_command(), |_| Ok::<(), ()>(())),
+                session::DispatchReport::Dispatched
+            ));
+            None
+        };
+        work.set_kind(&mut turn, session::WorkKind::PendingPlan)
+            .unwrap();
+        handle.retain_generated_plan(&mut turn, &work).unwrap();
+        assert_eq!(
+            handle.trusted_watermark(WatermarkKind::Durable),
+            Some(id(RecordNo::new(5)))
+        );
+        assert_eq!(
+            handle.authority().ownership_report().pending_observations,
+            1
+        );
+        Self {
+            owner,
+            turn,
+            handle,
+            sink,
+            binding,
+            work: Some(work),
+            close_ref,
+            held_close,
+            temp,
+        }
+    }
+
+    fn frame(number: u64, at: u64, value: Control) -> RecordFrame {
+        RecordFrame {
+            record_no: id(RecordNo::new(number)),
+            segment_no: SegmentNo::new(0),
+            value: Record::Control(ControlRecord {
+                context: WireContext {
+                    unix_ns: LocalUnixNs::new(stamp(at).unix_ns),
+                    monotonic_ns: MonotonicNs::new(at),
+                    context: InputContext::Active(active_context()),
+                },
+                value,
+            }),
+        }
+    }
+
+    fn generated(&self, index: u64) -> RecordFrame {
+        let change = match index {
+            0 => EpochChange::Connection {
+                owner: self.binding.connection_id,
+                expected: self.binding.tag.connection,
+                next: self.binding.tag.connection.checked_next().unwrap(),
+            },
+            1 => EpochChange::Subscription {
+                owner: self.binding.id,
+                expected: self.binding.tag.subscription,
+                next: self.binding.tag.subscription.checked_next().unwrap(),
+            },
+            2 => EpochChange::Book {
+                owner: self.binding.book_id.unwrap(),
+                expected: self.binding.tag.book.unwrap(),
+                next: self.binding.tag.book.unwrap().checked_next().unwrap(),
+            },
+            _ => panic!("exactly three generated output records"),
+        };
+        Self::frame(
+            6 + index,
+            31,
+            Control::EpochAdvance {
+                change,
+                reason: Reason::Reconnect,
+            },
+        )
+    }
+
+    fn confirm_generated(&mut self, count: u64) {
+        for index in 0..count {
+            let record = self.generated(index);
+            self.sink
+                .persist_owned(
+                    &mut self.turn,
+                    &record,
+                    RecordingGate::Durable,
+                    self.work.as_ref().unwrap(),
+                )
+                .unwrap();
+        }
+    }
+
+    fn install_scope_failure_and_marker(&mut self, generated_count: u64) {
+        let failure = session::TerminalFailure {
+            stream: self.binding.id,
+            connection: self.binding.connection_id,
+            observed_tag: self.binding.tag,
+            current_epoch: self.binding.tag.connection,
+            context: active_context(),
+            stamp: session::ReceiveStamp {
+                unix_ns: stamp(32).unix_ns,
+                monotonic_ns: 32,
+            },
+            input_class: session::InputClass::Raw,
+            attempt: session::AttemptIdentity::Candidate(id(CaptureAttemptNo::new(1))),
+            cause: session::FailureCause::QueueOverflow,
+        };
+        let termination = self.handle.terminate(&mut self.turn, failure).unwrap();
+        assert_eq!(termination.close_owner, self.close_ref);
+        assert!(
+            termination.close.is_none(),
+            "existing held or settled Down Close is reused"
+        );
+        let marker_no = id(RecordNo::new(6 + generated_count));
+        let marker = Self::frame(
+            marker_no.get(),
+            32,
+            Control::Recording(RecordingEvidence {
+                health: RecordingHealth::Failed,
+                kind: WatermarkKind::Durable,
+                through: self.handle.trusted_watermark(WatermarkKind::Durable),
+                reason: Reason::QueueOverflow,
+            }),
+        );
+        self.sink
+            .persist(&mut self.turn, &marker, RecordingGate::Durable)
+            .unwrap();
+        self.handle
+            .authority()
+            .marker_confirmed(&mut self.turn, marker_no)
+            .unwrap();
+        assert_eq!(
+            self.owner.session_status().marker,
+            session::MarkerState::Confirmed(marker_no)
+        );
+    }
+
+    fn assert_foreign_cancellation_preserves_both(&mut self, foreign: &mut Self) {
+        let status = self.owner.session_status();
+        let foreign_status = foreign.owner.session_status();
+        let ledger = self.handle.authority().ownership_report();
+        let foreign_ledger = foreign.handle.authority().ownership_report();
+        let physical = self.owner.watermarks();
+        let foreign_physical = foreign.owner.watermarks();
+        let bytes = fs::read(&self.temp.path).unwrap();
+        let foreign_bytes = fs::read(&foreign.temp.path).unwrap();
+        assert_eq!(
+            self.handle
+                .cancel_generated_plan(&mut foreign.turn, self.work.as_ref().unwrap()),
+            Err(session::AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            foreign
+                .handle
+                .cancel_generated_plan(&mut self.turn, self.work.as_ref().unwrap()),
+            Err(session::AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            foreign
+                .handle
+                .cancel_generated_plan(&mut foreign.turn, self.work.as_ref().unwrap()),
+            Err(session::AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            self.handle
+                .cancel_generated_plan(&mut self.turn, foreign.work.as_ref().unwrap()),
+            Err(session::AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(self.owner.session_status(), status);
+        assert_eq!(foreign.owner.session_status(), foreign_status);
+        assert_eq!(self.handle.authority().ownership_report(), ledger);
+        assert_eq!(
+            foreign.handle.authority().ownership_report(),
+            foreign_ledger
+        );
+        assert_eq!(self.owner.watermarks(), physical);
+        assert_eq!(foreign.owner.watermarks(), foreign_physical);
+        assert_eq!(fs::read(&self.temp.path).unwrap(), bytes);
+        assert_eq!(fs::read(&foreign.temp.path).unwrap(), foreign_bytes);
+    }
+
+    fn assert_prefix(&self, generated_count: u64, marker_count: usize, complete: bool) {
+        let mut reader = WalReader::open(&self.temp.path).unwrap();
+        let mut generated = 0;
+        let mut down = 0;
+        let mut markers = 0;
+        let mut seals = 0;
+        while let Some(record) = reader.next_record().unwrap() {
+            match record.value {
+                Record::Control(ControlRecord {
+                    context,
+                    value:
+                        Control::Transport {
+                            connection,
+                            epoch,
+                            value: Transport::Down,
+                        },
+                }) => {
+                    down += 1;
+                    assert_eq!(connection, self.binding.connection_id);
+                    assert_eq!(epoch, self.binding.tag.connection);
+                    assert_eq!(context.monotonic_ns.get(), 31);
+                    assert_eq!(context.unix_ns.get(), stamp(31).unix_ns);
+                    assert_eq!(record.record_no.get(), 5);
+                }
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance { .. },
+                    ..
+                }) => generated += 1,
+                Record::Control(ControlRecord {
+                    value: Control::Recording(_),
+                    ..
+                }) => markers += 1,
+                Record::SegmentSeal(_) | Record::ArchiveSeal(_) => seals += 1,
+                Record::RawInput(_) | Record::Gap(_) => panic!("no invented Raw/GAP accounting"),
+                _ => {}
+            }
+        }
+        assert_eq!(down, 1);
+        assert_eq!(generated, generated_count);
+        assert_eq!(markers, marker_count);
+        assert_eq!(seals, if complete { 2 } else { 0 });
+        assert_eq!(
+            reader.report().status,
+            if complete {
+                recording::ArchiveStatus::Complete
+            } else {
+                recording::ArchiveStatus::ValidPrefixIncomplete
+            }
+        );
+        assert_eq!(
+            reader.report().input_quality,
+            if complete {
+                Some(InputQuality::Unknown)
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[test]
+fn qa_d2_public_cancellation_rejects_one_or_two_fresh_confirmations_without_storage_stop() {
+    for fresh in [1_u64, 2] {
+        for lifecycle in 0..3 {
+            let mut fixture = QaD2Generated::new(false);
+            fixture.confirm_generated(fresh);
+            fixture.install_scope_failure_and_marker(fresh);
+            if lifecycle == 1 {
+                fixture
+                    .handle
+                    .authority()
+                    .begin_diagnostic_close(&mut fixture.turn)
+                    .unwrap();
+            } else if lifecycle == 2 {
+                assert!(matches!(
+                    fixture.owner.close_diagnostic(&mut fixture.turn).outcome,
+                    Ok(recording::DiagnosticCloseState::Closed)
+                ));
+            }
+            let mut foreign = QaD2Generated::new(false);
+            fixture.assert_foreign_cancellation_preserves_both(&mut foreign);
+            let alias = fixture.work.as_ref().unwrap().share().unwrap();
+            let work_id = alias.id();
+            let status = fixture.owner.session_status();
+            assert!(status.storage_stopped.is_none());
+            let ledger = fixture.handle.authority().ownership_report();
+            let physical = fixture.owner.watermarks();
+            let trusted = fixture.handle.trusted_watermark(WatermarkKind::Durable);
+            let bytes = fs::read(&fixture.temp.path).unwrap();
+            for _ in 0..16 {
+                assert_eq!(
+                    fixture
+                        .handle
+                        .cancel_generated_plan(&mut fixture.turn, fixture.work.as_ref().unwrap()),
+                    Err(session::AuthorityError::NotQuiescent)
+                );
+                assert_eq!(fixture.owner.session_status(), status);
+                assert_eq!(fixture.handle.authority().ownership_report(), ledger);
+                assert_eq!(fixture.owner.watermarks(), physical);
+                assert_eq!(
+                    fixture.handle.trusted_watermark(WatermarkKind::Durable),
+                    trusted
+                );
+                assert_eq!(fs::read(&fixture.temp.path).unwrap(), bytes);
+                assert!(matches!(
+                    fixture
+                        .owner
+                        .reclaim_close(&mut fixture.turn, fixture.close_ref.clone()),
+                    session::CloseLeaseReport::AlreadySettled
+                ));
+            }
+            drop(fixture.work.take());
+            assert_eq!(
+                fixture
+                    .handle
+                    .authority()
+                    .ownership_report()
+                    .pending_observations,
+                1
+            );
+            assert_eq!(
+                fixture.handle.authority().ownership_report().abandoned_work,
+                0
+            );
+            drop(alias);
+            let ledger = fixture.handle.authority().ownership_report();
+            assert_eq!(ledger.work_used, 1);
+            assert_eq!(ledger.abandoned_work, 1);
+            fixture
+                .handle
+                .authority()
+                .synchronize_obligations(&mut fixture.turn)
+                .unwrap();
+            let reconciled = fixture.owner.session_status();
+            assert_eq!(reconciled.first_failure, status.first_failure);
+            assert_eq!(reconciled.cut_sequence, status.cut_sequence);
+            assert_eq!(reconciled.archive_observation, status.archive_observation);
+            assert_eq!(
+                reconciled.storage_stopped.unwrap().kind,
+                session::PersistErrorKind::OwnershipAbandoned
+            );
+            assert_eq!(reconciled.first_abandonment.unwrap().work_id, work_id);
+            for _ in 0..8 {
+                let report = fixture.owner.close_diagnostic(&mut fixture.turn);
+                assert!(matches!(
+                    report.outcome,
+                    Ok(recording::DiagnosticCloseState::Closed)
+                ));
+                assert_eq!(report.undrained_owners.work_total, 1);
+                assert_eq!(fixture.handle.authority().ownership_report().work_used, 1);
+                assert_eq!(fixture.owner.watermarks(), physical);
+                assert_eq!(
+                    fixture.handle.trusted_watermark(WatermarkKind::Durable),
+                    trusted
+                );
+                assert_eq!(fs::read(&fixture.temp.path).unwrap(), bytes);
+            }
+            fixture.assert_prefix(fresh, 1, false);
+        }
+    }
+}
+
+#[test]
+fn qa_d2_public_cancellation_rejects_zero_fresh_after_each_real_storage_stop() {
+    for mode in 0..3 {
+        let mut fixture = QaD2Generated::new(false);
+        let ticket = fixture.owner.begin_finalization(&mut fixture.turn).unwrap();
+        let first = fixture.generated(0);
+        let kind = match mode {
+            0 => recording::SinkFaultKind::BeforeWrite(session::PersistError::typed(
+                session::PersistErrorKind::Io,
+                "qa-d2 before first generated confirmation",
+            )),
+            1 => recording::SinkFaultKind::ReceiptMismatch {
+                through: first.record_no.checked_next().unwrap(),
+            },
+            _ => recording::SinkFaultKind::WeakGate {
+                achieved: RecordingGate::Flushed,
+            },
+        };
+        fixture
+            .owner
+            .set_sink_fault(
+                &mut fixture.turn,
+                Some(recording::SinkFault {
+                    at: first.record_no,
+                    kind,
+                }),
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .sink
+                .persist_owned(
+                    &mut fixture.turn,
+                    &first,
+                    RecordingGate::Durable,
+                    fixture.work.as_ref().unwrap()
+                )
+                .is_err()
+        );
+        let stopped = fixture.owner.session_status();
+        let stop = stopped.storage_stopped.unwrap();
+        assert_ne!(stop.kind, session::PersistErrorKind::OwnershipAbandoned);
+        assert_eq!(
+            fixture.handle.trusted_watermark(WatermarkKind::Durable),
+            Some(id(RecordNo::new(5)))
+        );
+        assert_eq!(
+            fixture.owner.watermarks().durable.unwrap().get(),
+            5 + u64::from(mode != 0)
+        );
+        assert!(matches!(
+            fixture.owner.close_diagnostic(&mut fixture.turn).outcome,
+            Ok(recording::DiagnosticCloseState::Closed)
+        ));
+        let status = fixture.owner.session_status();
+        let mut foreign = QaD2Generated::new(false);
+        fixture.assert_foreign_cancellation_preserves_both(&mut foreign);
+        let alias = fixture.work.as_ref().unwrap().share().unwrap();
+        let ledger = fixture.handle.authority().ownership_report();
+        let physical = fixture.owner.watermarks();
+        let bytes = fs::read(&fixture.temp.path).unwrap();
+        for _ in 0..16 {
+            assert_eq!(
+                fixture
+                    .handle
+                    .cancel_generated_plan(&mut fixture.turn, fixture.work.as_ref().unwrap()),
+                Err(session::AuthorityError::StorageStopped)
+            );
+            assert_eq!(fixture.handle.authority().ownership_report(), ledger);
+            assert_eq!(fixture.owner.session_status(), status);
+            assert_eq!(fixture.owner.watermarks(), physical);
+            assert_eq!(fs::read(&fixture.temp.path).unwrap(), bytes);
+            assert!(matches!(
+                fixture.handle.quiesce(&mut fixture.turn, &ticket),
+                session::QuiescenceReport::FinalizationInvalidated(
+                    session::AuthorityError::ArchiveFailed
+                )
+            ));
+        }
+        drop(fixture.work.take());
+        assert_eq!(
+            fixture
+                .handle
+                .authority()
+                .ownership_report()
+                .pending_observations,
+            1
+        );
+        drop(alias);
+        fixture
+            .handle
+            .authority()
+            .synchronize_obligations(&mut fixture.turn)
+            .unwrap();
+        for _ in 0..8 {
+            let report = fixture.owner.close_diagnostic(&mut fixture.turn);
+            assert!(matches!(
+                report.outcome,
+                Ok(recording::DiagnosticCloseState::Closed)
+            ));
+            assert_eq!(report.undrained_owners.work_total, 1);
+            assert_eq!(fixture.handle.authority().ownership_report().work_used, 1);
+            assert_eq!(
+                fixture.handle.authority().ownership_report().abandoned_work,
+                1
+            );
+            assert_eq!(fixture.owner.session_status().storage_stopped, Some(stop));
+            assert_eq!(
+                fixture.owner.session_status().first_failure,
+                stopped.first_failure
+            );
+            assert_eq!(
+                fixture.owner.session_status().cut_sequence,
+                stopped.cut_sequence
+            );
+            assert_eq!(fixture.owner.watermarks(), physical);
+            assert_eq!(fs::read(&fixture.temp.path).unwrap(), bytes);
+            assert!(matches!(
+                fixture
+                    .owner
+                    .reclaim_close(&mut fixture.turn, fixture.close_ref.clone()),
+                session::CloseLeaseReport::AlreadySettled
+            ));
+        }
+        fixture.assert_prefix(u64::from(mode != 0), 0, false);
+    }
+}
+
+#[test]
+fn qa_d2_zero_fresh_no_stop_cancellation_succeeds_in_all_eligible_lifecycles_with_same_close() {
+    for lifecycle in 0..3 {
+        let mut fixture = QaD2Generated::new(true);
+        fixture.install_scope_failure_and_marker(0);
+        if lifecycle == 1 {
+            fixture
+                .handle
+                .authority()
+                .begin_diagnostic_close(&mut fixture.turn)
+                .unwrap();
+        } else if lifecycle == 2 {
+            assert!(matches!(
+                fixture.owner.close_diagnostic(&mut fixture.turn).outcome,
+                Ok(recording::DiagnosticCloseState::Closed)
+            ));
+        }
+        let mut foreign = QaD2Generated::new(false);
+        fixture.assert_foreign_cancellation_preserves_both(&mut foreign);
+        let alias = fixture.work.as_ref().unwrap().share().unwrap();
+        let physical = fixture.owner.watermarks();
+        let bytes = fs::read(&fixture.temp.path).unwrap();
+        let status = fixture.owner.session_status();
+        let work_id = fixture.work.as_ref().unwrap().id();
+        assert_eq!(
+            fixture
+                .handle
+                .cancel_generated_plan(&mut fixture.turn, fixture.work.as_ref().unwrap()),
+            Ok(())
+        );
+        assert_eq!(
+            fixture
+                .handle
+                .authority()
+                .ownership_report()
+                .pending_observations,
+            0
+        );
+        assert_eq!(
+            fixture.handle.authority().ownership_report().work_used,
+            1,
+            "same held Close and aliases still retain W after authenticated settlement"
+        );
+        assert_eq!(
+            fixture.handle.authority().ownership_report().abandoned_work,
+            0
+        );
+        assert_eq!(fixture.owner.session_status(), status);
+        assert_eq!(fixture.owner.watermarks(), physical);
+        assert_eq!(fs::read(&fixture.temp.path).unwrap(), bytes);
+        assert_eq!(
+            fixture.close_ref.storage(),
+            session::CloseStorage::WorkOwner(work_id)
+        );
+        for _ in 0..16 {
+            assert_eq!(
+                fixture
+                    .handle
+                    .cancel_generated_plan(&mut fixture.turn, fixture.work.as_ref().unwrap()),
+                Err(session::AuthorityError::InvalidOwner)
+            );
+            assert!(matches!(
+                fixture
+                    .owner
+                    .reclaim_close(&mut fixture.turn, fixture.close_ref.clone()),
+                session::CloseLeaseReport::AlreadyLeased
+            ));
+            assert_eq!(fixture.handle.authority().ownership_report().work_used, 1);
+            assert_eq!(fixture.owner.watermarks(), physical);
+            assert_eq!(fixture.owner.session_status(), status);
+        }
+        drop(fixture.work.take());
+        drop(alias);
+        assert_eq!(fixture.handle.authority().ownership_report().work_used, 1);
+        drop(fixture.held_close.take());
+        let session::CloseLeaseReport::Leased(lease) = fixture
+            .owner
+            .reclaim_close(&mut fixture.turn, fixture.close_ref.clone())
+        else {
+            panic!("same Close reclaimable after cancellation")
+        };
+        assert!(matches!(
+            fixture
+                .owner
+                .dispatch(&mut fixture.turn, lease.into_command(), |_| Err::<(), _>(
+                    "ambiguous Close"
+                )),
+            session::DispatchReport::DispatchFailed {
+                effect: session::AmbiguousEffect::Unknown,
+                ..
+            }
+        ));
+        let session::CloseLeaseReport::Leased(lease) = fixture
+            .owner
+            .reclaim_close(&mut fixture.turn, fixture.close_ref.clone())
+        else {
+            panic!("same Close survives dispatch error")
+        };
+        assert!(matches!(
+            fixture.owner.dispatch(
+                &mut fixture.turn,
+                lease.into_command(),
+                |_| Ok::<(), ()>(())
+            ),
+            session::DispatchReport::Dispatched
+        ));
+        assert_eq!(fixture.handle.authority().ownership_report().work_used, 0);
+        assert_eq!(
+            fixture.handle.authority().ownership_report().abandoned_work,
+            0
+        );
+        assert_eq!(fixture.owner.session_status(), status);
+        assert_eq!(fixture.owner.watermarks(), physical);
+        assert!(matches!(
+            fixture
+                .owner
+                .reclaim_close(&mut fixture.turn, fixture.close_ref.clone()),
+            session::CloseLeaseReport::AlreadySettled
+        ));
+        assert!(matches!(
+            fixture.owner.close_diagnostic(&mut fixture.turn).outcome,
+            Ok(recording::DiagnosticCloseState::Closed)
+        ));
+        fixture.assert_prefix(0, 1, false);
+    }
+}
+
+#[test]
+fn qa_d2_public_healthy_completion_still_needs_three_fresh_receipts_and_settles_once() {
+    let mut fixture = QaD2Generated::new(false);
+    let work = fixture.work.as_ref().unwrap();
+    assert_eq!(
+        fixture
+            .handle
+            .complete_observation(&mut fixture.turn, &fixture.sink, work, None),
+        Err(session::AuthorityError::NotQuiescent),
+        "prior Down receipt cannot account generated completion"
+    );
+    for index in 0..3 {
+        let record = fixture.generated(index);
+        fixture
+            .sink
+            .persist_owned(
+                &mut fixture.turn,
+                &record,
+                RecordingGate::Durable,
+                fixture.work.as_ref().unwrap(),
+            )
+            .unwrap();
+        let completion = fixture.handle.complete_observation(
+            &mut fixture.turn,
+            &fixture.sink,
+            fixture.work.as_ref().unwrap(),
+            None,
+        );
+        if index < 2 {
+            assert_eq!(completion, Err(session::AuthorityError::NotQuiescent));
+            assert_eq!(
+                fixture
+                    .handle
+                    .authority()
+                    .ownership_report()
+                    .pending_observations,
+                1
+            );
+        } else {
+            assert_eq!(completion, Ok(()));
+            assert_eq!(
+                fixture
+                    .handle
+                    .authority()
+                    .ownership_report()
+                    .pending_observations,
+                0
+            );
+        }
+    }
+    assert_eq!(
+        fixture.handle.complete_observation(
+            &mut fixture.turn,
+            &fixture.sink,
+            fixture.work.as_ref().unwrap(),
+            None
+        ),
+        Err(session::AuthorityError::InvalidOwner)
+    );
+    let work = fixture.work.take().unwrap();
+    work.set_kind(&mut fixture.turn, session::WorkKind::Result)
+        .unwrap();
+    drop(work);
+    assert_eq!(fixture.handle.authority().ownership_report().work_used, 0);
+    assert_eq!(
+        fixture.handle.authority().ownership_report().abandoned_work,
+        0
+    );
+    assert_eq!(
+        fixture.handle.trusted_watermark(WatermarkKind::Durable),
+        Some(id(RecordNo::new(8)))
+    );
+    assert!(fixture.owner.session_status().storage_stopped.is_none());
+    assert!(!fixture.owner.session_status().failed);
+    let ticket = fixture.owner.begin_finalization(&mut fixture.turn).unwrap();
+    let session::QuiescenceReport::Ready(mut proof) =
+        fixture.handle.quiesce(&mut fixture.turn, &ticket)
+    else {
+        panic!("healthy authenticated settlement permits one proof")
+    };
+    fixture
+        .owner
+        .finalize(&mut fixture.turn, &mut proof)
+        .unwrap();
+    assert!(
+        fixture
+            .owner
+            .finalize(&mut fixture.turn, &mut proof)
+            .is_err()
+    );
+    fixture.assert_prefix(3, 0, true);
+}
+
+#[test]
+fn qa_d2_foreign_work_cancellation_cannot_reconcile_pending_abandonment() {
+    let mut rightful = QaD2Generated::new(false);
+    let mut foreign = QaD2Generated::new(false);
+    let physical = rightful.owner.watermarks();
+    let bytes = fs::read(&rightful.temp.path).unwrap();
+    let received = rightful
+        .handle
+        .reserve_work(&mut rightful.turn, session::WorkKind::QueuedObservation)
+        .unwrap();
+    let work_id = received.id();
+    rightful
+        .handle
+        .admit_observation(
+            &mut rightful.turn,
+            &received,
+            session::ObservationIdentity {
+                stream: rightful.binding.id,
+                epoch: rightful.binding.tag.connection,
+                stamp: session::ReceiveStamp {
+                    unix_ns: stamp(41).unix_ns,
+                    monotonic_ns: 41,
+                },
+                class: session::ObservationClass::Raw,
+                tag: Some(rightful.binding.tag),
+                attempts: Some((id(CaptureAttemptNo::new(1)), id(CaptureAttemptNo::new(1)))),
+                loss_count: None,
+            },
+        )
+        .unwrap();
+    drop(received);
+    assert_eq!(rightful.handle.authority().ownership_report().work_used, 2);
+    assert_eq!(
+        rightful
+            .handle
+            .authority()
+            .ownership_report()
+            .abandoned_work,
+        1
+    );
+    let before = rightful.owner.session_status();
+    assert!(
+        !before.failed,
+        "Drop notification does not itself perform lifecycle/cut transition"
+    );
+    rightful.assert_foreign_cancellation_preserves_both(&mut foreign);
+    assert_eq!(rightful.owner.session_status(), before);
+    rightful
+        .handle
+        .authority()
+        .synchronize_obligations(&mut rightful.turn)
+        .unwrap();
+    let reconciled = rightful.owner.session_status();
+    assert!(reconciled.failed);
+    assert_eq!(
+        reconciled.storage_stopped.unwrap().kind,
+        session::PersistErrorKind::OwnershipAbandoned
+    );
+    let abandoned = reconciled.first_abandonment.unwrap();
+    assert_eq!(abandoned.work_id, work_id);
+    assert_eq!(abandoned.identity.stream, rightful.binding.id);
+    assert_eq!(abandoned.identity.epoch, rightful.binding.tag.connection);
+    assert_eq!(abandoned.identity.class, session::ObservationClass::Raw);
+    assert_eq!(abandoned.identity.tag, Some(rightful.binding.tag));
+    assert_eq!(abandoned.identity.stamp.monotonic_ns, 41);
+    assert_eq!(abandoned.identity.stamp.unix_ns, stamp(41).unix_ns);
+    for _ in 0..16 {
+        let report = rightful.owner.close_diagnostic(&mut rightful.turn);
+        assert!(matches!(
+            report.outcome,
+            Ok(recording::DiagnosticCloseState::Closed)
+        ));
+        assert_eq!(
+            report.undrained_owners.work_total, 2,
+            "lost admitted Raw plus live generated plan retain separate bounded owners"
+        );
+        assert_eq!(rightful.handle.authority().ownership_report().work_used, 2);
+        assert_eq!(
+            rightful
+                .handle
+                .authority()
+                .ownership_report()
+                .abandoned_work,
+            1
+        );
+        assert_eq!(
+            rightful
+                .handle
+                .authority()
+                .ownership_report()
+                .pending_observations,
+            1
+        );
+        assert_eq!(
+            rightful.owner.session_status().first_abandonment,
+            Some(abandoned)
+        );
+        assert_eq!(rightful.owner.watermarks(), physical);
+        assert_eq!(fs::read(&rightful.temp.path).unwrap(), bytes);
+        assert!(matches!(
+            rightful
+                .owner
+                .reclaim_close(&mut rightful.turn, rightful.close_ref.clone()),
+            session::CloseLeaseReport::AlreadySettled
+        ));
+    }
+    rightful.assert_prefix(0, 0, false);
+}

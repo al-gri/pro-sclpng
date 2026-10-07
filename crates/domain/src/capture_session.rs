@@ -1411,16 +1411,19 @@ impl SupervisorSessionHandle {
         Ok(())
     }
 
-    /// Explicit bounded cancellation of still-unadmitted generated output.
-    /// Received observations cannot use this path, and ordinary Drop cannot
-    /// substitute for this serialized lifecycle decision.
+    /// Explicit bounded cancellation of generated output with no fresh confirmed
+    /// records and no storage stop. The earlier Down receipt is not fresh plan
+    /// progress: `retain_generated_plan` resets its counter. Received observations
+    /// cannot use this path, and ordinary Drop cannot substitute for this
+    /// serialized lifecycle decision.
     pub fn cancel_generated_plan(
         &self,
         turn: &mut SessionTurn,
         owner: &WorkOwner,
     ) -> Result<(), AuthorityError> {
-        self.authority.synchronize_obligations(turn)?;
+        self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
+        self.authority.synchronize_obligations(turn)?;
         let state = self.authority.state.borrow();
         let identity = owner
             .cell
@@ -1430,13 +1433,22 @@ impl SupervisorSessionHandle {
         if owner.cell.kind.get() != WorkKind::PendingPlan
             || owner.cell.obligation_origin.get() != ObligationOrigin::Generated
             || owner.cell.obligation.get() != ObservationObligation::Pending
-            || !(matches!(
-                state.lifecycle,
-                SessionLifecycle::DiagnosticClosing | SessionLifecycle::DiagnosticClosed
-            ) || state
-                .scopes
-                .iter()
-                .any(|scope| scope.binding.stream == identity.stream && scope.failure.is_some()))
+        {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        if state.storage_stopped.is_some() {
+            return Err(AuthorityError::StorageStopped);
+        }
+        if owner.cell.confirmed_records.get() != 0 {
+            return Err(AuthorityError::NotQuiescent);
+        }
+        if !(matches!(
+            state.lifecycle,
+            SessionLifecycle::DiagnosticClosing | SessionLifecycle::DiagnosticClosed
+        ) || state
+            .scopes
+            .iter()
+            .any(|scope| scope.binding.stream == identity.stream && scope.failure.is_some()))
         {
             return Err(AuthorityError::InvalidOwner);
         }

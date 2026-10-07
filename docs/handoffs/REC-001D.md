@@ -1936,3 +1936,104 @@ Prior handoff/history is preserved exactly. Current QA report/ZIP/reproduction i
 The new immutable containing SHA, four-path actual diff,133-blob saved/tested source match, non-force expected-head update, fresh exact-head canonical fmt/Clippy/lock/build/test/clean-checkout results and post-save original debug/release runs are verified in existing PR/Issue metadata. PR #34 stays Draft/open/unmerged, auto-merge unset.
 
 **Next gate: full independent QA of the new immutable remediation SHA**, including QA-D1, all31 acceptance families (especially6/26), B1/B2/B3, Q1/Q2,63 H1 faults, H2,12 Q2 faults and every prior regression. Worker/CI PASS does not grant owner readiness or merge authorization.
+
+## QA-D2 continuation — public generated cancellation, 2026-10-07
+
+**Worker disposition: REMEDIATED / QA_PENDING.** Q1 and Q2 remain **FIXED_IN_CODE / QA_PENDING** as worker code/check dispositions. Independent **CHANGES_REQUIRED / MEDIUM QA-D2** on `8a8969acce1e0e7873929736daef5d69d78a7e41` is preserved. This repair is not independent acceptance; the new containing immutable SHA requires full independent QA.
+
+### Lineage, refs and policies
+
+Same repository `al-gri/pro-sclpng`, Issue #20 / parent #5, claim `6024304772`, recovery `6025249885`, branch `feat/REC-001D-ws-supervisor` and Draft PR #34. Rejected start: `8a8969acce1e0e7873929736daef5d69d78a7e41`, tree `ba89fdc99e9a1b68e862e141c835caded41622b9`, sole parent `dfe2c43efc2df0591d67daef4beac0d97fa3b050`. Actual main/base: `39ff0dba797eb010586238ef06fb80e996340401`. Sole approved contract: `cff1e398c3226bc2a86b51442e02054c5996e86a`.
+
+Before edits, actual branch/head/base, Draft/open/unmerged/auto-merge=null and all133 tracked starting blobs were verified against the fetched Git tree. There was no intervening foreign commit or local source change. Current AGENTS, PROJECT_STATE, ARCHITECTURE, INVARIANTS, WORKFLOW, Issue/parent and ADR were inspected. This continuation restores the approved partial-completion settlement contract inside the same §8 allowlist; no new claim/Issue/branch/PR or permission is introduced. Existing Issue continuation record `6043191341` reports input availability and the reproduced failure, not a new claim. Final containing head, parent, exact diff, CI and metadata verification belong in existing PR/Issue records; a containing document cannot embed its own SHA.
+
+### Current QA provenance
+
+The two current attachments were read. The full report is inside the ZIP; it was read in full. Safe extraction and every embedded checksum were verified:
+
+| Current input | Bytes | SHA256 |
+|---|---:|---|
+| REC-001D-QA-8a8969ac-evidence.zip |240,176 | `4ba81e081ddd24ff2ccd0ad33038ba4cb6837281fd0ab8d2c157234cf3eed159` |
+| Uploaded REC-001D-QA-8a8969ac-reproductions.patch |13,635 | `988bfd08198c9a58eceb94786f740c957b60dd35c4815011d06b4c6205cec1c4` |
+| Embedded REC-001D-QA-8a8969ac.md |69,897 | `4582796a05af3cc8722795af50f44cfdeef463eb21696ba1b4e89ff573e27967` |
+
+ZIP112 entries /746,789 expanded bytes, all111 manifest hashes match; no absolute or parent-traversal paths. The embedded reproduction patch matches the uploaded patch byte-for-byte, and extracted copies match archive bytes. Its minimal patch adds seven test functions: six public failures plus one canonical control containing12 internal variants. The report's broader supplemental copy adds a separate stale-diagnostic six-case control, hence its raw logs show **2 PASS /6 FAIL**; that is not the count of the current minimal patch. The previous D1 three-input hashes embedded in this report are historical provenance, not the identities of these current attachments.
+
+Inputs are available and authenticated; **BLOCKED_ON_QA_INPUTS does not apply**. QA's original388 PASS debug/release and CI37653209456 are exact rejected-head evidence. They missed the direct public cancellation boundary and are not acceptance of this repair.
+
+### Minimal trigger and restored public contract
+
+Genuine owner registration exposes a public `SupervisorSessionHandle` before transfer into the canonical supervisor. Actual Durable Down persistence and completion create the same-W mandatory Close; after Close settlement, normal PendingPlan/retain-generated transition resets fresh generated receipts to0. One/two gate-confirmed generated epoch writes followed by BeforeWrite, post-write ReceiptMismatch or WeakGate produce a retained partial obligation. DiagnosticClosed previously permitted public cancellation to return Ok; Drop then incorrectly released W and erased undrained accounting. Canonical supervisor's own StorageStopped guard already prevented that route, but could not enforce the public handle boundary.
+
+`SupervisorSessionHandle::cancel_generated_plan(&self, &mut SessionTurn, &WorkOwner) -> Result<(), AuthorityError>` retains its signature. Rightful turn and WorkOwner validation now precede reconciliation. Existing PendingPlan/Generated/Pending checks remain. Existing StorageStopped returns `StorageStopped`; otherwise any nonzero fresh generated receipt count returns `NotQuiescent`. These checks precede Pending->Settled. Exact scope failure or DiagnosticClosing/DiagnosticClosed is still required for a zero-record/no-stop success. No blanket ensure-storage-writable check blocks legitimate DiagnosticClosed cancellation. Earlier authenticated Down is excluded by the existing fresh-counter reset.
+
+Typed rejection preserves progress, W, original storage error, trusted prefix, first failure/cut, Close identity and actual backend watermarks/bytes. After alias/steward Drop, the same cell may become bounded Abandoned; rightful reconciliation retains W and undrained work and never replaces an earlier storage stop. No fictitious settlement, suffix retry, replacement work, rollback, missing-byte reconstruction or received Raw/GAP/control/timer cancellation is introduced. Zero fresh receipts with a storage stop may still have physically written bytes; tests separately assert trusted and physical prefixes. Failed latch, publication and final-seal denial remain irreversible.
+
+Severity remains **MEDIUM**, accounting/undrained loss only. Healthy finalization revival, actual heap overflow, unbounded allocation and RSS violation were not proved by QA and are not claimed here.
+
+### Normative reproductions and additional cases
+
+Before implementation, an isolated copy of all133 exact starting blobs received only the uploaded test patch. No dependency/manifest/source/gate adaptation. Both actual commands compiled then failed behaviorally, exit101:
+
+```sh
+cargo test -p market-data --test ws_supervisor --locked qa8_independent -- --nocapture
+cargo test -p market-data --test ws_supervisor --release --locked qa8_independent -- --nocapture
+```
+
+Each profile: **1 canonical control PASS /6 public FAIL**. The six retained exact public test names are `qa8_independent_direct_partial_{one,two}_{beforewrite,mismatch,weakgate}`. After repair all six and the canonical12-variant control PASS in each profile (seven functions). The canonical control retains Open/Closing × one/two fresh receipts × three storage faults, alias Drop, original stop and trusted/physical prefix assertions.
+
+Five additional genuine-owner/concrete-Durable integration functions cover:
+
+- One/two fresh confirmations without StorageStopped, across scope-local failure, DiagnosticClosing and DiagnosticClosed: six internal cases reject NotQuiescent; repeats preserve state/bytes, aliases later retain Abandoned W.
+- Zero fresh confirmations with BeforeWrite, actual post-write mismatch and weak gate: three cases reject StorageStopped; physical rejected records are distinguished from authenticated progress; original stop and terminal proof invalidation survive Drop/closure.
+- Zero fresh/no-stop cancellation in all three eligible states: earlier Down receipt does not block settlement; held Close and aliases retain the same W, Drop/error/reclaim/settlement preserves one logical command and frees capacity only truthfully.
+- Healthy completion needs three fresh receipts, settles once, then canonical owner finalizes once; reader is physically Complete. This control does not relax failed-session finalization.
+- Pending abandonment of an additional received Raw before first cut: four foreign turn/handle/WorkOwner combinations leave rightful state/ledger/WAL unchanged. Rightful reconciliation later reports exact Raw identity and undrained2 for separate lost Raw and live Generated obligations. No fabricated Raw/GAP/marker.
+
+The two independent new negative families were initially run while the old domain boundary was still present: compiled debug tests failed behaviorally on both nonzero/no-stop and zero/stop guards, while positive zero/no-stop and healthy completion controls passed. No compile failure is represented as a product reproduction. Final additions total **12 integration test functions**, not their loop-variant totals; existing80 functions remain intact and the suite now contains92. QA-D1's exact two regressions, old-tag Candidate6, original F2 Raw/GAP stamps/identity, stale Close after actual epoch/W recycle and repeated Halted prefix/snapshot remain unchanged.
+
+### Defensive-validation remark
+
+QA's private swapped-plan probe directly interchanges same-authority A/B registry owners during DiagnosticClosing. Static review confirms that the private helper checks paired presence and runtime plan epoch, but does not independently compare opaque WorkOwner scope/epoch to its registry key. Canonical Down construction maintains that association; no natural public route producing the swap was established. ADR §13.1 now states the precise validation and construction limit instead of claiming rejection of every inconsistent pair. The historical private probe's debug/release behavioral failures remain explicit evidence; it is not a second public blocker, foreign-authority escape or silently repaired route. No new owner-identity API/policy is added.
+
+### Complete original Linux/Durable verification
+
+Linux x86_64; pinned Rust1.98.1/compiler48a229ceaefd4985c50990b14116b6d856af0985, Cargo1.98.1/LLVM22.1.8. `source rust-tools/env.sh` selects the verified local toolchain, offline Cargo home and GNU-linker adjustment for this sandbox. Root commands use `--manifest-path repo/Cargo.toml`; isolated rejected commands use `--manifest-path d2-baseline/Cargo.toml`. Final debug target is `d2-clean-debug-target`, release `d2-final-release-target`; `CARGO_BUILD_JOBS=1`. No Flushed supplemental adaptation or production/manifest/dependency delta.
+
+| Actual command/check | Result |
+|---|---|
+| Original `cargo test --workspace --locked` | **PASS/exit0,400 passed/0 failed/0 ignored**,19 summaries. Counts21,13,80,9,18,27,33,10,7,13,92,0,15,3,22,26,4,3,4. |
+| Original `cargo test --workspace --release --locked` | **PASS/exit0,400/0/0**, same19 summaries. |
+| Targeted `qa8_independent` debug/release | **7 PASS/exit0** each, including six previously failing public tests and one12-case canonical control. |
+| Targeted `qa_d2_` debug/release | **5 PASS/exit0** each, also included in both complete workspace profiles. |
+| `rustfmt --edition 2024 --check`, all68 tracked Rust files | **PASS/exit0** after final source edits. |
+| Pinned direct clippy-driver wrapper, `cargo check --workspace --all-targets --locked`, warnings denied | **PASS/exit0** after final source edits. |
+| `cargo generate-lockfile --offline` and original comparison | **PASS/exit0**, SHA256 `b3286f591e5f63975f5bc575eb95cbae6f15823fefed46fff6c40c40e62fce4c` unchanged, Git blob `8fce3a61cc8dc1f72727ddf2c82c453c31be94bc`. |
+| `cargo build --workspace --locked` | **PASS/exit0**. |
+| Canonical local fmt/Clippy | Actual attempts exit101 before checking: absent /proc/self/exe in tool wrappers, **NOT_RUN canonically locally**. Direct checks above ran; fresh exact-head standard CI is verified separately in PR/Issue. |
+| Full independent QA of new immutable SHA | **REQUIRED / NOT_RUN by worker**, separate next gate. |
+| Private swapped-registry supplemental probe | Historical rejected-head debug/release FAIL inspected; **NOT_RUN on repaired source by worker**. Current static source audit confirms the documented opaque-identity validation limit; no natural public swap route established. |
+| Live networking/application/publication/inventory producers | **NOT_RUN / OUT_OF_SCOPE**. |
+
+One initial full debug attempt used an old cached WAL binary whose execute bit was absent (mode0644), so that binary never ran, exit101 after earlier suites. No test failure or source adaptation was inferred. Fresh debug build directory then ran the entire unmodified workspace successfully. An intermediate full release run passed399 tests before the added foreign-pending-abandonment control; it is superseded by the complete final400 run. These attempts remain separate logs and are not transferred into final counts.
+
+All31 §9 families were rerun through the complete workspace, especially11/15/16/26 with the public boundary additions; existing QA-D1/B1/B2/B3/R1–R3 preserved. All63 H1 faults (9+9+36+9), scoped H2,12 Q2 storage faults, timer/FIFO boundaries, F1–F6/N1–N3, decoder/continuity/input safety/DataHealth/publication contracts,26 WAL tests,15 actual CLI tests and11 affine/borrow/reentry compile-fail tests PASS in both profiles. Approved H1 completion after Close settlement and scoped H2 exhaustion are unchanged. Passing library conformance does not implement deferred application producers or prove all future external behavior.
+
+Cap5/cap9 requested-allocation probes were separately rerun `--exact --nocapture` in debug/release (four commands, all exit0).100 failed/reclaim repeats remain flat, tracked teardown bytes0:
+
+| Probe | Debug peak | Release peak | Existing ceiling |
+|---|---:|---:|---:|
+| Full N1/M5/P4096 |56,493 B |56,493 B |10,256,027 B |
+| Full N2/M9/P4096 |60,387 B |60,387 B |10,409,926 B |
+| Concrete owner cap5 |29,587 B |29,587 B |8,574,778 B |
+| Concrete owner cap9 |31,314 B |31,314 B |8,710,228 B |
+
+These unchanged allocation fixtures use their original Flushed full-supervisor and Written owner-only profiles. They measure requested Layout bytes, not RSS or actual worst-case usable heap; they do not replace the original Durable functional checks above. No bounds/type/metadata lane changed. Different temporary path lengths affect measured bytes; the small differences from historical peaks are not a claimed memory improvement.
+
+### Allowlisted delivery and next gate
+
+Only four paths change: `crates/domain/src/capture_session.rs`, `crates/market-data/tests/ws_supervisor.rs`, `docs/adr/0003-ws-capture-saturation.md`, `docs/handoffs/REC-001D.md`. Domain change is confined to public cancellation validation/comment; supervisor implementation and all other production code/tests are untouched. No accepted spec/ADR, dependency/manifest, networking, composition, reader or schema change. ADR §8 allowlist and full31-row §9 normative matrix remain byte-identical to the rejected head. The preceding124,040 handoff bytes remain exact (SHA256 `4efabe64450bdb5291d8106fe5c2f35eba9fea0ba069dbb5814acc6dd365223a`). All129 other tracked blobs are preserved and verified after delivery.
+
+Historical Windows319 PASS/42 platform failures, Flushed supplemental checks and prior worker/CI runs remain separate evidence. Reader Complete bytes are not concealed or relabelled: unsealed diagnostic prefix stays ValidPrefixIncomplete with absent quality label, owner completeness Unknown; crash cannot reconstruct a missing marker and external inventory remains deferred. U-09/U-10/U-20/C-01/C-03 stay unchanged.
+
+**Next gate: full independent QA of the new immutable remediation SHA**, including public QA-D2, QA-D1, all31 families, B1/B2/B3, R1–R3, Q1/Q2,63 H1 faults, H2,12 Q2 faults and previous regressions. Worker PASS and fresh CI do not grant owner readiness, Integrator acceptance, merge or auto-merge approval. PR #34 remains Draft.
