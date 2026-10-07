@@ -1766,3 +1766,78 @@ constitute independent QA, Integrator/task acceptance or owner/merge readiness.
 PR #34 remains **Draft**; merge and auto-merge are not authorized. External
 inventory and canonical application/transport/publication producers remain
 deferred. No old QA or docs-only CI result is transferred to this new code head.
+
+
+## B1/B2/B3 remediation after independent QA — 2026-10-07
+
+**Worker disposition: REMEDIATED / QA_PENDING.** Q1: **FIXED_IN_CODE / QA_PENDING**; Q2: **FIXED_IN_CODE / QA_PENDING**. This does not override the independent **CHANGES_REQUIRED** verdict on the prior head or establish accepted Q1 correctness. Full independent QA of the new immutable containing head is required.
+
+### Provenance, inputs and scope
+
+Same Issue20/parent5, claim6024304772/recovery6025249885, branch `feat/REC-001D-ws-supervisor` and Draft PR34. Starting/QA-rejected immutable head: `ee4e85e5b9c74c8699628e39ea13281a2d91e611`; sole approved contract: `cff1e398c3226bc2a86b51442e02054c5996e86a`; actual main/base: `39ff0dba797eb010586238ef06fb80e996340401`. Ref/Draft/open/unmerged/auto-merge-unset preflight and all133 source blobs were verified. No intervening foreign commits were present. The containing remediation SHA, expected-head save, exact compare and fresh CI are recorded in the existing PR/Issue metadata after commit creation; this file does not invent its own future SHA.
+
+Input blocker6038694010 was superseded by availability record6039297849. All four attached inputs were read; ZIP embedded copies matched byte-for-byte. Originals were not edited:
+
+| Input | SHA256 |
+|---|---|
+| independent-QA report | `07df31f097339f69756df2c25dbfc90fccbdbee45544242266c40c996daac41b` |
+| reproductions patch | `435dcc6b91a3d2175c216ba5ae90907648ed9eeb57d5e7ad8eba8cdc6062b28e` |
+| evidence ZIP | `d5056680267c4401562176e656b6c5b6900a58d676dfad1ddd4a543640522774` |
+| Flushed supplemental patch | `2e2c5a04e3dbc95a7a97f6f3dbed78ac83852cde3671b61aa7fa8fc567f6fe63` |
+
+Exact remediation delta is **eight existing allowed paths**: domain source/tests `capture_session.rs`; market-data source/tests `ws_supervisor.rs`; recording source/tests `capture_session.rs`; this handoff and ADR0003. All125 other blobs remain unchanged. The original17-path cff→ee4 delta remains historical. No manifest/dependency/lock/toolchain/workflow, accepted ADR/spec, codec/reader, `file.rs`, existing WAL tests, networking or composition delta is added. QA's recording→market-data dev dependency was confined to a temporary reproduction copy; the production recording graph remains domain-only. No new claim/Issue/branch/PR, force-push, merge or auto-merge.
+
+### Corrections and normative regressions
+
+| Finding | Concrete correction / evidence |
+|---|---|
+| B1 | A fixed per-W received/generated obligation and identity outlive Rust references. Drop flags bounded abandonment only; rightful serialized reconciliation latches explicit OwnershipAbandoned logical stop, freezes first cut if absent, preserves first failure/descriptor/prefix and mandatory Close. Abandoned W is retained/reportable even with zero references; descriptor closure reports it without seals or fabricated marker/Raw/GAP. Current epoch Close replaces an older settled owner; same owner is reused for pending Down. Generic set_kind cannot settle/cancel received obligations. Completion uses authenticated receipts, requires both stale diagnostic writes/three fresh epoch writes, and rejects partial-write storage stop; no-write suppression is limited to actual prior-Down Connected/Pong. |
+| B2 | `finalize(&mut SessionTurn, &mut QuiescenceProof)` and borrowed `consume_proof` preserve the exact caller proof on foreign rejection. All six genuine A/B owner/turn/proof mismatches preserve both states/ledgers/watermarks/WAL bytes; the same proofs then finalize their rightful owners once. Validated consumption precedes I/O; real closed-backend failure leaves it spent with no seals/retry. No Clone/replacement ticket/proof/generation; affine/reentry and overlapping-proof-borrow compile-fail coverage. |
+| B3 | Bound generic setter returns StorageProfileBound. One backend-issued opaque StorageMemoryAuthority is private to concrete owner; actual closure capacities refresh through it. Checked profile components/intermediates/aggregates and admitted numeric headroom precede mutation. Invalid pre-write backend budget performs zero writes/changes; invalid post-write change explicitly stops storage and preserves old profile with ambiguous suffix. checked_retention_report is available; no saturated fictitious ceiling. Genuine zero/MAX tests cover all six components and stable owner/supervisor reports in debug/release. |
+
+B1 regression lives in existing market-data integration tests already using recording. Five normative functions cover ten queued Raw/GAP/control/timer/current-epoch2 traces before/after Closing, dropped pending Down with held aliases, PreCut/PostCut6-owner retention/first-failure preservation, two genuine in-flight/reclassified-received cases, and healthy authenticated drain/settled Drop with physical Complete finalization. Close remains discoverable/reclaimable after logical stop and diagnostic closure; repeats do not free W through fictional settlement or grow retained state.
+
+Supplemental additions were transferred as normative assertions using **original Durable fixtures**: stale CloseRef after actual epoch/W recycle rejects without corrupting the new leased owner, and two repeated Halted drains preserve the private RecordNo-error prefix/snapshot. No Durable→Flushed adaptation was applied. The reviewed Failed/through=None marker restriction remains a nonfinding.
+
+The reproduction patch was applied only to an isolated exact-source copy. Allfour factual probes PASS there because they demonstrate the old defects/nonfinding; Linux additionally confirms wrongful successful FinalizedArchive and physical Complete bytes for B1. New B1/B3 normative tests both compile and **FAIL behaviorally on ee4** (exit101: W disappears; backend metadata zero override accepted), then PASS after correction. B2's old factual probe confirms stranded proof; revised borrowed-signature regression is API-incompatible with ee4 and is not misreported as an old-head runtime assertion.
+
+Worker peer audit raised/corrected foreign-ticket-before-reconciliation ordering, current-epoch Close replacement, received-origin cancellation/marker barriers, partial-receipt completion and duplicate Down's mistaken generated-plan owner. The initial workspace debug attempt compiled before the last duplicate-owner correction and stopped at65 PASS/7 FAIL in supervisor tests; the corrected full rerun below passes without weakening H1/Down assertions. An initial B3 post-write test expected Pending incorrectly; it now asserts the existing Unconfirmed(error) stop semantics and passes. Peer review is not independent QA.
+
+### Actual Linux checks
+
+Linux x86_64, kernel6.18.44; pinned Rust1.98.1 (`48a229ceaefd4985c50990b14116b6d856af0985`), Cargo1.98.1. Official package SHA256 values and155 installed files were verified against downloaded manifests/archives. Scratch-only toolchain, offline four-local-package workspace, direct std sysroot/GNU bfd; no repository environment/dependency change. Initial toolkit LLVM copy was truncated; exact archive member was restored/verified before Rust runs.
+
+Commands below ran from the materialized workspace via `source ../rust-tools/env.sh` (root invocations used equivalent `--manifest-path repo/Cargo.toml`). Logs are retained in the execution workspace; the saved source tree must match the tested tree. No Flushed adaptation:
+
+| Actual command/check | Result |
+|---|---|
+| `cargo test --workspace --locked` | **PASS/exit0**, all19 suites, **379 passed /0 failed /0 ignored**. Counts:21,13,80,9,18,27,32,10,7,13,72,0,15,3,22,26,4,3,4. |
+| `cargo test --workspace --release --locked` | **PASS/exit0**, same379/0/0. Includes optimized B1/B2/B3 and overflow behavior. |
+| `rustfmt --edition 2024 --check` on changed crate roots/test roots | **PASS/exit0**, recursive modules covered. |
+| `RUSTC_WORKSPACE_WRAPPER=.../clippy-driver RUSTFLAGS='--sysroot ... -C linker-features=-lld -D warnings' cargo check --workspace --all-targets --locked` | **PASS/exit0**, actual Clippy driver/all-target warnings denied. |
+| `cargo generate-lockfile --offline`; original Cargo.lock blob comparison | **PASS**, unchanged blob `8fce3a61cc8dc1f72727ddf2c82c453c31be94bc`. |
+| `cargo build --workspace --locked` | **PASS/exit0**. |
+| Canonical local `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings` | Both wrapper attempts exit101 before checking because `/proc/self/exe` is unavailable. **NOT_RUN canonically locally**; direct equivalents above ran. Fresh exact-head canonical CI is required and recorded separately in PR/Issue after save. |
+| Full independent QA of the new immutable head | **REQUIRED / NOT_RUN** by worker; no owner readiness or merge approval. |
+| Actual socket/live smoke/application/inventory producer | **NOT_RUN / OUT_OF_SCOPE**, those producers remain unimplemented and forbidden by this approval. |
+
+The complete debug and release suites execute the existing31-family ADR mapping, all63 H1 fault variants (9 immediate+9 timeout+36 barriers+9 neighbor), checked/scoped H2,12 Q2 storage-fault variants, D−1/D/D+1/timer-owner/FIFO boundaries and F1–F6/N1–N3. Existing decoder/continuity/input-safety/DataHealth/contracts/publication/WAL and all15 real CLI tests pass, including the two Unix-only CLI cases missing from Windows. Canonical production publication still remains PublicationUnavailable until its sealed guard and actual authenticated producer exist; passing pure conformance is not application publication evidence.
+
+Cap5/cap9 requested-allocation probes were rerun explicitly with `--exact --nocapture` in debug and release;100 failed/reclaim repeats remain flat and all tracked boundary objects release to0 bytes:
+
+| Probe | Debug peak | Release peak | Computed ceiling / teardown |
+|---|---|---|---|
+| Full N1/M5/P4096 |56,494 B |56,493 B |10,256,027 B /0 |
+| Full N2/M9/P4096 |60,388 B |60,387 B |10,409,926 B /0 |
+| Concrete owner cap5 |29,587 B |29,587 B |8,574,778 B /0 asserted |
+| Concrete owner cap9 |31,314 B |31,314 B |8,710,228 B /0 asserted |
+
+These are requested Layout bytes and small-profile probes, not RSS/network/end-to-end or proof of actual worst-case heap overflow. B3's confirmed claim stays reporting substitution/debug panic; no actual unbounded allocation/heap/RSS violation is asserted. Honest fixed per-W metadata covers abandonment identity/state/counters inside W+N+1≤M; no eviction/history lane is added.
+
+Original immutable Windows319 PASS/42 platform failures and two Unix-only NOT_COMPILED cases, historical CI37612763851, and supplemental24 Flushed commands/29 function PASS remain separate attached evidence. They do not replace this original Linux/Durable rerun, nor independent re-QA of the corrected head. Reader physical Complete and stored quality remain unchanged; unsealed diagnostic prefix reports ValidPrefixIncomplete/None, owner completeness Unknown. Crash before marker cannot reconstruct missing observation; external inventory remains deferred.
+
+### Delivery boundary
+
+Prior handoff remains an exact byte prefix. ADR §§3/4/6/12 and existing31-row matrix preserve approved R1–R3, H1 completion-after-Close-settlement, scoped H2, Q1/Q2 and U-09/U-10/U-20/C-01/C-03 constraints. The new immutable containing SHA, eight-path compare, full-tree preservation, fresh exact-head CI checkout/commands/clean state and local post-save source match are verified in the existing PR/Issue record. No old PASS is transferred to a later head.
+
+**Next gate: complete independent QA of the new immutable remediation SHA**, covering B1/B2/B3, all31 acceptance families, Q1/Q2, all63 H1 faults, H2,12 Q2 faults and every prior regression. Worker PASS and CI do not grant Integrator/task acceptance, owner readiness, merge or auto-merge. PR #34 remains Draft.

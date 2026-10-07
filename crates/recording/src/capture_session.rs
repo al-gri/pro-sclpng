@@ -186,8 +186,10 @@ impl fmt::Debug for FinalizedArchive {
 /// use domain::capture_session::{QuiescenceProof, SessionTurn};
 /// fn reuse(owner: &mut CaptureSessionOwner, turn: &mut SessionTurn,
 ///          proof: QuiescenceProof) {
-///     owner.finalize(turn, proof).unwrap();
-///     owner.finalize(turn, proof).unwrap();
+///     let mut transferred = proof;
+///     owner.finalize(turn, &mut transferred).unwrap();
+///     let mut duplicate = proof;
+///     owner.finalize(turn, &mut duplicate).unwrap();
 /// }
 /// ```
 pub struct CaptureSessionOwner {
@@ -198,6 +200,7 @@ pub struct CaptureSessionOwner {
     accepted_bindings: Vec<StreamBinding>,
     memory: OwnerMemoryReport,
     sink_fault: Rc<Cell<Option<SinkFault>>>,
+    storage_memory_authority: Option<StorageMemoryAuthority>,
     diagnostic_close_error: Option<PersistError>,
 }
 
@@ -295,6 +298,44 @@ impl CaptureSessionOwner {
         let next_record = prior
             .checked_next()
             .map_err(|_| OwnerError::CounterExhausted("RecordNo"))?;
+        let registry_metadata_bound = registry_allocation_ceiling(profile.bootstrap)?;
+        let binding_text_bytes = accepted_bindings
+            .iter()
+            .try_fold(0usize, |total, binding| {
+                let text = checked_budget_sum(&[
+                    binding.spec.instrument.venue.as_str().len(),
+                    binding.spec.instrument.product_namespace.as_str().len(),
+                    binding.spec.instrument.native_symbol.as_str().len(),
+                ])?;
+                checked_budget_sum(&[total, text])
+            })?;
+        let mut memory = OwnerMemoryReport {
+            registry_record_count: profile.bootstrap.len() + 1,
+            registry_encoded_bytes: encoded_bytes,
+            registry_metadata_bound,
+            known_metadata_backing_bytes: checked_budget_sum(&[
+                size_of::<Self>(),
+                size_of::<RefCell<WalWriter>>(),
+                checked_budget_product(2, size_of::<usize>())?,
+                size_of::<Cell<Option<SinkFault>>>(),
+                checked_budget_product(2, size_of::<usize>())?,
+                checked_budget_product(accepted_scopes.capacity(), size_of::<ScopeBinding>())?,
+                checked_budget_product(accepted_bindings.capacity(), size_of::<StreamBinding>())?,
+                binding_text_bytes,
+                size_of::<FileSink>(),
+            ])?,
+            // encode_frame has payload and frame Vecs; geometric growth is at
+            // most twice each codec cap. Include input/decoder copies and the
+            // entire cloned validator registry. A smaller advertised frame
+            // limit still uses the codec's global workspace before rejection.
+            encoder_workspace_bound: checked_budget_sum(&[
+                checked_budget_product(MAX_FRAME_LEN, 8)?,
+                registry_metadata_bound,
+            ])?,
+            backend_allocated_bytes: 0,
+            max_frame_len: profile.max_frame_len,
+        };
+        storage_memory(memory)?.validate()?;
         let mut writer = WalWriter::create(path).map_err(OwnerError::Create)?;
         writer.append(accepted_start)?;
         for frame in profile.bootstrap {
@@ -309,35 +350,8 @@ impl CaptureSessionOwner {
         }
         let (authority, turn) = CaptureSessionAuthority::new(binding);
         writer.bind_capture_session(authority.clone());
-        let memory = OwnerMemoryReport {
-            registry_record_count: profile.bootstrap.len() + 1,
-            registry_encoded_bytes: encoded_bytes,
-            registry_metadata_bound: registry_allocation_ceiling(profile.bootstrap),
-            known_metadata_backing_bytes: size_of::<Self>()
-                + size_of::<RefCell<WalWriter>>()
-                + 2 * size_of::<usize>()
-                + size_of::<Cell<Option<SinkFault>>>()
-                + 2 * size_of::<usize>()
-                + accepted_scopes.capacity() * size_of::<ScopeBinding>()
-                + accepted_bindings.capacity() * size_of::<StreamBinding>()
-                + accepted_bindings
-                    .iter()
-                    .map(|binding| {
-                        binding.spec.instrument.venue.as_str().len()
-                            + binding.spec.instrument.product_namespace.as_str().len()
-                            + binding.spec.instrument.native_symbol.as_str().len()
-                    })
-                    .sum::<usize>()
-                + size_of::<FileSink>(),
-            // encode_frame has payload and frame Vecs; geometric growth is at
-            // most twice each codec cap. Include input/decoder copies and the
-            // entire cloned validator registry. A smaller advertised frame
-            // limit still uses the codec's global workspace before rejection.
-            encoder_workspace_bound: MAX_FRAME_LEN * 8
-                + registry_allocation_ceiling(profile.bootstrap),
-            backend_allocated_bytes: writer.backend_capacity(),
-            max_frame_len: profile.max_frame_len,
-        };
+        memory.backend_allocated_bytes = writer.backend_capacity();
+        storage_memory(memory)?.validate()?;
         Ok((
             Self {
                 authority,
@@ -352,6 +366,7 @@ impl CaptureSessionOwner {
                 accepted_bindings,
                 memory,
                 sink_fault: Rc::new(Cell::new(None)),
+                storage_memory_authority: None,
                 diagnostic_close_error: None,
             },
             turn,
@@ -431,8 +446,6 @@ impl CaptureSessionOwner {
             .register_supervisor(turn, bindings, budget, self.prefix)?;
         self.authority
             .set_accepted_stream_bindings(turn, &self.accepted_bindings)?;
-        self.authority
-            .set_storage_memory_profile(turn, storage_memory(self.memory))?;
         self.sink_fault.set(fault);
         let writer = Box::new(FileSink {
             writer: Rc::clone(&self.writer),
@@ -440,7 +453,10 @@ impl CaptureSessionOwner {
             fault: Rc::clone(&self.sink_fault),
             memory: self.memory,
         });
-        let sink = self.authority.bind_sink(turn, writer)?;
+        let (sink, storage_memory_authority) = self
+            .authority
+            .bind_sink_with_memory_authority(turn, writer)?;
+        self.storage_memory_authority = Some(storage_memory_authority);
         Ok((handle, sink))
     }
 
@@ -477,10 +493,13 @@ impl CaptureSessionOwner {
         Ok(self.authority.begin_finalization(turn)?)
     }
 
+    /// Foreign owner/turn rejection preserves the caller's exact affine proof.
+    /// Once validated, the proof is spent before any seal I/O and cannot be
+    /// reused after a storage failure or successful finalization.
     pub fn finalize(
         &mut self,
         turn: &mut SessionTurn,
-        proof: QuiescenceProof,
+        proof: &mut QuiescenceProof,
     ) -> Result<FinalizedArchive, OwnerError> {
         self.authority.consume_proof(turn, proof)?;
         let result = self.finalize_writer();
@@ -577,10 +596,15 @@ impl CaptureSessionOwner {
         }
         // Descriptor closure releases its userspace buffer. Refresh actual
         // known backing even when no later sink receipt can occur.
-        if let Err(error) = self
-            .authority
-            .set_storage_memory_profile(turn, storage_memory(self.memory_report()))
-        {
+        let profile = match storage_memory(self.memory_report()) {
+            Ok(profile) => profile,
+            Err(error) => return self.diagnostic_report(Err(error)),
+        };
+        let update = match self.storage_memory_authority.as_mut() {
+            Some(authority) => authority.update(turn, profile),
+            None => self.authority.set_storage_memory_profile(turn, profile),
+        };
+        if let Err(error) = update {
             return self.diagnostic_report(Err(OwnerError::Authority(error)));
         }
         self.diagnostic_report(outcome)
@@ -627,11 +651,14 @@ struct FileSink {
     memory: OwnerMemoryReport,
 }
 impl SessionRecordWriter for FileSink {
-    fn memory_profile(&self) -> StorageMemoryProfile {
-        storage_memory(OwnerMemoryReport {
+    fn checked_memory_profile(&self) -> Result<StorageMemoryProfile, AuthorityError> {
+        let profile = storage_memory(OwnerMemoryReport {
             backend_allocated_bytes: self.writer.borrow().backend_capacity(),
             ..self.memory
         })
+        .map_err(|_| AuthorityError::InvalidBudget)?;
+        profile.validate()?;
+        Ok(profile)
     }
     fn persist(
         &mut self,
@@ -710,16 +737,32 @@ fn persist_error(error: &OwnerError) -> PersistError {
     PersistError { kind, detail }
 }
 
-fn storage_memory(memory: OwnerMemoryReport) -> StorageMemoryProfile {
-    StorageMemoryProfile {
+fn checked_budget_sum(values: &[usize]) -> Result<usize, OwnerError> {
+    values
+        .iter()
+        .try_fold(0usize, |sum, value| sum.checked_add(*value))
+        .ok_or(OwnerError::InvalidProfile("unrepresentable memory budget"))
+}
+
+fn checked_budget_product(a: usize, b: usize) -> Result<usize, OwnerError> {
+    a.checked_mul(b)
+        .ok_or(OwnerError::InvalidProfile("unrepresentable memory budget"))
+}
+
+fn storage_memory(memory: OwnerMemoryReport) -> Result<StorageMemoryProfile, OwnerError> {
+    let profile = StorageMemoryProfile {
         metadata_backing_bytes: memory.known_metadata_backing_bytes,
-        metadata_ceiling_bytes: memory.known_metadata_backing_bytes
-            + memory.registry_metadata_bound,
+        metadata_ceiling_bytes: checked_budget_sum(&[
+            memory.known_metadata_backing_bytes,
+            memory.registry_metadata_bound,
+        ])?,
         workspace_backing_bytes: 0,
         workspace_ceiling_bytes: memory.encoder_workspace_bound,
         backend_backing_bytes: memory.backend_allocated_bytes,
-        backend_ceiling_bytes: MAX_CAPTURE_PATH_BYTES + 8192,
-    }
+        backend_ceiling_bytes: checked_budget_sum(&[MAX_CAPTURE_PATH_BYTES, 8192])?,
+    };
+    profile.validate()?;
+    Ok(profile)
 }
 
 /// Conservative allocation proof for the frozen validator on the pinned Rust
@@ -729,12 +772,18 @@ fn storage_memory(memory: OwnerMemoryReport) -> StorageMemoryProfile {
 /// 32 pointer words and 64 alignment bytes per node. At most 2*n+1 nodes for
 /// n entries overbounds even an empty root and every internal/leaf split.
 /// This deliberately reports a ceiling, not private-node allocation as measured.
-fn registry_allocation_ceiling(bootstrap: &[RecordFrame]) -> usize {
-    fn tree(entries: usize, entry_size: usize) -> usize {
+fn registry_allocation_ceiling(bootstrap: &[RecordFrame]) -> Result<usize, OwnerError> {
+    fn tree(entries: usize, entry_size: usize) -> Result<usize, OwnerError> {
         if entries == 0 {
-            return 0;
+            return Ok(0);
         }
-        (2 * entries + 1) * (16 * entry_size + 32 * size_of::<usize>() + 64)
+        let nodes = checked_budget_sum(&[checked_budget_product(2, entries)?, 1])?;
+        let bytes = checked_budget_sum(&[
+            checked_budget_product(16, entry_size)?,
+            checked_budget_product(32, size_of::<usize>())?,
+            64,
+        ])?;
+        checked_budget_product(nodes, bytes)
     }
     let specs = bootstrap
         .iter()
@@ -748,17 +797,304 @@ fn registry_allocation_ceiling(bootstrap: &[RecordFrame]) -> usize {
         .iter()
         .filter(|frame| matches!(frame.value, Record::ConfigDefinition(_)))
         .count();
-    tree(configs, size_of::<ConfigVersion>())
-        + tree(specs, size_of::<((InstrumentSlot, SpecVersion), InstrumentSpecRecord)>())
-        + tree(specs, size_of::<(InstrumentSlot, InstrumentRef)>())
-        + tree(specs, size_of::<(InstrumentRef, InstrumentSlot)>())
-        + tree(specs, size_of::<(InstrumentSlot, SpecVersion)>())
+    checked_budget_sum(&[
+        tree(configs, size_of::<ConfigVersion>())?,
+        tree(
+            specs,
+            size_of::<((InstrumentSlot, SpecVersion), InstrumentSpecRecord)>(),
+        )?,
+        tree(specs, size_of::<(InstrumentSlot, InstrumentRef)>())?,
+        tree(specs, size_of::<(InstrumentRef, InstrumentSlot)>())?,
+        tree(specs, size_of::<(InstrumentSlot, SpecVersion)>())?,
         // StreamState is StreamBinding plus fixed LossState (two u64s,
         // EpochTag and Options); 128 bytes covers that non-allocating state.
-        + tree(streams, size_of::<(StreamId, StreamBinding)>() + 128)
+        tree(
+            streams,
+            checked_budget_sum(&[size_of::<(StreamId, StreamBinding)>(), 128])?,
+        )?,
         // All cloned Token capacities equal their string lengths. Numeric
         // spec has 256 token bytes; each identity-map copy has <=128 bytes.
-        + specs * (256 + 128 + 128)
-        + streams * 2 * 128
-        + streams.max(4) * size_of::<StreamBinding>()
+        checked_budget_product(specs, checked_budget_sum(&[256, 128, 128])?)?,
+        checked_budget_product(streams, checked_budget_product(2, 128)?)?,
+        checked_budget_product(streams.max(4), size_of::<StreamBinding>())?,
+    ])
+}
+
+#[cfg(test)]
+mod storage_memory_budget_conformance {
+    use super::*;
+
+    #[test]
+    fn storage_memory_component_intermediate_and_aggregate_overflow_is_typed() {
+        let original = OwnerMemoryReport {
+            registry_record_count: 1,
+            registry_encoded_bytes: 1,
+            registry_metadata_bound: 7,
+            known_metadata_backing_bytes: 3,
+            encoder_workspace_bound: 11,
+            backend_allocated_bytes: 19,
+            max_frame_len: MAX_FRAME_LEN,
+        };
+        assert!(storage_memory(original).is_ok());
+        for invalid in [
+            OwnerMemoryReport {
+                registry_metadata_bound: usize::MAX,
+                ..original
+            },
+            OwnerMemoryReport {
+                known_metadata_backing_bytes: usize::MAX,
+                ..original
+            },
+            OwnerMemoryReport {
+                encoder_workspace_bound: usize::MAX,
+                ..original
+            },
+            OwnerMemoryReport {
+                backend_allocated_bytes: usize::MAX,
+                ..original
+            },
+            OwnerMemoryReport {
+                known_metadata_backing_bytes: usize::MAX / 2,
+                registry_metadata_bound: 0,
+                encoder_workspace_bound: usize::MAX / 2,
+                ..original
+            },
+        ] {
+            assert!(storage_memory(invalid).is_err());
+        }
+        assert!(checked_budget_product(usize::MAX, 2).is_err());
+        assert!(checked_budget_sum(&[usize::MAX, 1]).is_err());
+        assert_eq!(storage_memory(original).unwrap().metadata_ceiling_bytes, 10);
+    }
+}
+
+#[cfg(test)]
+mod finalization_tests {
+    use super::*;
+    use crate::{ArchiveStatus, WalReader};
+    use domain::artifact::ArtifactRef;
+    use domain::event::{ActiveContext, InputContext};
+    use domain::identity::*;
+    use domain::numeric::ExactDecimal;
+    use domain::policy::{DurabilityMode, PolicyFields, SilenceRule};
+    use domain::qualified::{NumericSpec, NumericSpecFields, PriceUnits};
+    use domain::record::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    fn positive<T>(result: Result<T, IdentityError>) -> T {
+        result.expect("valid test identity")
+    }
+
+    fn record(value: u64) -> RecordNo {
+        positive(RecordNo::new(value))
+    }
+
+    fn active() -> ActiveContext {
+        ActiveContext {
+            config: positive(ConfigVersion::new(1)),
+            normalizer: positive(NormalizerVersion::new(1)),
+        }
+    }
+
+    fn context(number: u64, bootstrap: bool) -> WireContext {
+        WireContext {
+            unix_ns: LocalUnixNs::new(number as i64),
+            monotonic_ns: MonotonicNs::new(number),
+            context: if bootstrap {
+                InputContext::Bootstrap
+            } else {
+                InputContext::Active(active())
+            },
+        }
+    }
+
+    fn frame(number: u64, value: Record) -> RecordFrame {
+        RecordFrame {
+            record_no: record(number),
+            segment_no: SegmentNo::new(0),
+            value,
+        }
+    }
+
+    fn start() -> RecordFrame {
+        frame(
+            1,
+            Record::ArchiveStart(ArchiveStart {
+                archive: positive(ArchiveId::new([1; 16])),
+                session: positive(CaptureSessionId::new([2; 16])),
+                clock: positive(ClockId::new(1)),
+                mode: DurabilityMode::Buffered,
+                previous_archive: None,
+            }),
+        )
+    }
+
+    fn provenance() -> ArtifactRef {
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .parse()
+            .expect("valid artifact")
+    }
+
+    fn binding() -> StreamBinding {
+        let spec = positive(SpecVersion::new(1));
+        StreamBinding {
+            id: positive(StreamId::new(1)),
+            instrument_slot: positive(InstrumentSlot::new(1)),
+            spec: SpecRef {
+                instrument: InstrumentRef {
+                    venue: positive(Token::new("bitget")),
+                    market: MarketKind::Perpetual,
+                    product_namespace: positive(Token::new("usdt-futures")),
+                    native_symbol: positive(Token::new("BTCUSDT")),
+                },
+                version: spec,
+            },
+            connection_id: positive(ConnectionId::new(1)),
+            channel: Channel::BookNormal,
+            book_id: Some(positive(BookId::new(1))),
+            tag: EpochTag {
+                spec,
+                connection: positive(ConnectionEpoch::new(1)),
+                subscription: positive(SubscriptionEpoch::new(1)),
+                book: Some(positive(BookEpoch::new(1))),
+            },
+            feed_profile: positive(FeedProfileVersion::new(1)),
+        }
+    }
+
+    fn bootstrap() -> Vec<RecordFrame> {
+        let stream = binding();
+        vec![
+            frame(
+                2,
+                Record::InstrumentSpec(InstrumentSpecRecord {
+                    context: context(2, true),
+                    slot: stream.instrument_slot,
+                    numeric: NumericSpec::new(NumericSpecFields {
+                        reference: stream.spec.clone(),
+                        price_units: PriceUnits {
+                            quote: positive(Token::new("USDT")),
+                            basis: positive(Token::new("BASE")),
+                        },
+                        quantity_unit: positive(Token::new("BTC")),
+                        base_asset: positive(Token::new("BTC")),
+                        price_increment: ExactDecimal::ONE,
+                        quantity_increment: ExactDecimal::ONE,
+                        quantity_to_base_multiplier: Some(ExactDecimal::ONE),
+                    })
+                    .expect("numeric spec"),
+                    provenance: provenance(),
+                }),
+            ),
+            frame(
+                3,
+                Record::StreamDefinition(StreamDefinition {
+                    context: context(3, true),
+                    binding: stream,
+                    provenance: provenance(),
+                }),
+            ),
+            frame(
+                4,
+                Record::ConfigDefinition(ConfigDefinition {
+                    context: context(4, true),
+                    next: active(),
+                    provenance_kind: ProvenanceKind::Synthetic,
+                    evidence: provenance(),
+                    fields: PolicyFields {
+                        silence_rule: SilenceRule::UnknownOnSilence,
+                        freshness_deadline_ns: Some(100),
+                        warmup_min_updates: Some(1),
+                        warmup_min_elapsed_ns: Some(0),
+                        allow_quiet_with_proof: false,
+                        require_two_sided_snapshot: true,
+                        recording_gate: RecordingGate::Written,
+                    },
+                }),
+            ),
+        ]
+    }
+
+    fn budget() -> RetentionBudget {
+        RetentionBudget {
+            item_cap: 5,
+            raw_frame_limit: 1,
+            raw_byte_limit: 1024,
+            max_message_bytes: 1024,
+        }
+    }
+
+    fn scope() -> ScopeBinding {
+        let binding = binding();
+        ScopeBinding {
+            stream: binding.id,
+            connection: binding.connection_id,
+            epoch: binding.tag.connection,
+        }
+    }
+
+    #[test]
+    fn validated_proof_stays_spent_after_real_backend_closure_failure() {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "proscalping-proof-storage-error-{}-{serial}.wal",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        let definitions = bootstrap();
+        let (mut owner, mut turn) = CaptureSessionOwner::create_new(
+            &path,
+            &start(),
+            BoundedCaptureProfile::new(&definitions),
+        )
+        .unwrap();
+        let (handle, _sink) = owner
+            .register_supervisor(&mut turn, &[scope()], budget())
+            .unwrap();
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+            panic!("healthy owner must issue its one proof")
+        };
+        // Only a private conformance fixture can close the concrete descriptor
+        // without changing the authority. The public owner exposes no writer.
+        owner.writer.borrow_mut().close_diagnostic().unwrap();
+        let before_bytes = fs::read(&path).unwrap();
+        let before_watermarks = owner.watermarks();
+        assert!(matches!(
+            owner.finalize(&mut turn, &mut proof),
+            Err(OwnerError::Writer(WriterError::Closed))
+        ));
+        assert!(owner.session_status().failed);
+        assert!(owner.session_status().storage_stopped.is_some());
+        assert_eq!(owner.watermarks(), before_watermarks);
+        assert_eq!(fs::read(&path).unwrap(), before_bytes);
+        // The same object remains available, but the validated consumption is
+        // irreversible. No replacement proof or seal retry becomes possible.
+        assert!(matches!(
+            owner.finalize(&mut turn, &mut proof),
+            Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+        ));
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+        ));
+        assert!(matches!(
+            owner.authority.consume_proof(&mut turn, &mut proof),
+            Err(AuthorityError::ArchiveFailed)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before_bytes);
+        drop(owner);
+        let mut reader = WalReader::open(&path).unwrap();
+        while let Some(frame) = reader.next_record().unwrap() {
+            assert!(!matches!(
+                frame.value,
+                Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+            ));
+        }
+        assert_eq!(reader.report().status, ArchiveStatus::ValidPrefixIncomplete);
+        assert_eq!(reader.report().input_quality, None);
+        drop(reader);
+        fs::remove_file(path).unwrap();
+    }
 }

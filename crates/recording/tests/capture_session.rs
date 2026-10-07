@@ -508,7 +508,7 @@ fn healthy_owner_finalizes_only_after_one_borrowed_ticket_proof() {
         owner.begin_finalization(&mut turn),
         Err(OwnerError::Authority(AuthorityError::AlreadyClosing))
     ));
-    let proof = match handle.quiesce(&mut turn, &ticket) {
+    let mut proof = match handle.quiesce(&mut turn, &ticket) {
         QuiescenceReport::Ready(proof) => proof,
         other => panic!("settled owner must quiesce: {other:?}"),
     };
@@ -516,7 +516,9 @@ fn healthy_owner_finalizes_only_after_one_borrowed_ticket_proof() {
         handle.quiesce(&mut turn, &ticket),
         QuiescenceReport::TicketConsumed
     ));
-    let finalized = owner.finalize(&mut turn, proof).expect("canonical seals");
+    let finalized = owner
+        .finalize(&mut turn, &mut proof)
+        .expect("canonical seals");
     assert_eq!(
         owner.session_status().lifecycle,
         SessionLifecycle::Finalized
@@ -533,6 +535,99 @@ fn healthy_owner_finalizes_only_after_one_borrowed_ticket_proof() {
         records.last().expect("seal").value,
         Record::ArchiveSeal(_)
     ));
+}
+
+#[test]
+fn foreign_finalize_preserves_same_genuine_proof_and_both_owners_until_rightful_use() {
+    let wal_a = TempWal::new("proof-a");
+    let wal_b = TempWal::new("proof-b");
+    let (mut owner_a, mut turn_a, handle_a, _sink_a) = owner(&wal_a.0);
+    let (mut owner_b, mut turn_b, handle_b, _sink_b) = owner(&wal_b.0);
+    // Equal archive/session numeric identities do not authenticate an owner.
+    assert_eq!(
+        handle_a.authority().binding(),
+        handle_b.authority().binding()
+    );
+    let ticket_a = owner_a.begin_finalization(&mut turn_a).unwrap();
+    let ticket_b = owner_b.begin_finalization(&mut turn_b).unwrap();
+    let QuiescenceReport::Ready(mut proof_a) = handle_a.quiesce(&mut turn_a, &ticket_a) else {
+        panic!("A must issue its sole genuine proof")
+    };
+    let QuiescenceReport::Ready(mut proof_b) = handle_b.quiesce(&mut turn_b, &ticket_b) else {
+        panic!("B must issue its sole genuine proof")
+    };
+    let state_a = owner_a.session_status();
+    let state_b = owner_b.session_status();
+    let ledger_a = handle_a.authority().ownership_report();
+    let ledger_b = handle_b.authority().ownership_report();
+    let watermarks_a = owner_a.watermarks();
+    let watermarks_b = owner_b.watermarks();
+    let bytes_a = fs::read(&wal_a.0).unwrap();
+    let bytes_b = fs::read(&wal_b.0).unwrap();
+    macro_rules! reject_without_mutation {
+        ($attempt:expr) => {
+            assert!(matches!(
+                $attempt,
+                Err(OwnerError::Authority(AuthorityError::AuthorityMismatch))
+            ));
+            assert_eq!(owner_a.session_status(), state_a);
+            assert_eq!(owner_b.session_status(), state_b);
+            assert_eq!(handle_a.authority().ownership_report(), ledger_a);
+            assert_eq!(handle_b.authority().ownership_report(), ledger_b);
+            assert_eq!(owner_a.watermarks(), watermarks_a);
+            assert_eq!(owner_b.watermarks(), watermarks_b);
+            assert_eq!(fs::read(&wal_a.0).unwrap(), bytes_a);
+            assert_eq!(fs::read(&wal_b.0).unwrap(), bytes_b);
+        };
+    }
+    reject_without_mutation!(owner_b.finalize(&mut turn_b, &mut proof_a));
+    reject_without_mutation!(owner_a.finalize(&mut turn_b, &mut proof_a));
+    reject_without_mutation!(owner_b.finalize(&mut turn_a, &mut proof_a));
+    reject_without_mutation!(owner_a.finalize(&mut turn_a, &mut proof_b));
+    reject_without_mutation!(owner_b.finalize(&mut turn_a, &mut proof_b));
+    reject_without_mutation!(owner_a.finalize(&mut turn_b, &mut proof_b));
+    assert!(matches!(
+        handle_a.quiesce(&mut turn_a, &ticket_a),
+        QuiescenceReport::TicketConsumed
+    ));
+    assert!(matches!(
+        handle_b.quiesce(&mut turn_b, &ticket_b),
+        QuiescenceReport::TicketConsumed
+    ));
+    let finalized_a = owner_a.finalize(&mut turn_a, &mut proof_a).unwrap();
+    let finalized_b = owner_b.finalize(&mut turn_b, &mut proof_b).unwrap();
+    assert!(finalized_a.watermarks().durable.is_some());
+    assert!(finalized_b.watermarks().durable.is_some());
+    for (owner, turn, proof, wal) in [
+        (&mut owner_a, &mut turn_a, &mut proof_a, &wal_a),
+        (&mut owner_b, &mut turn_b, &mut proof_b, &wal_b),
+    ] {
+        let final_bytes = fs::read(&wal.0).unwrap();
+        assert!(matches!(
+            owner.finalize(turn, proof),
+            Err(OwnerError::Authority(AuthorityError::ProofConsumed))
+        ));
+        assert_eq!(fs::read(&wal.0).unwrap(), final_bytes);
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(report.status, ArchiveStatus::Complete);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|frame| matches!(
+                    frame.value,
+                    Record::SegmentSeal(SegmentSeal { is_final: true, .. })
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|frame| matches!(frame.value, Record::ArchiveSeal(_)))
+                .count(),
+            1
+        );
+    }
 }
 
 #[test]
@@ -562,11 +657,11 @@ fn repeated_not_ready_preserves_ticket_and_counts_until_caller_settles_work() {
         assert_eq!(owner.session_status().lifecycle, SessionLifecycle::Closing);
     }
     drop(work);
-    let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
         panic!("same ticket must become ready after explicit settlement")
     };
     owner
-        .finalize(&mut turn, proof)
+        .finalize(&mut turn, &mut proof)
         .expect("sole proof accepted");
     assert!(matches!(
         handle.quiesce(&mut turn, &ticket),
@@ -581,7 +676,7 @@ fn failure_invalidates_issued_proof_without_any_final_seal() {
     let ticket = owner
         .begin_finalization(&mut turn)
         .expect("close admission");
-    let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
         panic!("initially ready")
     };
     let termination = handle
@@ -596,7 +691,7 @@ fn failure_invalidates_issued_proof_without_any_final_seal() {
         QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
     ));
     assert!(matches!(
-        owner.finalize(&mut turn, proof),
+        owner.finalize(&mut turn, &mut proof),
         Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
     ));
     assert_eq!(owner.watermarks().written, Some(record(4)));
@@ -830,11 +925,11 @@ fn foreign_ticket_or_turn_cannot_consume_rightful_not_ready_ticket() {
         QuiescenceReport::NotReady(_)
     ));
     drop(work);
-    let QuiescenceReport::Ready(proof) = handle_a.quiesce(&mut turn_a, &ticket_a) else {
+    let QuiescenceReport::Ready(mut proof) = handle_a.quiesce(&mut turn_a, &ticket_a) else {
         panic!("foreign errors must preserve rightful issuance")
     };
     owner_a
-        .finalize(&mut turn_a, proof)
+        .finalize(&mut turn_a, &mut proof)
         .expect("rightful sole proof");
 }
 
@@ -879,11 +974,11 @@ fn closing_keeps_down_close_reclaimable_until_explicit_settlement() {
         QuiescenceReport::NotReady(_)
     ));
     drop(work);
-    let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
         panic!("same ticket must become ready after complete Down settlement")
     };
     owner
-        .finalize(&mut turn, proof)
+        .finalize(&mut turn, &mut proof)
         .expect("one physical finalization");
     assert_eq!(read_all(&wal.0).1.status, ArchiveStatus::Complete);
 }
@@ -1104,12 +1199,12 @@ fn consuming_a_healthy_proof_does_not_authorize_generic_bound_sink_seals() {
         let ticket = owner
             .begin_finalization(&mut turn)
             .expect("healthy Closing");
-        let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+        let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
             panic!("settled healthy session")
         };
         handle
             .authority()
-            .consume_proof(&mut turn, proof)
+            .consume_proof(&mut turn, &mut proof)
             .expect("affine authority proof");
         let mut prefix = vec![start()];
         prefix.extend(bootstrap());

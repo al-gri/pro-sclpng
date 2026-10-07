@@ -355,7 +355,7 @@ fn borrowed_quiescence_not_ready_is_repeatable_and_only_one_proof_is_issued() {
     drop(work);
     let command = lease(&authority, &mut turn, &owner).into_command();
     authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(()));
-    let proof = match handle.quiesce(&mut turn, &ticket) {
+    let mut proof = match handle.quiesce(&mut turn, &ticket) {
         QuiescenceReport::Ready(proof) => proof,
         other => panic!("{other:?}"),
     };
@@ -363,7 +363,7 @@ fn borrowed_quiescence_not_ready_is_repeatable_and_only_one_proof_is_issued() {
         handle.quiesce(&mut turn, &ticket),
         QuiescenceReport::TicketConsumed
     ));
-    authority.consume_proof(&mut turn, proof).unwrap();
+    authority.consume_proof(&mut turn, &mut proof).unwrap();
     authority.ensure_finalization_authorized().unwrap();
     authority.finalization_finished(&mut turn).unwrap();
     assert_eq!(authority.status().lifecycle, SessionLifecycle::Finalized);
@@ -422,9 +422,9 @@ fn failure_during_closing_invalidates_active_ticket_or_already_issued_proof() {
                 QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
             ));
         }
-        if let Some(proof) = proof {
+        if let Some(mut proof) = proof {
             assert_eq!(
-                authority.consume_proof(&mut turn, proof).unwrap_err(),
+                authority.consume_proof(&mut turn, &mut proof).unwrap_err(),
                 AuthorityError::ArchiveFailed
             );
         }
@@ -460,6 +460,173 @@ fn work_sharing_is_bounded_and_holds_exactly_one_logical_work_unit() {
     assert_eq!(authority.ownership_report().work_used, 1);
     drop(shares);
     assert_eq!(authority.ownership_report().work_used, 0);
+}
+
+fn observation() -> ObservationIdentity {
+    ObservationIdentity {
+        stream: StreamId::new(1).unwrap(),
+        epoch: ConnectionEpoch::new(1).unwrap(),
+        stamp: ReceiveStamp {
+            unix_ns: 12,
+            monotonic_ns: 34,
+        },
+        class: ObservationClass::Raw,
+        tag: Some(failure(1).observed_tag),
+        attempts: Some((
+            CaptureAttemptNo::new(1).unwrap(),
+            CaptureAttemptNo::new(1).unwrap(),
+        )),
+        loss_count: None,
+    }
+}
+
+#[test]
+fn admitted_obligation_survives_last_alias_and_kind_changes_without_false_settlement() {
+    for kind in [
+        WorkKind::QueuedObservation,
+        WorkKind::InFlightObservation,
+        WorkKind::Result,
+        WorkKind::PendingPlan,
+    ] {
+        let (authority, mut turn, handle) = session(1, 5);
+        let work = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(&mut turn, &work, observation())
+            .unwrap();
+        work.set_kind(&mut turn, kind).unwrap();
+        let work_id = work.id();
+        drop(work);
+        let report = authority.ownership_report();
+        assert_eq!(
+            (
+                report.work_used,
+                report.work_references,
+                report.abandoned_work
+            ),
+            (1, 0, 1)
+        );
+        // Drop only records fixed-cell housekeeping, without lifecycle/cut.
+        assert!(!authority.status().failed);
+        assert_eq!(authority.status().cut_sequence, None);
+        for _ in 0..10 {
+            assert_eq!(
+                authority.begin_finalization(&mut turn).unwrap_err(),
+                AuthorityError::ArchiveFailed
+            );
+            assert_eq!(
+                handle
+                    .reserve_work(&mut turn, WorkKind::Command)
+                    .unwrap_err(),
+                AuthorityError::StorageStopped
+            );
+        }
+        let status = authority.status();
+        assert_eq!(status.cut_sequence, Some(work_id));
+        assert_eq!(
+            status.storage_stopped.unwrap().kind,
+            PersistErrorKind::OwnershipAbandoned
+        );
+        assert_eq!(
+            status.first_failure, None,
+            "abandonment is not an invented received-input failure"
+        );
+        assert_eq!(
+            status.first_abandonment,
+            Some(AbandonedObservation {
+                work_id,
+                kind,
+                identity: observation(),
+                cut_side: CutSide::PreCut
+            })
+        );
+        assert_eq!(authority.ownership_report().work_used, 1);
+        let close = authority
+            .outstanding_close_owners()
+            .iter()
+            .next()
+            .unwrap()
+            .owner
+            .clone();
+        let command = lease(&authority, &mut turn, &close).into_command();
+        assert!(matches!(
+            authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+            DispatchReport::Dispatched
+        ));
+        authority.begin_diagnostic_close(&mut turn).unwrap();
+        authority.diagnostic_closed(&mut turn).unwrap();
+        assert_eq!(authority.unsettled_summary().abandoned, 1);
+        assert_eq!(
+            authority.ownership_report().work_used,
+            1,
+            "Close settlement cannot settle lost recording"
+        );
+        assert_eq!(
+            authority.ensure_finalization_authorized(),
+            Err(AuthorityError::ArchiveFailed)
+        );
+    }
+}
+
+#[test]
+fn foreign_ticket_rejection_does_not_commit_pending_abandonment() {
+    let (authority, mut turn, handle) = session(1, 5);
+    let (foreign, mut foreign_turn, _) = session(1, 5);
+    let work = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle
+        .admit_observation(&mut turn, &work, observation())
+        .unwrap();
+    let ticket = authority.begin_finalization(&mut turn).unwrap();
+    let foreign_ticket = foreign.begin_finalization(&mut foreign_turn).unwrap();
+    drop(work);
+    let before = authority.status();
+    for _ in 0..3 {
+        assert!(matches!(
+            authority.quiesce(&mut turn, &foreign_ticket),
+            QuiescenceReport::Rejected(AuthorityError::AuthorityMismatch)
+        ));
+        assert!(matches!(
+            authority.quiesce(&mut foreign_turn, &ticket),
+            QuiescenceReport::Rejected(AuthorityError::AuthorityMismatch)
+        ));
+        assert_eq!(authority.status(), before);
+    }
+    assert!(matches!(
+        authority.quiesce(&mut turn, &ticket),
+        QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+    ));
+    assert_eq!(authority.ownership_report().work_used, 1);
+}
+
+#[test]
+fn received_origin_cannot_be_reclassified_and_canceled_as_a_generated_plan() {
+    let (authority, mut turn, handle) = session(1, 5);
+    let work = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle
+        .admit_observation(&mut turn, &work, observation())
+        .unwrap();
+    work.set_kind(&mut turn, WorkKind::PendingPlan).unwrap();
+    authority
+        .storage_stopped(
+            &mut turn,
+            PersistError::typed(PersistErrorKind::Io, "confirmed negative storage fault"),
+        )
+        .unwrap();
+    assert_eq!(
+        handle.cancel_generated_plan(&mut turn, &work),
+        Err(AuthorityError::InvalidOwner)
+    );
+    let before = authority.status();
+    drop(work);
+    authority.synchronize_obligations(&mut turn).unwrap();
+    assert_eq!(authority.status().cut_sequence, before.cut_sequence);
+    assert_eq!(authority.status().storage_stopped, before.storage_stopped);
+    assert_eq!(authority.ownership_report().abandoned_work, 1);
 }
 
 #[test]

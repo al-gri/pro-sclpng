@@ -60,6 +60,34 @@ pub struct StorageMemoryProfile {
     pub backend_ceiling_bytes: usize,
 }
 
+impl StorageMemoryProfile {
+    /// Check every component and aggregate before accepting a backend report.
+    /// Half the addressable numeric range remains reserved for the bounded
+    /// authority/supervisor terms; this is arithmetic headroom, not heap usage.
+    pub fn validate(&self) -> Result<(), AuthorityError> {
+        if self.metadata_backing_bytes > self.metadata_ceiling_bytes
+            || self.workspace_backing_bytes > self.workspace_ceiling_bytes
+            || self.backend_backing_bytes > self.backend_ceiling_bytes
+        {
+            return Err(AuthorityError::InvalidBudget);
+        }
+        let backing = self
+            .metadata_backing_bytes
+            .checked_add(self.workspace_backing_bytes)
+            .and_then(|value| value.checked_add(self.backend_backing_bytes));
+        let ceiling = self
+            .metadata_ceiling_bytes
+            .checked_add(self.workspace_ceiling_bytes)
+            .and_then(|value| value.checked_add(self.backend_ceiling_bytes));
+        match (backing, ceiling) {
+            (Some(backing), Some(ceiling)) if backing <= ceiling && ceiling <= usize::MAX / 2 => {
+                Ok(())
+            }
+            _ => Err(AuthorityError::InvalidBudget),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthorityError {
     AuthorityMismatch,
@@ -68,6 +96,7 @@ pub enum AuthorityError {
     AlreadyRegistered,
     NotRegistered,
     SinkAlreadyBound,
+    StorageProfileBound,
     SessionClosing,
     SessionClosed,
     ArchiveFailed,
@@ -221,6 +250,8 @@ pub struct SessionStatus {
     pub archive_observation: Option<ArchiveFailureObservation>,
     pub marker: MarkerState,
     pub cut_sequence: Option<u64>,
+    /// First lost record/job stewardship, distinct from a failed received input.
+    pub first_abandonment: Option<AbandonedObservation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,12 +264,106 @@ pub enum WorkKind {
     Candidate,
 }
 
+/// Fixed identity retained inside the original W cell. It does not claim Raw,
+/// GAP, a new CaptureAttempt, or a durable failure marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationIdentity {
+    pub stream: StreamId,
+    pub epoch: ConnectionEpoch,
+    pub stamp: ReceiveStamp,
+    pub class: ObservationClass,
+    pub tag: Option<EpochTag>,
+    pub attempts: Option<(CaptureAttemptNo, CaptureAttemptNo)>,
+    pub loss_count: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationClass {
+    Raw,
+    RejectedStaleRaw,
+    Gap,
+    Connected,
+    Disconnected,
+    Pong,
+    Timer { timer_id: u64, deadline_ns: u64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbandonedObservation {
+    pub work_id: u64,
+    pub kind: WorkKind,
+    pub identity: ObservationIdentity,
+    pub cut_side: CutSide,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationObligation {
+    None,
+    Pending,
+    Settled,
+    Abandoned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObligationOrigin {
+    Received,
+    Generated,
+}
+
 struct WorkCell {
     sequence: Cell<u64>,
     close_scope: Cell<Option<StreamId>>,
     references: Cell<usize>,
     kind: Cell<WorkKind>,
     cut_side: Cell<CutSide>,
+    obligation: Cell<ObservationObligation>,
+    observation: Cell<Option<ObservationIdentity>>,
+    confirmed_records: Cell<usize>,
+    abandoned_kind: Cell<Option<WorkKind>>,
+    obligation_origin: Cell<ObligationOrigin>,
+}
+
+impl WorkCell {
+    fn is_retained(&self) -> bool {
+        self.references.get() > 0
+            || matches!(
+                self.obligation.get(),
+                ObservationObligation::Pending | ObservationObligation::Abandoned
+            )
+    }
+
+    fn abandon(&self) {
+        if self.obligation.get() == ObservationObligation::Pending {
+            self.abandoned_kind.set(Some(self.kind.get()));
+            self.obligation.set(ObservationObligation::Abandoned);
+        }
+    }
+
+    fn blocks_marker(&self) -> bool {
+        self.is_retained()
+            && ((self.obligation_origin.get() == ObligationOrigin::Received
+                && matches!(
+                    self.obligation.get(),
+                    ObservationObligation::Pending | ObservationObligation::Abandoned
+                ))
+                || (self.obligation.get() == ObservationObligation::None
+                    && matches!(
+                        self.kind.get(),
+                        WorkKind::QueuedObservation | WorkKind::InFlightObservation
+                    )))
+    }
+
+    fn abandonment(&self) -> Option<AbandonedObservation> {
+        (self.obligation.get() == ObservationObligation::Abandoned).then(|| AbandonedObservation {
+            work_id: self.sequence.get(),
+            kind: self.abandoned_kind.get().unwrap_or(self.kind.get()),
+            identity: self
+                .observation
+                .get()
+                .expect("admitted obligation identity"),
+            cut_side: self.cut_side.get(),
+        })
+    }
 }
 
 /// A counted logical owner. Sharing is bounded and does not create another W.
@@ -302,14 +427,22 @@ impl WorkOwner {
         self.cell.kind.set(kind);
         Ok(())
     }
+
+    /// Bounded Cell-only lost-stewardship notification. Lifecycle transitions
+    /// and mandatory Close installation wait for a rightful SessionTurn.
+    pub fn abandon_observation(&self) {
+        self.cell.abandon();
+    }
 }
 
 impl Drop for WorkOwner {
     fn drop(&mut self) {
         // Cell-only housekeeping is safe even while a canonical callback runs.
         let count = self.cell.references.get();
-        debug_assert!(count > 0);
         self.cell.references.set(count.saturating_sub(1));
+        if count <= 1 {
+            self.cell.abandon();
+        }
     }
 }
 
@@ -585,6 +718,8 @@ pub enum PersistErrorKind {
     WeakGate,
     Authority,
     Counter,
+    /// Lost admitted/job stewardship; this is a logical stop, not an I/O error.
+    OwnershipAbandoned,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -633,11 +768,34 @@ pub trait SessionRecordWriter {
     fn memory_profile(&self) -> StorageMemoryProfile {
         StorageMemoryProfile::default()
     }
+
+    fn checked_memory_profile(&self) -> Result<StorageMemoryProfile, AuthorityError> {
+        let profile = self.memory_profile();
+        profile.validate()?;
+        Ok(profile)
+    }
 }
 
 pub struct BoundRecordSink {
     authority: CaptureSessionAuthority,
     writer: Box<dyn SessionRecordWriter>,
+}
+
+/// Opaque authority retained privately by the backend owner that first bound
+/// the sink. A generic session authority or mutation turn cannot mint another
+/// token or update the concrete backend's accepted memory profile.
+pub struct StorageMemoryAuthority {
+    authority: CaptureSessionAuthority,
+}
+
+impl StorageMemoryAuthority {
+    pub fn update(
+        &mut self,
+        turn: &mut SessionTurn,
+        profile: StorageMemoryProfile,
+    ) -> Result<(), AuthorityError> {
+        self.authority.update_backend_memory_profile(turn, profile)
+    }
 }
 
 impl fmt::Debug for BoundRecordSink {
@@ -700,7 +858,7 @@ impl BoundRecordSink {
         owner: &WorkOwner,
     ) -> Result<PersistenceReceipt, PersistBoundaryError> {
         self.authority
-            .validate_turn(turn)
+            .synchronize_obligations(turn)
             .map_err(PersistBoundaryError::Authority)?;
         if matches!(&frame.value,Record::Control(record) if matches!(&record.value,Control::Recording(evidence) if evidence.health==RecordingHealth::Failed))
         {
@@ -725,7 +883,9 @@ impl BoundRecordSink {
             ));
         }
         let state = self.authority.state.borrow();
-        let generated = owner.cell.kind.get() == WorkKind::PendingPlan;
+        let generated = owner.cell.obligation_origin.get() == ObligationOrigin::Generated
+            || (owner.cell.obligation.get() == ObservationObligation::None
+                && owner.cell.kind.get() == WorkKind::PendingPlan);
         let side = if generated && state.failed {
             CutSide::PostCut
         } else {
@@ -778,13 +938,20 @@ impl BoundRecordSink {
         turn: &mut SessionTurn,
         frame: &RecordFrame,
         gate: RecordingGate,
-        _owner: Option<&WorkOwner>,
+        owner: Option<&WorkOwner>,
     ) -> Result<PersistenceReceipt, PersistBoundaryError> {
         self.authority
-            .validate_turn(turn)
+            .synchronize_obligations(turn)
             .map_err(PersistBoundaryError::Authority)?;
         self.authority
             .ensure_storage_writable()
+            .map_err(PersistBoundaryError::Authority)?;
+        // A backend report must be representable before any write boundary.
+        // Rejection neither consumes prefix identity nor replaces the prior
+        // accepted profile, even for a trusted conformance backend override.
+        self.writer
+            .checked_memory_profile()
+            .and_then(|profile| profile.validate())
             .map_err(PersistBoundaryError::Authority)?;
         frame
             .validate_shape()
@@ -866,14 +1033,11 @@ impl BoundRecordSink {
                 state.archive_observation = Some(descriptor);
             }
             CaptureSessionAuthority::latch(&mut state);
-            if state.work.iter().any(|cell| {
-                cell.references.get() > 0
-                    && cell.cut_side.get() == CutSide::PreCut
-                    && matches!(
-                        cell.kind.get(),
-                        WorkKind::QueuedObservation | WorkKind::InFlightObservation
-                    )
-            }) {
+            if state
+                .work
+                .iter()
+                .any(|cell| cell.blocks_marker() && cell.cut_side.get() == CutSide::PreCut)
+            {
                 return Err(PersistBoundaryError::Authority(
                     AuthorityError::NotQuiescent,
                 ));
@@ -886,15 +1050,41 @@ impl BoundRecordSink {
             );
             PersistBoundaryError::Authority(AuthorityError::CounterExhausted("RecordNo"))
         })?;
+        let confirmed_records = owner
+            .map(|owner| {
+                owner.cell.confirmed_records.get().checked_add(1).ok_or(
+                    PersistBoundaryError::Authority(AuthorityError::CounterExhausted(
+                        "WorkReceipt",
+                    )),
+                )
+            })
+            .transpose()?;
         let receipt = self.writer.persist(frame, gate).map_err(|error| {
-            let _ = self
-                .authority
-                .set_storage_memory_profile(turn, self.writer.memory_profile());
+            if let Ok(profile) = self.writer.checked_memory_profile() {
+                let _ = self.authority.update_backend_memory_profile(turn, profile);
+            }
             let _ = self.authority.storage_stopped(turn, error);
             PersistBoundaryError::Persistence(error)
         })?;
+        let profile = self
+            .writer
+            .checked_memory_profile()
+            .and_then(|profile| {
+                profile.validate()?;
+                Ok(profile)
+            })
+            .map_err(|error| {
+                // A backend can report an invalid change only after real
+                // bytes may have been written. Preserve the accepted profile,
+                // stop further writes, and retain that ambiguous suffix.
+                let _ = self.authority.storage_stopped(
+                    turn,
+                    PersistError::typed(PersistErrorKind::Validation, "backend memory profile"),
+                );
+                PersistBoundaryError::Authority(error)
+            })?;
         self.authority
-            .set_storage_memory_profile(turn, self.writer.memory_profile())
+            .update_backend_memory_profile(turn, profile)
             .map_err(PersistBoundaryError::Authority)?;
         if receipt.through != frame.record_no {
             let _ = self.authority.storage_stopped(
@@ -931,6 +1121,9 @@ impl BoundRecordSink {
             receipt,
         );
         self.authority.confirm_persisted_frame(frame);
+        if let (Some(owner), Some(confirmed_records)) = (owner, confirmed_records) {
+            owner.cell.confirmed_records.set(confirmed_records);
+        }
         Ok(receipt)
     }
 }
@@ -940,6 +1133,7 @@ struct ScopeState {
     failure: Option<TerminalFailure>,
     close: Rc<CloseCell>,
     confirmed_up: Option<ConnectionEpoch>,
+    confirmed_down: Option<ConnectionEpoch>,
     confirmed_timer: Option<RecordNo>,
     confirmed_advance: Option<(ConnectionEpoch, ConnectionEpoch, RecordNo)>,
     confirmed_subscription: Option<(SubscriptionEpoch, SubscriptionEpoch, RecordNo)>,
@@ -961,6 +1155,7 @@ struct AuthorityState {
     failed: bool,
     storage_stopped: Option<PersistError>,
     first_failure: Option<TerminalFailure>,
+    first_abandonment: Option<AbandonedObservation>,
     archive_observation: Option<ArchiveFailureObservation>,
     marker: MarkerState,
     cut_sequence: Option<u64>,
@@ -1070,6 +1265,184 @@ impl SupervisorSessionHandle {
     ) -> Result<WorkOwner, AuthorityError> {
         self.authority.reserve_work(turn, kind)
     }
+    /// Only this non-clonable registered supervisor handle can admit and
+    /// complete its jobs; generic authority kind changes cannot settle them.
+    pub fn admit_observation(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+        identity: ObservationIdentity,
+    ) -> Result<(), AuthorityError> {
+        self.authority.synchronize_obligations(turn)?;
+        self.authority.ensure_admission_open(turn)?;
+        self.validate_work(owner)?;
+        let state = self.authority.state.borrow();
+        if owner.cell.obligation.get() != ObservationObligation::None
+            || owner.cell.kind.get() != WorkKind::QueuedObservation
+            || !state
+                .scopes
+                .iter()
+                .any(|scope| scope.binding.stream == identity.stream)
+        {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        owner.cell.observation.set(Some(identity));
+        owner.cell.obligation.set(ObservationObligation::Pending);
+        owner.cell.obligation_origin.set(ObligationOrigin::Received);
+        Ok(())
+    }
+
+    pub fn extend_gap_observation(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+        identity: ObservationIdentity,
+    ) -> Result<(), AuthorityError> {
+        self.authority.synchronize_obligations(turn)?;
+        self.validate_work(owner)?;
+        let old = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let state = self.authority.state.borrow();
+        if owner.cell.obligation.get() != ObservationObligation::Pending
+            || old.class != ObservationClass::Gap
+            || old.stream != identity.stream
+            || old.epoch != identity.epoch
+            || old.stamp != identity.stamp
+            || old.tag != identity.tag
+            || identity.class != ObservationClass::Gap
+            || old.attempts.map(|range| range.0) != identity.attempts.map(|range| range.0)
+            || old
+                .attempts
+                .zip(identity.attempts)
+                .is_none_or(|(old, new)| new.1 < old.1)
+            || old
+                .loss_count
+                .zip(identity.loss_count)
+                .is_none_or(|(old, new)| new < old)
+            || (state.failed && owner.cut_side() != CutSide::PostCut)
+        {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        owner.cell.observation.set(Some(identity));
+        Ok(())
+    }
+
+    fn validate_work(&self, owner: &WorkOwner) -> Result<(), AuthorityError> {
+        if !Weak::ptr_eq(&owner.authority, &Rc::downgrade(&self.authority.state)) {
+            return Err(AuthorityError::AuthorityMismatch);
+        }
+        if owner.cell.sequence.get() != owner.sequence || owner.cell.references.get() == 0 {
+            return Err(AuthorityError::OwnerRetired);
+        }
+        Ok(())
+    }
+
+    /// Complete the canonical job after all its required writes/dispositions.
+    /// Receipts are authenticated by the bound sink. A no-write obsolete Up or
+    /// Pong is accepted only after actual same-epoch Down was gate-confirmed.
+    pub fn complete_observation(
+        &self,
+        turn: &mut SessionTurn,
+        sink: &BoundRecordSink,
+        owner: &WorkOwner,
+        obsolete: Option<(StreamId, ConnectionEpoch)>,
+    ) -> Result<(), AuthorityError> {
+        self.authority.synchronize_obligations(turn)?;
+        self.validate_work(owner)?;
+        if !self.authority.same_authority(&sink.authority) {
+            return Err(AuthorityError::AuthorityMismatch);
+        }
+        if owner.cell.obligation.get() != ObservationObligation::Pending {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        self.authority.ensure_storage_writable()?;
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let required = if owner.cell.obligation_origin.get() == ObligationOrigin::Generated {
+            3
+        } else if identity.class == ObservationClass::RejectedStaleRaw {
+            2
+        } else {
+            1
+        };
+        if owner.cell.confirmed_records.get() == 0 {
+            if !matches!(
+                identity.class,
+                ObservationClass::Connected | ObservationClass::Pong
+            ) || obsolete != Some((identity.stream, identity.epoch))
+                || !self.authority.state.borrow().scopes.iter().any(|scope| {
+                    scope.binding.stream == identity.stream
+                        && scope.confirmed_down == Some(identity.epoch)
+                })
+            {
+                return Err(AuthorityError::NotQuiescent);
+            }
+        } else if owner.cell.confirmed_records.get() < required {
+            return Err(AuthorityError::NotQuiescent);
+        }
+        owner.cell.obligation.set(ObservationObligation::Settled);
+        Ok(())
+    }
+
+    pub fn retain_generated_plan(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+    ) -> Result<(), AuthorityError> {
+        self.authority.synchronize_obligations(turn)?;
+        self.validate_work(owner)?;
+        if owner.cell.obligation.get() != ObservationObligation::Settled
+            || owner.cell.kind.get() != WorkKind::PendingPlan
+        {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        owner.cell.obligation.set(ObservationObligation::Pending);
+        owner
+            .cell
+            .obligation_origin
+            .set(ObligationOrigin::Generated);
+        owner.cell.confirmed_records.set(0);
+        Ok(())
+    }
+
+    /// Explicit bounded cancellation of still-unadmitted generated output.
+    /// Received observations cannot use this path, and ordinary Drop cannot
+    /// substitute for this serialized lifecycle decision.
+    pub fn cancel_generated_plan(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+    ) -> Result<(), AuthorityError> {
+        self.authority.synchronize_obligations(turn)?;
+        self.validate_work(owner)?;
+        let state = self.authority.state.borrow();
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        if owner.cell.kind.get() != WorkKind::PendingPlan
+            || owner.cell.obligation_origin.get() != ObligationOrigin::Generated
+            || owner.cell.obligation.get() != ObservationObligation::Pending
+            || !(matches!(
+                state.lifecycle,
+                SessionLifecycle::DiagnosticClosing | SessionLifecycle::DiagnosticClosed
+            ) || state
+                .scopes
+                .iter()
+                .any(|scope| scope.binding.stream == identity.stream && scope.failure.is_some()))
+        {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        owner.cell.obligation.set(ObservationObligation::Settled);
+        Ok(())
+    }
     pub fn terminate(
         &self,
         turn: &mut SessionTurn,
@@ -1109,13 +1482,25 @@ impl fmt::Debug for CloseTicket {
         f.debug_struct("CloseTicket").finish_non_exhaustive()
     }
 }
-/// Finalization authorization is affine.
+/// Finalization authorization is affine. A validated consumption spends it;
+/// a foreign owner or turn rejection leaves the same value available.
+///
+/// ```compile_fail
+/// use domain::capture_session::QuiescenceProof;
+/// fn duplicate(proof: QuiescenceProof) {
+///     let _first = proof;
+///     let _second = proof;
+/// }
+/// ```
 ///
 /// ```compile_fail
 /// use domain::capture_session::{CaptureSessionAuthority, QuiescenceProof, SessionTurn};
-/// fn reuse(authority: &CaptureSessionAuthority, turn: &mut SessionTurn, proof: QuiescenceProof) {
-///     authority.consume_proof(turn, proof).unwrap();
-///     authority.consume_proof(turn, proof).unwrap();
+/// fn overlap(authority: &CaptureSessionAuthority, turn: &mut SessionTurn,
+///            proof: &mut QuiescenceProof) {
+///     let first = &mut *proof;
+///     let second = &mut *proof;
+///     authority.consume_proof(turn, first).unwrap();
+///     authority.consume_proof(turn, second).unwrap();
 /// }
 /// ```
 pub struct QuiescenceProof {
@@ -1136,6 +1521,7 @@ pub struct UnsettledSummary {
     pub commands: usize,
     pub candidates: usize,
     pub work_total: usize,
+    pub abandoned: usize,
     pub marker: MarkerState,
     pub close_owners: CloseOwnerSnapshot,
 }
@@ -1161,6 +1547,9 @@ pub struct OwnershipReport {
     pub post_cut: usize,
     pub before_failure: usize,
     pub work_references: usize,
+    /// Admitted/generated obligations independent of live Rust aliases.
+    pub pending_observations: usize,
+    pub abandoned_work: usize,
     /// Known authority-owned allocation capacity: Rc/RefCell storage, fixed
     /// registries, vector backing and bounded immutable token storage. This
     /// excludes caller-held inline capability values and is not an allocator
@@ -1476,6 +1865,7 @@ impl CaptureSessionAuthority {
                 failed: false,
                 storage_stopped: None,
                 first_failure: None,
+                first_abandonment: None,
                 archive_observation: None,
                 marker: MarkerState::NotRequired,
                 cut_sequence: None,
@@ -1513,6 +1903,64 @@ impl CaptureSessionAuthority {
             Err(AuthorityError::AuthorityMismatch)
         }
     }
+    /// Serialize bounded Drop notifications into canonical failure. Drop itself
+    /// never borrows this registry, advances the lifecycle/cut, or performs I/O.
+    pub fn synchronize_obligations(&self, turn: &mut SessionTurn) -> Result<(), AuthorityError> {
+        self.validate_turn(turn)?;
+        let mut state = self.state.borrow_mut();
+        let first = state
+            .work
+            .iter()
+            .filter_map(|cell| cell.abandonment())
+            .min_by_key(|work| work.work_id);
+        let Some(first) = first else {
+            return Ok(());
+        };
+        Self::latch(&mut state);
+        if state.first_abandonment.is_none() {
+            state.first_abandonment = state
+                .work
+                .iter()
+                .filter_map(|cell| cell.abandonment())
+                .find(|work| work.work_id == first.work_id);
+        }
+        // The admitted prefix hole cannot be repaired or crossed by a marker.
+        // Explicit logical stop permits diagnostic descriptor closure while
+        // preserving each undrained obligation, rather than endless NotReady.
+        let error = PersistError::typed(
+            PersistErrorKind::OwnershipAbandoned,
+            "admitted observation ownership abandoned",
+        );
+        if state.storage_stopped.is_none() {
+            state.storage_stopped = Some(error);
+        }
+        if matches!(
+            state.marker,
+            MarkerState::Pending | MarkerState::NotRequired
+        ) {
+            state.marker = MarkerState::Unconfirmed(error);
+        }
+        for scope in &state.scopes {
+            let abandoned = state.work.iter().any(|cell| {
+                cell.abandonment()
+                    .is_some_and(|work| work.identity.stream == scope.binding.stream)
+            });
+            let needs_close = scope.close.identity.get().is_none_or(|identity| {
+                identity.epoch != scope.binding.epoch
+                    && scope.close.state.get() == CloseState::Settled
+            });
+            if abandoned && needs_close {
+                scope.close.identity.set(Some(CloseIdentity {
+                    stream: scope.binding.stream,
+                    connection: scope.binding.connection,
+                    epoch: scope.binding.epoch,
+                    storage: CloseStorage::ReservedTerminal,
+                }));
+                scope.close.state.set(CloseState::Pending);
+            }
+        }
+        Ok(())
+    }
     pub fn binding(&self) -> SessionBinding {
         self.state.borrow().binding
     }
@@ -1528,12 +1976,19 @@ impl CaptureSessionAuthority {
         profile: StorageMemoryProfile,
     ) -> Result<(), AuthorityError> {
         self.validate_turn(turn)?;
-        if profile.metadata_backing_bytes > profile.metadata_ceiling_bytes
-            || profile.workspace_backing_bytes > profile.workspace_ceiling_bytes
-            || profile.backend_backing_bytes > profile.backend_ceiling_bytes
-        {
-            return Err(AuthorityError::InvalidBudget);
+        if self.state.borrow().sink_bound {
+            return Err(AuthorityError::StorageProfileBound);
         }
+        self.update_backend_memory_profile(turn, profile)
+    }
+
+    fn update_backend_memory_profile(
+        &self,
+        turn: &mut SessionTurn,
+        profile: StorageMemoryProfile,
+    ) -> Result<(), AuthorityError> {
+        self.validate_turn(turn)?;
+        profile.validate()?;
         self.state.borrow_mut().storage_memory = profile;
         Ok(())
     }
@@ -1562,6 +2017,7 @@ impl CaptureSessionAuthority {
             archive_observation: s.archive_observation,
             marker: s.marker,
             cut_sequence: s.cut_sequence,
+            first_abandonment: s.first_abandonment,
         }
     }
     pub fn archive_failure_observation(&self) -> Option<ArchiveFailureObservation> {
@@ -1569,7 +2025,11 @@ impl CaptureSessionAuthority {
     }
     pub fn disposition(&self) -> SessionDisposition {
         let s = self.state.borrow();
-        if s.failed {
+        if s.failed
+            || s.work
+                .iter()
+                .any(|cell| cell.obligation.get() == ObservationObligation::Abandoned)
+        {
             SessionDisposition::DiagnosticOnly {
                 binding: s.binding,
                 failure: s.first_failure.map(|f| FailureId {
@@ -1601,7 +2061,7 @@ impl CaptureSessionAuthority {
         expected: ConnectionEpoch,
         next: ConnectionEpoch,
     ) -> Result<(), AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         if next.get()
             != expected
                 .get()
@@ -1719,6 +2179,7 @@ impl CaptureSessionAuthority {
                 binding: *binding,
                 failure: None,
                 confirmed_up: None,
+                confirmed_down: None,
                 confirmed_timer: None,
                 confirmed_advance: None,
                 confirmed_subscription: None,
@@ -1739,6 +2200,11 @@ impl CaptureSessionAuthority {
                     references: Cell::new(0),
                     kind: Cell::new(WorkKind::QueuedObservation),
                     cut_side: Cell::new(CutSide::BeforeFailure),
+                    obligation: Cell::new(ObservationObligation::None),
+                    observation: Cell::new(None),
+                    confirmed_records: Cell::new(0),
+                    abandoned_kind: Cell::new(None),
+                    obligation_origin: Cell::new(ObligationOrigin::Received),
                 })
             })
             .collect();
@@ -1804,7 +2270,20 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         writer: Box<dyn SessionRecordWriter>,
     ) -> Result<BoundRecordSink, AuthorityError> {
+        self.bind_sink_with_memory_authority(turn, writer)
+            .map(|(sink, _)| sink)
+    }
+
+    /// The first backend binding alone receives its non-cloneable profile
+    /// update authority. Validate the report before consuming that binding.
+    pub fn bind_sink_with_memory_authority(
+        &self,
+        turn: &mut SessionTurn,
+        writer: Box<dyn SessionRecordWriter>,
+    ) -> Result<(BoundRecordSink, StorageMemoryAuthority), AuthorityError> {
         self.validate_turn(turn)?;
+        let profile = writer.checked_memory_profile()?;
+        profile.validate()?;
         let mut s = self.state.borrow_mut();
         if !s.registered {
             return Err(AuthorityError::NotRegistered);
@@ -1812,11 +2291,17 @@ impl CaptureSessionAuthority {
         if s.sink_bound {
             return Err(AuthorityError::SinkAlreadyBound);
         }
+        s.storage_memory = profile;
         s.sink_bound = true;
-        Ok(BoundRecordSink {
-            authority: self.clone(),
-            writer,
-        })
+        Ok((
+            BoundRecordSink {
+                authority: self.clone(),
+                writer,
+            },
+            StorageMemoryAuthority {
+                authority: self.clone(),
+            },
+        ))
     }
 
     pub fn ensure_admission_open(&self, turn: &SessionTurn) -> Result<(), AuthorityError> {
@@ -1850,6 +2335,19 @@ impl CaptureSessionAuthority {
                         .find(|scope| scope.binding.connection == connection)
                     {
                         scope.confirmed_up = Some(epoch);
+                    }
+                }
+                Control::Transport {
+                    connection,
+                    epoch,
+                    value: Transport::Down,
+                } => {
+                    if let Some(scope) = state
+                        .scopes
+                        .iter_mut()
+                        .find(|scope| scope.binding.connection == connection)
+                    {
+                        scope.confirmed_down = Some(epoch);
                     }
                 }
                 Control::Timer { stream, .. } => {
@@ -1930,7 +2428,11 @@ impl CaptureSessionAuthority {
     }
     pub fn ensure_storage_writable(&self) -> Result<(), AuthorityError> {
         let s = self.state.borrow();
-        if s.storage_stopped.is_some() {
+        if s.storage_stopped.is_some()
+            || s.work
+                .iter()
+                .any(|cell| cell.obligation.get() == ObservationObligation::Abandoned)
+        {
             return Err(AuthorityError::StorageStopped);
         }
         if matches!(
@@ -1943,7 +2445,11 @@ impl CaptureSessionAuthority {
     }
     pub fn ensure_finalization_authorized(&self) -> Result<(), AuthorityError> {
         let s = self.state.borrow();
-        if s.failed {
+        if s.failed
+            || s.work
+                .iter()
+                .any(|cell| cell.obligation.get() == ObservationObligation::Abandoned)
+        {
             return Err(AuthorityError::ArchiveFailed);
         }
         if s.storage_stopped.is_some() {
@@ -1970,12 +2476,13 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         kind: WorkKind,
     ) -> Result<WorkOwner, AuthorityError> {
+        self.synchronize_obligations(turn)?;
         self.ensure_admission_open(turn)?;
         let mut s = self.state.borrow_mut();
         let cell = s
             .work
             .iter()
-            .find(|c| c.references.get() == 0)
+            .find(|c| !c.is_retained())
             .cloned()
             .ok_or(AuthorityError::WorkExhausted)?;
         let sequence = s
@@ -1986,6 +2493,11 @@ impl CaptureSessionAuthority {
         cell.sequence.set(sequence);
         cell.close_scope.set(None);
         cell.references.set(1);
+        cell.obligation.set(ObservationObligation::None);
+        cell.observation.set(None);
+        cell.confirmed_records.set(0);
+        cell.abandoned_kind.set(None);
+        cell.obligation_origin.set(ObligationOrigin::Received);
         cell.kind.set(kind);
         cell.cut_side.set(if s.failed {
             CutSide::PostCut
@@ -2004,7 +2516,7 @@ impl CaptureSessionAuthority {
             s.failed = true;
             s.cut_sequence = Some(s.sequence);
             for cell in &s.work {
-                if cell.references.get() > 0 {
+                if cell.is_retained() {
                     cell.cut_side.set(CutSide::PreCut);
                 }
             }
@@ -2030,7 +2542,7 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         failure: TerminalFailure,
     ) -> Result<TerminationReport, AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let first;
         {
             let mut s = self.state.borrow_mut();
@@ -2105,7 +2617,7 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         error: PersistError,
     ) -> Result<(), AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.storage_stopped.is_none() {
             s.storage_stopped = Some(error);
@@ -2121,7 +2633,7 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         record: RecordNo,
     ) -> Result<(), AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.storage_stopped.is_some() {
             return Err(AuthorityError::StorageStopped);
@@ -2135,14 +2647,10 @@ impl CaptureSessionAuthority {
         if s.confirmed_marker != Some(record) {
             return Err(AuthorityError::InvalidBinding);
         }
-        if s.work.iter().any(|cell| {
-            cell.references.get() > 0
-                && cell.cut_side.get() == CutSide::PreCut
-                && matches!(
-                    cell.kind.get(),
-                    WorkKind::QueuedObservation | WorkKind::InFlightObservation
-                )
-        }) {
+        if s.work
+            .iter()
+            .any(|cell| cell.blocks_marker() && cell.cut_side.get() == CutSide::PreCut)
+        {
             return Err(AuthorityError::NotQuiescent);
         }
         s.marker = MarkerState::Confirmed(record);
@@ -2156,7 +2664,7 @@ impl CaptureSessionAuthority {
         epoch: ConnectionEpoch,
         work: Option<&WorkOwner>,
     ) -> Result<CloseOwnerRef, AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         if let Some(w) = work
             && !Weak::ptr_eq(&Rc::downgrade(&self.state), &w.authority)
         {
@@ -2419,6 +2927,9 @@ impl CaptureSessionAuthority {
                 command,
             };
         }
+        if let Err(reason) = self.synchronize_obligations(turn) {
+            return DispatchReport::Denied { reason, command };
+        }
         if let Some(close) = command.close.as_ref() {
             if self.close_cell(&close.owner).is_err() {
                 return DispatchReport::Revoked(AuthorityError::OwnerRetired);
@@ -2476,11 +2987,7 @@ impl CaptureSessionAuthority {
 
     pub fn ownership_report(&self) -> OwnershipReport {
         let s = self.state.borrow();
-        let used = s
-            .work
-            .iter()
-            .filter(|cell| cell.references.get() > 0)
-            .count();
+        let used = s.work.iter().filter(|cell| cell.is_retained()).count();
         let metadata = std::mem::size_of::<RefCell<AuthorityState>>()
             + s.scopes.capacity() * std::mem::size_of::<ScopeState>()
             + s.work.capacity() * std::mem::size_of::<Rc<WorkCell>>()
@@ -2521,6 +3028,8 @@ impl CaptureSessionAuthority {
             post_cut: 0,
             before_failure: 0,
             work_references: 0,
+            pending_observations: 0,
+            abandoned_work: 0,
             metadata_backing_bytes: metadata,
             inline_accounted_capacity_bytes: inline_owners,
             inline_ceiling_bytes: inline_owner_ceiling,
@@ -2528,8 +3037,12 @@ impl CaptureSessionAuthority {
             storage_memory: s.storage_memory,
         };
         for cell in &s.work {
-            if cell.references.get() > 0 {
+            if cell.is_retained() {
                 report.work_references += cell.references.get();
+                report.pending_observations +=
+                    usize::from(cell.obligation.get() == ObservationObligation::Pending);
+                report.abandoned_work +=
+                    usize::from(cell.obligation.get() == ObservationObligation::Abandoned);
                 match cell.cut_side.get() {
                     CutSide::BeforeFailure => report.before_failure += 1,
                     CutSide::PreCut => report.pre_cut += 1,
@@ -2549,14 +3062,17 @@ impl CaptureSessionAuthority {
             commands: 0,
             candidates: 0,
             work_total: 0,
+            abandoned: 0,
             marker: s.marker,
             close_owners: CloseOwnerSnapshot {
                 owners: std::array::from_fn(|_| None),
             },
         };
         for cell in &s.work {
-            if cell.references.get() > 0 {
+            if cell.is_retained() {
                 r.work_total += 1;
+                r.abandoned +=
+                    usize::from(cell.obligation.get() == ObservationObligation::Abandoned);
                 match cell.kind.get() {
                     WorkKind::QueuedObservation => r.queued += 1,
                     WorkKind::InFlightObservation => r.in_flight += 1,
@@ -2576,7 +3092,7 @@ impl CaptureSessionAuthority {
         &self,
         turn: &mut SessionTurn,
     ) -> Result<CloseTicket, AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.failed {
             return Err(AuthorityError::ArchiveFailed);
@@ -2603,6 +3119,9 @@ impl CaptureSessionAuthority {
         if !self.same_authority(&ticket.authority) {
             return QuiescenceReport::Rejected(AuthorityError::AuthorityMismatch);
         }
+        if let Err(e) = self.synchronize_obligations(turn) {
+            return QuiescenceReport::Rejected(e);
+        }
         let mut s = self.state.borrow_mut();
         if s.failed {
             return QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed);
@@ -2613,7 +3132,7 @@ impl CaptureSessionAuthority {
         if s.ticket != TicketState::Active || s.lifecycle != SessionLifecycle::Closing {
             return QuiescenceReport::Rejected(AuthorityError::InvalidTicket);
         }
-        let unsettled = s.work.iter().any(|cell| cell.references.get() > 0)
+        let unsettled = s.work.iter().any(|cell| cell.is_retained())
             || s.scopes.iter().any(|scope| {
                 scope.close.identity.get().is_some()
                     && scope.close.state.get() != CloseState::Settled
@@ -2629,15 +3148,19 @@ impl CaptureSessionAuthority {
             authority: self.clone(),
         })
     }
+    /// Validate the owner, turn and sole issued proof before spending its
+    /// authorization. Rejections preserve the borrowed value and rightful
+    /// state; successful consumption is irreversible even if storage fails.
     pub fn consume_proof(
         &self,
         turn: &mut SessionTurn,
-        proof: QuiescenceProof,
+        proof: &mut QuiescenceProof,
     ) -> Result<(), AuthorityError> {
         self.validate_turn(turn)?;
         if !self.same_authority(&proof.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.failed {
             return Err(AuthorityError::ArchiveFailed);
@@ -2651,7 +3174,7 @@ impl CaptureSessionAuthority {
         {
             return Err(AuthorityError::InvalidProof);
         }
-        if s.work.iter().any(|c| c.references.get() > 0)
+        if s.work.iter().any(|c| c.is_retained())
             || s.scopes.iter().any(|scope| {
                 scope.close.identity.get().is_some()
                     && scope.close.state.get() != CloseState::Settled
@@ -2664,7 +3187,7 @@ impl CaptureSessionAuthority {
         Ok(())
     }
     pub fn finalization_finished(&self, turn: &mut SessionTurn) -> Result<(), AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         self.ensure_finalization_authorized()?;
         let mut s = self.state.borrow_mut();
         s.lifecycle = SessionLifecycle::Finalized;
@@ -2675,7 +3198,7 @@ impl CaptureSessionAuthority {
         &self,
         turn: &mut SessionTurn,
     ) -> Result<SessionLifecycle, AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         match s.lifecycle {
             SessionLifecycle::FailedDiagnostic => {
@@ -2689,19 +3212,13 @@ impl CaptureSessionAuthority {
         }
     }
     pub fn diagnostic_closed(&self, turn: &mut SessionTurn) -> Result<(), AuthorityError> {
-        self.validate_turn(turn)?;
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.lifecycle != SessionLifecycle::DiagnosticClosing {
             return Err(AuthorityError::WrongLifecycle);
         }
         if s.storage_stopped.is_none()
-            && (s.work.iter().any(|c| {
-                c.references.get() > 0
-                    && matches!(
-                        c.kind.get(),
-                        WorkKind::QueuedObservation | WorkKind::InFlightObservation
-                    )
-            }) || s.marker == MarkerState::Pending)
+            && (s.work.iter().any(|c| c.blocks_marker()) || s.marker == MarkerState::Pending)
         {
             return Err(AuthorityError::NotQuiescent);
         }
@@ -2718,6 +3235,7 @@ impl CaptureSessionAuthority {
         if !Weak::ptr_eq(&Rc::downgrade(&self.state), &guard.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
+        self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.guard.is_some() {
             return Err(AuthorityError::AlreadyRegistered);
@@ -2734,6 +3252,7 @@ impl CaptureSessionAuthority {
         if !self.same_authority(&step.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
+        self.synchronize_obligations(turn)?;
         let mut guard = self
             .state
             .borrow_mut()
@@ -2756,6 +3275,9 @@ impl CaptureSessionAuthority {
         }
         if !self.same_authority(&candidate.authority) || !self.same_authority(&fence.authority) {
             return PublicationReport::Denied(AuthorityError::AuthorityMismatch);
+        }
+        if let Err(e) = self.synchronize_obligations(turn) {
+            return PublicationReport::Denied(e);
         }
         let s = self.state.borrow();
         if s.failed {
@@ -2820,6 +3342,222 @@ mod conformance {
     use crate::event::InputContext;
     use crate::policy::WatermarkKind;
     use crate::record::{ControlRecord, Reason, RecordingEvidence, WireContext};
+
+    #[test]
+    fn backend_memory_profile_components_and_aggregate_reject_before_mutation() {
+        struct MemoryWriter(StorageMemoryProfile);
+        impl SessionRecordWriter for MemoryWriter {
+            fn memory_profile(&self) -> StorageMemoryProfile {
+                self.0
+            }
+            fn persist(
+                &mut self,
+                _: &RecordFrame,
+                _: RecordingGate,
+            ) -> Result<PersistenceReceipt, PersistError> {
+                Err(PersistError::new("unused memory conformance writer"))
+            }
+        }
+        let (authority, mut turn, _) = session(10);
+        let original = StorageMemoryProfile {
+            metadata_backing_bytes: 3,
+            metadata_ceiling_bytes: 7,
+            workspace_backing_bytes: 11,
+            workspace_ceiling_bytes: 17,
+            backend_backing_bytes: 19,
+            backend_ceiling_bytes: 23,
+        };
+        authority
+            .set_storage_memory_profile(&mut turn, original)
+            .unwrap();
+        for component in 0..6 {
+            let mut invalid = original;
+            match component {
+                0 => invalid.metadata_backing_bytes = usize::MAX,
+                1 => invalid.metadata_ceiling_bytes = usize::MAX,
+                2 => invalid.workspace_backing_bytes = usize::MAX,
+                3 => invalid.workspace_ceiling_bytes = usize::MAX,
+                4 => invalid.backend_backing_bytes = usize::MAX,
+                _ => invalid.backend_ceiling_bytes = usize::MAX,
+            }
+            assert_eq!(
+                authority.set_storage_memory_profile(&mut turn, invalid),
+                Err(AuthorityError::InvalidBudget)
+            );
+            assert_eq!(authority.ownership_report().storage_memory, original);
+            assert_eq!(
+                authority
+                    .bind_sink_with_memory_authority(&mut turn, Box::new(MemoryWriter(invalid)))
+                    .err(),
+                Some(AuthorityError::InvalidBudget)
+            );
+            assert_eq!(authority.ownership_report().storage_memory, original);
+        }
+        // Each component fits individually; their aggregate and the reserved
+        // report headroom still reject before consuming the first binding.
+        let overflowing = StorageMemoryProfile {
+            metadata_backing_bytes: usize::MAX / 2,
+            metadata_ceiling_bytes: usize::MAX / 2,
+            workspace_backing_bytes: usize::MAX / 2,
+            workspace_ceiling_bytes: usize::MAX / 2,
+            backend_backing_bytes: 2,
+            backend_ceiling_bytes: 2,
+        };
+        assert_eq!(
+            authority.set_storage_memory_profile(&mut turn, overflowing),
+            Err(AuthorityError::InvalidBudget)
+        );
+        assert_eq!(authority.ownership_report().storage_memory, original);
+        struct UnvalidatedWriter;
+        impl SessionRecordWriter for UnvalidatedWriter {
+            fn checked_memory_profile(&self) -> Result<StorageMemoryProfile, AuthorityError> {
+                Ok(StorageMemoryProfile {
+                    metadata_ceiling_bytes: usize::MAX,
+                    ..StorageMemoryProfile::default()
+                })
+            }
+            fn persist(
+                &mut self,
+                _: &RecordFrame,
+                _: RecordingGate,
+            ) -> Result<PersistenceReceipt, PersistError> {
+                Err(PersistError::new("unused memory conformance writer"))
+            }
+        }
+        assert_eq!(
+            authority
+                .bind_sink_with_memory_authority(&mut turn, Box::new(UnvalidatedWriter))
+                .err(),
+            Some(AuthorityError::InvalidBudget)
+        );
+        assert_eq!(authority.ownership_report().storage_memory, original);
+        let (_sink, mut token) = authority
+            .bind_sink_with_memory_authority(&mut turn, Box::new(MemoryWriter(original)))
+            .unwrap();
+        assert_eq!(
+            authority.set_storage_memory_profile(&mut turn, StorageMemoryProfile::default()),
+            Err(AuthorityError::StorageProfileBound)
+        );
+        assert_eq!(
+            token.update(&mut turn, overflowing),
+            Err(AuthorityError::InvalidBudget)
+        );
+        let (_, mut foreign_turn, _) = session(10);
+        assert_eq!(
+            token.update(&mut foreign_turn, StorageMemoryProfile::default()),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(authority.ownership_report().storage_memory, original);
+        let closed = StorageMemoryProfile {
+            backend_backing_bytes: 0,
+            ..original
+        };
+        token.update(&mut turn, closed).unwrap();
+        assert_eq!(authority.ownership_report().storage_memory, closed);
+        assert_eq!(
+            authority
+                .bind_sink_with_memory_authority(&mut turn, Box::new(MemoryWriter(original)))
+                .err(),
+            Some(AuthorityError::SinkAlreadyBound)
+        );
+    }
+
+    #[test]
+    fn backend_memory_preflight_rejects_overflow_before_record_or_cut_mutation() {
+        struct MutableMemoryWriter {
+            profile: Rc<Cell<StorageMemoryProfile>>,
+            calls: Rc<Cell<usize>>,
+            change_on_write: Rc<Cell<bool>>,
+        }
+        impl SessionRecordWriter for MutableMemoryWriter {
+            fn checked_memory_profile(&self) -> Result<StorageMemoryProfile, AuthorityError> {
+                Ok(self.profile.get())
+            }
+            fn persist(
+                &mut self,
+                frame: &RecordFrame,
+                gate: RecordingGate,
+            ) -> Result<PersistenceReceipt, PersistError> {
+                self.calls.set(self.calls.get() + 1);
+                if self.change_on_write.get() {
+                    self.profile.set(StorageMemoryProfile {
+                        workspace_ceiling_bytes: usize::MAX,
+                        ..StorageMemoryProfile::default()
+                    });
+                }
+                Ok(PersistenceReceipt {
+                    through: frame.record_no,
+                    achieved_gate: gate,
+                })
+            }
+        }
+        let (authority, mut turn, _) = session(10);
+        let profile = Rc::new(Cell::new(StorageMemoryProfile::default()));
+        let calls = Rc::new(Cell::new(0));
+        let change_on_write = Rc::new(Cell::new(false));
+        let mut sink = authority
+            .bind_sink(
+                &mut turn,
+                Box::new(MutableMemoryWriter {
+                    profile: Rc::clone(&profile),
+                    calls: Rc::clone(&calls),
+                    change_on_write: Rc::clone(&change_on_write),
+                }),
+            )
+            .unwrap();
+        let original_status = authority.status();
+        let original_prefix = authority.prefix().unwrap();
+        let original_memory = authority.ownership_report().storage_memory;
+        profile.set(StorageMemoryProfile {
+            workspace_ceiling_bytes: usize::MAX,
+            ..StorageMemoryProfile::default()
+        });
+        assert_eq!(
+            sink.persist_marker(&mut turn, &marker(10), RecordingGate::Durable),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidBudget
+            ))
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(authority.status(), original_status);
+        assert_eq!(authority.prefix().unwrap(), original_prefix);
+        assert_eq!(authority.ownership_report().storage_memory, original_memory);
+        profile.set(StorageMemoryProfile::default());
+        change_on_write.set(true);
+        assert_eq!(
+            sink.persist_marker(&mut turn, &marker(10), RecordingGate::Durable),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidBudget
+            ))
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(authority.prefix().unwrap(), original_prefix);
+        assert_eq!(authority.ownership_report().storage_memory, original_memory);
+        let stopped = authority.status();
+        assert!(stopped.failed);
+        assert_eq!(
+            stopped.storage_stopped,
+            Some(PersistError::typed(
+                PersistErrorKind::Validation,
+                "backend memory profile"
+            ))
+        );
+        assert_eq!(
+            stopped.marker,
+            MarkerState::Unconfirmed(PersistError::typed(
+                PersistErrorKind::Validation,
+                "backend memory profile"
+            ))
+        );
+        assert_eq!(
+            sink.persist_marker(&mut turn, &marker(10), RecordingGate::Durable),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::StorageStopped
+            ))
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(authority.status(), stopped);
+    }
 
     fn session(
         next: u64,
@@ -3705,7 +4443,7 @@ mod conformance {
             authority
                 .consume_proof(
                     &mut turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
@@ -3713,11 +4451,11 @@ mod conformance {
             AuthorityError::InvalidProof
         );
         assert_eq!(authorization_state(&authority), before);
-        let proof = match handle.quiesce(&mut turn, &ticket) {
+        let mut proof = match handle.quiesce(&mut turn, &ticket) {
             QuiescenceReport::Ready(proof) => proof,
             other => panic!("{other:?}"),
         };
-        let foreign_proof = match foreign_handle.quiesce(&mut foreign_turn, &foreign_ticket) {
+        let mut foreign_proof = match foreign_handle.quiesce(&mut foreign_turn, &foreign_ticket) {
             QuiescenceReport::Ready(proof) => proof,
             other => panic!("{other:?}"),
         };
@@ -3727,7 +4465,7 @@ mod conformance {
             foreign
                 .consume_proof(
                     &mut foreign_turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
@@ -3740,7 +4478,7 @@ mod conformance {
             authority
                 .consume_proof(
                     &mut foreign_turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
@@ -3748,13 +4486,13 @@ mod conformance {
             AuthorityError::AuthorityMismatch
         );
         assert_eq!(authorization_state(&authority), rightful);
-        authority.consume_proof(&mut turn, proof).unwrap();
+        authority.consume_proof(&mut turn, &mut proof).unwrap();
         let consumed = authorization_state(&authority);
         assert_eq!(
             authority
                 .consume_proof(
                     &mut turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
@@ -3764,7 +4502,7 @@ mod conformance {
         assert_eq!(authorization_state(&authority), consumed);
         authority.ensure_finalization_authorized().unwrap();
         foreign
-            .consume_proof(&mut foreign_turn, foreign_proof)
+            .consume_proof(&mut foreign_turn, &mut foreign_proof)
             .unwrap();
         foreign.ensure_finalization_authorized().unwrap();
         authority.finalization_finished(&mut turn).unwrap();
@@ -3772,7 +4510,7 @@ mod conformance {
             authority
                 .consume_proof(
                     &mut turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
@@ -3786,11 +4524,11 @@ mod conformance {
     fn failure_after_proof_consumption_revokes_seal_authorization_without_reissuance() {
         let (authority, mut turn, handle) = session(10);
         let ticket = authority.begin_finalization(&mut turn).unwrap();
-        let proof = match handle.quiesce(&mut turn, &ticket) {
+        let mut proof = match handle.quiesce(&mut turn, &ticket) {
             QuiescenceReport::Ready(proof) => proof,
             other => panic!("{other:?}"),
         };
-        authority.consume_proof(&mut turn, proof).unwrap();
+        authority.consume_proof(&mut turn, &mut proof).unwrap();
         authority
             .storage_stopped(
                 &mut turn,
@@ -3805,7 +4543,7 @@ mod conformance {
             authority
                 .consume_proof(
                     &mut turn,
-                    QuiescenceProof {
+                    &mut QuiescenceProof {
                         authority: authority.clone()
                     }
                 )
