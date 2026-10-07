@@ -1,6 +1,6 @@
 # ADR 0003 — terminal capture saturation and archive session authority
 
-Status: **DESIGN_APPROVED_FOR_IMPLEMENTATION — QA-D2 REMEDIATION / QA_PENDING**. Date: 2026-10-07.
+Status: **PRIOR CONTRACT DESIGN_APPROVED_FOR_IMPLEMENTATION; QA-NEW-01 PARTIAL_IDENTITY_RESTORATION / QA_PENDING; TIMER EXTENSION DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED**. Date: 2026-10-08.
 Architecture direction: **ARCHITECTURE_DIRECTION_SET**.
 This is the bounded REC-001D design revision for [Issue #20](https://github.com/al-gri/pro-sclpng/issues/20), parent [#5](https://github.com/al-gri/pro-sclpng/issues/5), existing Draft [PR #34](https://github.com/al-gri/pro-sclpng/pull/34).
 Claim `6024304772`; recovery `6025249885`; latest incoming partial completion [6033824631](https://github.com/al-gri/pro-sclpng/issues/20#issuecomment-6033824631).
@@ -9,7 +9,7 @@ Inspected main/base: `39ff0dba797eb010586238ef06fb80e996340401`.
 Architecture-approved immutable proposal: `cff1e398c3226bc2a86b51442e02054c5996e86a`. Earlier reviewed proposal: `750e85a7ecdd65b0c788726d05a4302b0b42225d`.
 The owner supplied **DESIGN_APPROVED_FOR_IMPLEMENTATION** for the complete contract at `cff1e398…`, with R1/R2/R3 **DESIGN_RETEST_PASS** and whole-ADR consistency **DESIGN_REVIEW_PASS**. Exact allowlist and conditions are recorded in the supplied `REC-001D-Architecture-cff1e398.txt`. Earlier production/proposal provenance remains historical.
 
-Normative MUST/MUST NOT statements below are the **approved implementation contract**, restricted to the exact paths in §8 and the two delivery documents. At the approved docs-only head they were **not implemented**: Q1 was **BLOCKED / NOT_FIXED**, Q2 **FIXED_IN_CODE / QA_PENDING**. Approval clears the design gate; it is not implementation acceptance or independent QA. Historical worker implementation evidence is recorded in §11; independent QA rejected `ee4e85e5b9c74c8699628e39ea13281a2d91e611` with B1/B2/B3. Their corrective boundaries are in §12. Subsequent independent QA rejected `dfe2c43efc2df0591d67daef4beac0d97fa3b050` with QA-D1: local same-scope failure omitted generated-plan settlement. Section13 records its restoration. Independent QA then rejected `8a8969acce1e0e7873929736daef5d69d78a7e41` with MEDIUM QA-D2: the public registered handle could settle partially confirmed Generated output although the canonical supervisor rejected it. Section14 restores that public boundary, and the appended [REC-001D handoff](../handoffs/REC-001D.md) records factual execution. Earlier worker/CI PASS and docs-only CI cannot establish acceptance of a later head.
+Normative MUST/MUST NOT statements in §§1–14 are the **approved implementation contract**; §15 is a **DESIGN_PROPOSED** extension requiring new explicit Architecture/owner approval. The approved contract is restricted to the exact paths in §8 and the two delivery documents. At the approved docs-only head they were **not implemented**: Q1 was **BLOCKED / NOT_FIXED**, Q2 **FIXED_IN_CODE / QA_PENDING**. Approval clears the design gate; it is not implementation acceptance or independent QA. Historical worker implementation evidence is recorded in §11; independent QA rejected `ee4e85e5b9c74c8699628e39ea13281a2d91e611` with B1/B2/B3. Their corrective boundaries are in §12. Subsequent independent QA rejected `dfe2c43efc2df0591d67daef4beac0d97fa3b050` with QA-D1: local same-scope failure omitted generated-plan settlement. Section13 records its restoration. Independent QA then rejected `8a8969acce1e0e7873929736daef5d69d78a7e41` with MEDIUM QA-D2: the public registered handle could settle partially confirmed Generated output although the canonical supervisor rejected it. Section14 restores that public boundary, and the appended [REC-001D handoff](../handoffs/REC-001D.md) records factual execution. Earlier worker/CI PASS and docs-only CI cannot establish acceptance of a later head.
 
 ## 1. Problem, authority and approval boundary
 
@@ -500,3 +500,191 @@ The supplied six public tests compile and fail behaviorally on the rejected sour
 Current report also contains a private same-authority registry swap. It directly replaces A/B WorkOwner associations during DiagnosticClosing and demonstrates the narrower validation limit described in §13.1. No natural public operation producing that swap was established. It is recorded as a defensive-validation/documentation discrepancy, not a second public blocker or evidence of foreign-authority escape. No new opaque-owner identity API is introduced to extend this task's policy.
 
 Implementation changes are restricted to `crates/domain/src/capture_session.rs` and `crates/market-data/tests/ws_supervisor.rs`, plus this ADR and handoff. Public signatures, accepted schema/reader, backend profile authority, affine proof, bounds and finalization gates are unchanged. The two current attachments, manifest/embedded patch identity, actual debug/release commands and final counts are recorded in the appended handoff. New immutable SHA, exact four-path diff and fresh canonical CI with clean checkout belong in existing PR/Issue records. Historical388 PASS and CI37653209456 missed this public cancellation boundary and do not accept the new head. Full independent QA remains required; Draft PR #34 is neither merge-authorized nor owner-ready.
+
+## 15. QA-NEW-01 identity restoration and Timer contract proposal
+
+Status: **DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED**. Date: 2026-10-08.
+This appendix records the existing-lineage bounded continuation after independent
+CHANGES_REQUIRED on `c9ddf41275dd6c6ced19ab537310e924d7b0be53`, tree
+`9ce6413fdd234c8ed7b1934ee18404568d181c54`. It does not amend accepted WAL bytes,
+dependencies, §8 allowed paths or any of the 31 §9 acceptance requirements.
+The owner explicitly confirmed that no approved runtime Timer-kind/disposition
+contract exists and requested this proposal before dependent implementation.
+The earlier cff design approval does not approve the proposal below.
+
+### 15.1 Independent restoration and remaining boundary
+
+The Timer-independent worker implementation binds representable received metadata to its
+original W and commits private distinct progress only after a gate-confirmed
+receipt. Raw, empty stale Raw plus its diagnostic GAP, exact QueueOverflow GAP,
+original Up/Down and common Timer identity must reject unrelated/replaced/repeated
+frames before backend write. This is metadata authentication, not admitted-payload
+content authentication. Raw's permitted diagnostic GAP remains a distinct optional
+stage; empty stale Raw requires its exact second stage. Existing no-write obsolete
+Up/Pong requires authenticated same-epoch Down. Generated completion needs a
+private original same-W Down/Close association and fresh distinct epoch stages;
+no generic receipt count can establish that association. Actual worker source
+changes and tests are enumerated in the handoff, without transferring prior PASS.
+Received Down matching authenticates its represented metadata; existing canonical
+mandatory Close creation remains a later operation. This restoration does not
+claim public complete-observation proof of a full Down/Close job. Raw payload bytes
+and decoder-dependent required diagnostics are not represented by admission and
+are not authenticated by metadata matching.
+
+Timer identity currently contains `(stream, connection epoch, ReceiveStamp,
+timer_id, deadline_ns)`. `observation_identity` merges private PingTimer and
+PongTimeout into that identical DTO. The active timeout writes Timer then Down;
+Ping and obsolete timeout write Timer only. Earlier FIFO Pong/Connected can revoke
+eligibility after admission. The public authority has no original kind or current
+scheduler association and cannot authenticate this difference from the DTO or
+the accepted TimerFired bytes. Exact matching of the common Timer record is
+independent and implementable; required/authorized effect stages remain blocked.
+Allowing optional matching Down preserves existing behavior but does not prove
+that a Ping or obsolete timeout was entitled to Down or that an active timeout
+could settle without it. Full QA-NEW-01 is not closed by that partial restoration.
+
+### 15.2 Options and recommendation
+
+| Option | Authority and compatibility | Decision |
+|---|---|---|
+| A. Bounded authority-owned scheduler and opaque plan | One authoritative schedule per fixed scope; private tokens bind kind, generation, original W and current output plan; no caller disposition flag. Existing supervisor computes/uses the same frozen engineering policy through this authority. | **Recommended / PROPOSED**. Best fit for the reachable pre-supervisor public-handle boundary. |
+| B. Sealed supervisor disposition capability | A canonical supervisor could mint an opaque capsule whose issuer is authenticated by domain. Requires an explicit cross-crate sealing/issuer design, revocation protocol, and removal/restriction of the direct public-handle disposition route. | Alternative requiring Architecture review; a public constructor or trusted boolean would not satisfy it. |
+| C. New caller-supplied kind/effect fields only | Adds a DTO but the same caller can replace active/obsolete disposition or claim success; accepted backend receipts still would not authenticate effect entitlement. | **Rejected** as insufficient. |
+
+Option A has no network/clock adapter or domain->market-data dependency. It moves
+only the bounded eligibility ledger to the existing authority, with an explicit
+runtime API delta subject to approval. WAL/replay still records existing Timer,
+Transport and epoch controls. Replay does not claim physical ping/Close delivery.
+
+### 15.3 Proposed original runtime identity and capability
+
+At registration freeze the existing supervisor engineering heartbeat policy and
+its revision. Select active/obsolete disposition before operational preflight:
+an obsolete Timer records its original identity even at MAX time/epochs, without
+attempting deadline, reconnect or epoch arithmetic. For an active plan, perform
+checked timer/deadline arithmetic before its effectful writes.
+For each fixed scope retain a schedule generation, epoch, deadline, kind
+(`Ping`/`Timeout`) and state. A queued original timer retains its immutable
+common DTO, kind and opaque schedule token inside its already-counted W.
+Tokens carry private authority identity and scope/epoch/generation; equality of
+numeric IDs, deadlines or session identifiers does not authenticate a token.
+There is no public constructor for an active/obsolete output permit.
+
+The proposed operation that admits a due timer derives kind/ID/deadline from the
+authority's current schedule and accepts the original observed ReceiveStamp;
+the caller does not select a success flag or active disposition. Capacity is
+reserved before committing generation/queued state. A rejected proposal leaves
+the schedule retriable and creates no admitted original obligation.
+Repeating a due proposal for an already queued schedule creates no second W or
+token. TimerId/schedule-generation exhaustion returns a typed counter error
+without wrap/reset, preserves the original schedule/queued owners, and follows
+the existing terminal counter policy. A multi-scope tick reserves in the existing
+deterministic stream order; partial success reports each admitted scope and the
+first typed rejection, leaves rejected scope flags unchanged, and invents no
+terminal received-input identity for a capacity-rejected timer proposal.
+
+Under the rightful SessionTurn, the authority derives and freezes an output plan
+immediately before the first Timer write from the current authenticated schedule
+state and token. The plan is one of `TimerOnly(Ping)`, `TimerOnly(Obsolete)` or
+`TimerThenDown(ActiveTimeout, same-W Close)`. Once a stage is confirmed, the plan
+cannot be replaced, canceled as wholly uncommitted, or reselected from submitted
+frames. The original identity and admission CutSide never change. API spelling,
+issuer access and registration policy validation require explicit approval before
+implementation; these proposed semantics are not permission to add functions now.
+
+For the proposed active Timeout, reserve its one epoch-bound same-W Close in the
+existing fixed scope cell at plan selection, before Timer I/O. This is a proposed
+runtime semantic delta, not a claim about the old H1 behavior. The reservation
+proves planned closure ownership, not a recorded Down. It becomes dispatchable
+after authenticated Down or terminal storage failure; if Timer/Down writing
+fails, keep the selected plan and reserved Close, distinguish trusted stages
+from potentially written bytes, and report the storage error. A foreign/live
+incompatible Close reservation rejects plan selection before any write; an
+eligible same-original reservation is reused without a second owner or lease.
+
+### 15.4 Authoritative serialized transitions
+
+| Trigger under the same SessionTurn | Proposed authoritative transition |
+|---|---|
+| Gate-confirmed Connected/Up or current Pong/Up | Replace the eligible schedule for that scope/epoch and advance its bounded checked generation. Older admitted timer observations remain owned and recordable but their tokens become obsolete. Pong first in FIFO cancels a timeout even at D-1/D/D+1, preserving Q2. |
+| Due Ping admission | Reserve W then attach the current Ping token; no operational effect at admission. If still eligible at drain, its exact Timer receipt precedes a bound Ping lease and the authority's AwaitingPong schedule. If revoked first, record Timer only and leave the newer schedule unchanged. |
+| Due Timeout admission | Reserve W then attach original Timeout token. A preceding Pong/Connected/Down makes it obsolete at plan selection. A still-current timeout freezes Timer->Down with one mandatory same-W Close; its Down cannot be selected by a caller boolean. |
+| Confirmed Down or scope terminal failure | Revoke operational schedules/leases for that epoch, preserve queued original Timer identities and current original mandatory Close. No later Up/Pong for the terminal epoch may revive it. |
+| Authenticated epoch completion | Require distinct fresh connection/subscription/book stages and settled original Close. Install the new epoch with no eligible old tokens; generation does not wrap/reset in the archive. New eligibility requires the normal new-epoch Up path. |
+| Receipt error, weak gate, mismatch, StorageStopped | Preserve earlier trusted progress and potentially written suffix truthfully. Retain the frozen plan/Pending W and, for an already selected active Timeout, its reserved Close even if no Down was authenticated. A Timer-only plan invents no Close. Invalidate successful finalization; no rollback or physical absence is promised. |
+
+The unique mutable turn prevents reentrancy within one authority operation. It
+does not prevent a caller from submitting Pong/Connected in a separate operation
+between Timer and Down. A fixed per-scope frozen-plan state therefore retains the
+original W and prevents such an operation from revoking or replacing an already
+selected active Timeout plan until its Down is authenticated or terminal storage
+failure is recorded. A later queued Pong/Connected remains owned in FIFO and is
+drained after Down under the existing obsolete-control rule; a typed interstage
+rejection preserves its identity, W and CutSide. Other scopes may continue.
+Submitted frame content cannot choose a transition. A revoked but still admitted
+original token remains recordable as obsolete at plan selection. A consumed or
+replayed token cannot create a new W or receipt; these states are distinct.
+Updating the authority and supervisor view must follow authenticated progress,
+never a speculative mirror update before the gate. The schedule transition is
+committed in that serialized authority gate-confirmation operation, rather than
+depending on a later fallible supervisor mirror callback. Tests must establish that
+only the authority's schedule is an entitlement source, including direct handles.
+
+### 15.5 Proposed receipt stages and settlement
+
+Every Timer plan requires one exact original Timer record: original context,
+stream, both stamp samples, timer ID and deadline. A repeat, foreign token,
+replaced stamp or unrelated record creates no fresh progress and is rejected
+before write. A Timer-only plan settles after that stage; obsolete disposition
+does not emit Ping, Down, epoch advancement or reconnect, and does not clear a
+newer schedule owner. Operational Ping remains an authority-bound command lease,
+with existing ambiguous-effect dispatch semantics and counted ownership.
+
+An active Timeout plan additionally requires exact same-observation Down and
+registration/retention of the same mandatory Close owner before settlement.
+Close may be Pending/Leased when observation ownership transfers to the retained
+generated plan; W and its Close remain counted. Finalization/epoch completion
+still requires authenticated settlement of that Close, never a caller assertion.
+Duplicate Down cannot create another Close or epoch plan. Exact Timer alone may
+not settle an active Timeout. Exact Down alone may not settle any Timer.
+
+Generated H1 uses a bounded immutable old-tag/BookId snapshot associated with that
+same original Down/Close W. Connection, subscription and book receipts must be
+distinct, ordered, have original stamp/plan owners and checked expected/next
+values, and be fresh after the earlier Down. A repeated Connection receipt is
+not a substitute for Subscription or Book. QA-D1 checked cancellation precedes
+removal/reclassification; QA-D2 allows cancellation only with no fresh generated
+stage and no StorageStopped. Received timers never use generated cancellation.
+
+### 15.6 Bounds, tests and approval gate
+
+No unbounded history, side lane, payload copy or externally supplied success bit
+is proposed. State is fixed per scope plus inline metadata in its counted W;
+obsolete queued tokens continue consuming that original W. Use checked finite
+generations and preserve `W+N+1<=M`. Include actual `size_of`/allocation changes
+in metadata ceilings and cap5/cap9 retention/100-repeat/teardown evidence; requested
+Layout bytes are not RSS/usable heap or network-memory measurements.
+
+Required positives: active Ping; active Timeout exact Timer->Down/one Close and
+fresh H1 stages; obsolete timeout/ping after FIFO Pong/Connected/Down; both FIFO
+orders and D-1/D/D+1; equal deadline/new-generation alias; admitted timers across
+epoch change; rightful recovery after rejection; foreign rejection preserves the
+original owner; storage faults retain authenticated prefix/Close; healthy original
+completion and one borrowed final proof. Required negatives: kind swap, replaced
+disposition/capsule, foreign/repeated/retired schedule token, changed stream/epoch/
+stamp/ID/deadline, unrelated records, repeated stage, premature active Timeout
+settlement, omitted/wrong Down or Close, earlier Down counted as fresh H1,
+generated receipt for another plan, last-steward abandonment and attempted seals.
+Include direct Timer-confirmed -> intervening Pong/Connected -> Down attempts:
+the frozen plan cannot be overridden, the intervening original stays owned, and
+unrelated-scope controls still progress. A revoked admitted token must record its
+exact obsolete Timer; consumed/replayed tokens must reject without extra work.
+Run genuine Linux/Durable debug/release and the unchanged full 31-row/corrective
+scope, including Q2's 12 storage faults, 63 H1 variants, R1-R3/B1-B3/QA-D1/D2.
+
+**Architecture/owner decision required:** approve one exact runtime authority and
+transition contract and its allowed paths before implementing kind/disposition
+extensions. Until then dependent Timer stages remain TIMER_CONTRACT_BLOCKED.
+ENV-01 independently blocks required Linux/Durable execution on this Windows
+surface. This proposal is not ACCEPTED, independent QA, owner readiness or merge
+approval. Existing branch/PR stays in its original lineage and Draft state.

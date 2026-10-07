@@ -2037,3 +2037,206 @@ Only four paths change: `crates/domain/src/capture_session.rs`, `crates/market-d
 Historical Windows319 PASS/42 platform failures, Flushed supplemental checks and prior worker/CI runs remain separate evidence. Reader Complete bytes are not concealed or relabelled: unsealed diagnostic prefix stays ValidPrefixIncomplete with absent quality label, owner completeness Unknown; crash cannot reconstruct a missing marker and external inventory remains deferred. U-09/U-10/U-20/C-01/C-03 stay unchanged.
 
 **Next gate: full independent QA of the new immutable remediation SHA**, including public QA-D2, QA-D1, all31 families, B1/B2/B3, R1–R3, Q1/Q2,63 H1 faults, H2,12 Q2 faults and previous regressions. Worker PASS and fresh CI do not grant owner readiness, Integrator acceptance, merge or auto-merge approval. PR #34 remains Draft.
+
+
+## QA-NEW-01 bounded continuation and proposed Timer contract — 2026-10-08
+
+Disposition: **PARTIAL_IDENTITY_RESTORATION / QA_PENDING** for represented
+metadata and stages; **DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED** for Timer
+kind/disposition-dependent stages; **ENV-01 / RELEASE_LINUX_DURABLE_NOT_RUN**.
+Whole QA-NEW-01 is not REMEDIATED, READY or ACCEPTED. Worker evidence is not
+independent acceptance. Issue20, parent5 and existing Draft PR34 remain open.
+The existing claim6024304772/recovery6025249885 and branch
+`feat/REC-001D-ws-supervisor` continue; no replacement lineage is created.
+
+### Inputs, preflight and failed-parent evidence
+
+Rejected source: `c9ddf41275dd6c6ced19ab537310e924d7b0be53`, tree
+`9ce6413fdd234c8ed7b1934ee18404568d181c54`; inspected unchanged main/base
+`39ff0dba797eb010586238ef06fb80e996340401`. Approved prior design:
+`cff1e398c3226bc2a86b51442e02054c5996e86a`.
+
+The three supplied inputs were available and hashed before changes:
+
+| Input | Bytes | SHA256 |
+|---|---:|---|
+| 01-REC-001D-QA-Verification.txt | 5390 | 126a32ed6328c1dfa7967e808e9457ce5ebccedf5a544fe7baea9f44bb0e3784 |
+| 02-REPORT.txt | 46764 | c56b6c1a1e61ff1ae8897b2a6fcd9eca8e362d049ffb9a61cbbd3bb278760a8d |
+| 03-REC-001D-QA-c9ddf412-evidence.zip | 2315478 | 21cd9abebdb143077a656cc0aaff62389e6fddc9a7a7d1918d35b5c5c90cd769 |
+
+ZIP audit:288 entries,287 manifested payloads,5,701,127 payload bytes;
+missing/mismatched/undeclared/duplicate/unsafe entries all0. Embedded REPORT
+matches the supplied REPORT. Immutable source snapshots were verified by
+SHA256 and Git blob identity:133 candidate paths/125 base paths. Both supplied
+patches were independently applied to their frozen snapshots in memory:
+133/133 paths reconstructed,132 unchanged for each one-file patch.
+
+The original independent public-identity patch remains4334 bytes, SHA256
+`bc3f54d011fd52978cdaf03598e1acb32efb96d9978ee84223e3e22eb0a36295`;
+the original Q2 probe remains5718 bytes, SHA256
+`8a5bc487e35688d75d9f0a52a78f9eddf1f2343418d9da394aa0167ab7e1f76f`.
+No changed parent test is presented as the original independent probe.
+
+On c9 plus the exact supplied public patch, pinned1.98.1 Windows debug/release
+both exit101: matching Raw control PASS; unrelated Timer and changed-stamp Raw
+behavioral FAIL; original Durable probe fails bootstrap on Unsupported Unix
+metadata-directory sync, so its behavior is NOT_RUN. The negative Written
+probe physically observes ArchiveStatus::Complete,7 Unknown records and both
+seals before terminal sync returns an error. This is false physical sealing,
+not successful Linux/Durable FinalizedArchive. The initial parent log's version
+metadata was collected outside the repository and is retained as superseded;
+the corrected pinned-parent logs identify both the1.98.1 child and metadata.
+
+### Trigger, implementation and represented-contract limits
+
+At c9 `persist_owned` checked authority/kind/cut without matching the original
+ObservationIdentity; any authenticated gated frame incremented a generic count,
+which could discharge another admitted job and permit false quiescence.
+
+Source-only correction commit: `0d0aebb3937fea15fb3dab2dfe817879af016d3e`,
+tree `5810414bed0bab84ec3763532d22d6765ad91351`, sole parent c9. Exactly two
+source/test paths changed; no conditional allowlist path was needed:
+
+- `crates/domain/src/capture_session.rs`: original metadata authentication,
+  private distinct received stages and bounded original generated-plan snapshot.
+- `crates/recording/tests/capture_session.rs`:25 added test functions, including
+  the four supplied names retained with preservation/recovery assertions.
+
+Domain file SHA256:
+`7c6e9a0d0c7c0da230a71e57ec94ad5e7da5b764fb5947ee4c0118dd9210309d`.
+Recording test file:102975 bytes, SHA256
+`129c469a785d719896f816d815d7a3fc192122cc10b08ea49a2d119db87618cd`.
+Exact correction diff is c9..0d0aebb; the following documentation-only proposal
+changes only this handoff and ADR0003. Its immutable containing SHA and exact
+docs diff are published externally after commit, avoiding a self-reference.
+
+Raw binds original scope/full tag, attempt, both stamp samples and active
+context; a permitted no-loss single-target Unknown/DecodeRejected/SourceGap is
+a distinct optional same-observation stage. Stale Raw requires exact empty Raw
+then exact diagnostic GAP. QueueOverflow GAP binds target/tag/range/loss_count/
+stamp, and no post-receipt coalescing can rewrite confirmed identity. Up/Down
+bind scope/connection/epoch/stamp; authenticated same-epoch Down permits the
+existing no-write obsolete Up/Pong exception and prevents terminal Up revival.
+Unrelated, replaced or repeated stages reject before backend write.
+
+Common Timer matching checks original stream, context, stamp, ID and deadline;
+optional Down must match its original connection/epoch/stamp and cannot repeat.
+The current API still lacks original Ping/Timeout kind and authority-owned
+active/obsolete eligibility. It cannot prove whether Down is required/allowed;
+the implementation does not invent those fields or select a new effect policy.
+The owner explicitly confirmed this absent approved runtime contract and
+requested ADR0003§15 as DESIGN_PROPOSED. Only dependent Timer effect stages are
+TIMER_CONTRACT_BLOCKED; the representable original identity check is implemented.
+
+Received Down matching establishes represented record metadata, not proof of
+the entire Down/Close job: the existing canonical path creates mandatory Close
+later. Existing R2 mechanics are preserved. Generated H1 retention separately
+requires authenticated same-W Down plus its matching existing Close and a fixed
+old tag/BookId snapshot; epoch writes wait for that Close to settle and match
+distinct ordered connection/subscription/book stages, original stamp and checked
+expected/next values. Earlier Down and repeated Connection are not fresh progress.
+Raw admission carries no payload/digest or required decoder-disposition plan;
+this correction makes no payload-content or decoder-required-stage claim.
+
+Ownership/turn/sink foreign checks precede reconciliation. Rejections preserve
+original Pending/W, cut, Close, prefix and watermarks. Progress advances only
+after gate-confirmed authenticated receipts; storage errors preserve trusted
+prefix and physical ambiguity. Last-steward drop conserves original Abandoned
+identity/W and prevents proof/seals. QA-D1 checked cancellation precedes removal;
+QA-D2 fresh progress excludes earlier Down and partial-confirmed/StorageStopped
+work cannot be canceled as uncommitted. Received work cannot use generated
+cancellation. B1-B3/R1-R3 and sole borrowed affine proof remain.
+
+### New regression and positive-control scope
+
+The four supplied names remain. Tests now compare ledger/Pending identity,
+watermarks, inventory and physical WAL bytes before/after typed rejection, then
+complete the rightful original exactly once and reject repeat/foreign completion.
+Missing-input/drop cases retain exact Abandoned identity and deny repeated proof
+or seals. Original Durable healthy finalization uses the real concrete owner.
+
+Ten new shared helpers each have Written and Durable test functions:
+Raw12 substitutions; abandoned identity; stale two-stage; GAP13 substitutions
+and coalescing; Raw3 permitted diagnostics; controls3 classes×4 mismatches;
+obsolete Up/Pong; Timer common identity; cut plus held Close; Generated H1 original
+fresh ordered stages. One additional Durable healthy finalization plus four
+supplied names gives25 new functions; recording capture-session suite47.
+Loop variants are not extra test functions. Timer common-identity positives do
+not establish approved Ping/Timeout disposition semantics.
+
+### Commands, profiles, memory and CI
+
+All logs retain exact command, real exit code, stdout/stderr, source inventory,
+HEAD/tree/status,1.98.1 Rust/Cargo, OS/architecture, relevant non-secret overrides
+and byte/SHA256 identities. Precommit runs are labeled c9+modified source inventory;
+they are not relabeled as a clean immutable checkout. Corrected-head CI is new.
+
+| Required command | Actual worker result |
+|---|---|
+| `cargo fmt --all -- --check` | Canonical Windows wrapper exit0 on corrected source; new source-head Linux CI exit0. |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Canonical Windows wrapper exit0 after fixing one collapsible_if warning; original failed log retained. New source-head Linux CI exit0. |
+| `cargo build --workspace --locked` | Windows exit0; new source-head Linux CI exit0. |
+| `cargo test --workspace --locked` | New source-head Linux CI exit0:425 PASS/0 FAIL/0 ignored, including original Durable fixtures and real CLI. Local full Windows rerun NOT_RUN; it cannot close ENV-01. |
+| `cargo test --workspace --release --locked` | Linux/Durable NOT_RUN/BLOCKED: no available local Linux executor; existing workflow has no release step. Windows Written targeted release results are supplemental only. |
+
+Fresh source-head [Rust CI run37696079119](https://github.com/al-gri/pro-sclpng/actions/runs/37696079119)
+on exact0d0aebb: rust-fmt113048014746, rust-clippy113048014525,
+rust-tests113048014707 all success. Each raw log shows expected SHA equals
+checked-out0d0aebb, pinned Rust/Cargo1.98.1 and clean checkout checks at completion.
+The workspace test log totals425 function/doctest passes, including11 existing
+affine compile-fail cases. Debug CI does not establish release or independent QA.
+The subsequent immutable documentation head requires its own fresh exact-head CI;
+its URL and final command results are recorded in external PR/Issue metadata and
+the evidence REPORT after commit. Historical rejected-c9 CI is not transferred.
+
+Pinned Windows Written new-helper debug/release:10 PASS each. Supplied-name
+corrected debug/release:3 Written PASS,1 Durable bootstrap environment FAIL,
+exit101; Durable behavioral result NOT_RUN. No skips, ignores, feature changes,
+portability changes or weakened durability were introduced. The earlier9-helper
+logs precede Generated coverage and are retained as historical only. Final
+strengthened repeat-abandonment assertions receive exact immutable-head verification
+after this documentation commit, recorded in the external REPORT.
+
+Fixed WorkCell metadata grows176->248 bytes (+72 per W), automatically included
+in existing size_of budget formulas:cap5 adds216 bytes;cap9 adds432 bytes.
+Pinned layout measurement is supplementary, not an acceptance command or RSS.
+Existing allocation test profiles stay Written/Flushed. Owner retention/teardown
+probes pass debug/release:cap5 peak29571/29570 versus ceiling8575010;
+cap9 peak31298/31297 versus8710676. Full-supervisor Flushed cap5/cap9 and100-repeat
+probes pass debug/release:peak56710/60820 versus10256259/10410374, released0.
+These are requested Layout allocation bytes, not usable heap, RSS or network
+memory. Source fingerprints identify the modified tree actually measured.
+
+### Preserved acceptance contract, proposal and remaining gates
+
+Approved cff, rejected c9 and source-head §8 table are byte-identical:4919 bytes,
+SHA256 `784f9e20d61806872deba9d305023660cbf471784bac48bd36677d46eae872af`.
+All31 §9 requirements remain byte-identical:11593 bytes, SHA256
+`7f450da4b09d80a453c2b08344b2d20b8b1023bd406c3f8bc75cee037f4afa84`.
+Accepted WAL/schema, dependencies, Cargo.lock, manifests, toolchain/workflow,
+recovery/codec, applications and neighboring governance files are unchanged.
+Existing inherited PR paths are not cleaned up.
+
+ADR0003§15 recommends **Option A: bounded authority-owned scheduler and opaque
+original-token/frozen output plan**. Option B is a sealed supervisor capability
+with explicit issuer/revocation/direct-route design; caller-supplied kind or
+disposition boolean alone is rejected. The proposal defines Ping/Timeout identity,
+serialized authority transitions, obsolete recording, required receipt stages,
+same-W mandatory Close, Q2 FIFO, bounded W and positive/negative review tests.
+It also closes the interstage design gap: a mutable turn prevents reentrancy in
+one operation, while a frozen per-scope plan is needed across serial operations.
+This is proposed runtime/API behavior and is not implemented or approved.
+
+Required next gates: Architecture/owner approves an exact Timer authority contract
+before dependent extension; Integrator supplies genuine Linux/Unix-sync executor
+for pinned full release and independent debug/release QA of all31 families and
+corrective scope (Q1/Q2,R1-R3,B1-B3,QA-D1/D2,63 H1,scoped H2,12 Q2 faults,
+F1-F6/N1-N3,decoder/continuity/DataHealth/publication/WAL,real CLI,11 compile-fail,
+cap5/cap9 bounds/repeats/teardown). Worker debug traversal is mapped separately
+in the evidence; no unchanged row inherits independent PASS.
+
+The full reviewed branch must remain frozen during new independent QA. Owner
+merge, post-merge exact-head push CI and closing Issue20 are subsequent separate
+gates. Parent fullM1 stays open. Deferred adapters/networking/REST/RPI/execution
+scope and U09/U10 UNKNOWN/BLOCKED,U20 NOT_PROVEN/FORBIDDEN,C01 BLOCKED,C03 UNKNOWN
+remain unchanged.
