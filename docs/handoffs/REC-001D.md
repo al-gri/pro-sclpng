@@ -1446,6 +1446,13 @@ required behavior **FAIL**. Rust-fmt was **FAIL**; its exact formatter diffs
 were applied before this containing commit. Clippy was still in progress at
 file authorship. No intermediate result transfers to the final head.
 
+Later CI on formatted `0797a6e1da3aba3a643cb9c15f651ecad166117f`, run
+`37591808120`, passed fmt, all workspace tests/real CLI, lockfile, build and
+those clean-checkout checks. Clippy failed only the two new forensic tests'
+constant `chunks_exact(2)` uses (`chunks_exact_to_as_chunks`). They were changed
+to `as_chunks::<2>().0.iter()` before this containing commit. This intermediate
+run is historical evidence, not the final exact-head gate.
+
 Preserved: U-09 UNKNOWN/BLOCKED, U-10 UNKNOWN/BLOCKED,
 U-20 NOT_PROVEN/FORBIDDEN, C-01 BLOCKED, C-03 UNKNOWN.
 No REST healing, RPI normalization, quantity inference, zero-to-DeleteLevel,

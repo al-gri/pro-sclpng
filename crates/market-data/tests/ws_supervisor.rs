@@ -4157,7 +4157,7 @@ fn q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse() {
     let diagnostics = &sink.frames[persisted_before..];
     assert_eq!(diagnostics.len(), 10);
     assert_eq!(q1_blocker_retained_raw_bytes(diagnostics), 0);
-    for (index, pair) in diagnostics.chunks_exact(2).enumerate() {
+    for (index, pair) in diagnostics.as_chunks::<2>().0.iter().enumerate() {
         let Record::RawInput(raw) = &pair[0].value else {
             panic!("empty stale raw first");
         };
@@ -4279,7 +4279,7 @@ fn q1_blocker_two_stream_legal_nine_stale_a_suppresses_first_b_loss() {
     let diagnostics = &sink.frames[persisted_before..];
     assert_eq!(diagnostics.len(), 18);
     assert_eq!(q1_blocker_retained_raw_bytes(diagnostics), 0);
-    for (index, pair) in diagnostics.chunks_exact(2).enumerate() {
+    for (index, pair) in diagnostics.as_chunks::<2>().0.iter().enumerate() {
         let Record::RawInput(raw) = &pair[0].value else {
             panic!("a stale raw");
         };
