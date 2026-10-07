@@ -84,9 +84,6 @@ impl<K: Ord, V> FixedRegistry<K, V> {
     fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
         self.entries.iter_mut().map(|(key, value)| (&*key, value))
     }
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
 }
 impl<K: Ord, V> std::ops::Index<&K> for FixedRegistry<K, V> {
     type Output = V;
@@ -2454,8 +2451,18 @@ impl PublicWsSupervisor {
             );
         }
         self.core.marker_settled = matches!(status.marker, session::MarkerState::Confirmed(_));
-        for (stream, runtime) in self.core.streams.iter_mut() {
-            if let Some(failure) = self.handle.authority().terminal_failure(*stream) {
+        let streams: [Option<StreamId>; MAX_CONFIGURED_STREAMS] = std::array::from_fn(|index| {
+            self.core
+                .streams
+                .entries
+                .get(index)
+                .map(|(stream, _)| *stream)
+        });
+        for stream in streams.into_iter().flatten() {
+            if let Some(failure) = self.handle.authority().terminal_failure(stream) {
+                let runtime = self.core.streams.get_mut(&stream).ok_or(
+                    SupervisorError::InvalidConfiguration("missing terminal scope"),
+                )?;
                 runtime.capture_terminated = true;
                 runtime.subscription = SubscriptionState::Degraded;
                 runtime.last_market_record = None;
@@ -2474,17 +2481,73 @@ impl PublicWsSupervisor {
                     }
                     session::AttemptIdentity::NotRaw => {}
                 }
-                runtime.pending_disconnect = None;
-                if let Some(work) = self.pending_owners.remove(stream) {
-                    self.handle
-                        .cancel_generated_plan(turn, &work)
-                        .map_err(SupervisorError::Authority)?;
-                    work.set_kind(turn, session::WorkKind::Command)
-                        .map_err(SupervisorError::Authority)?;
+                // A partial completion after a storage stop is an explicit
+                // undrained owner, not an uncommitted plan we may settle away.
+                if status.storage_stopped.is_none() {
+                    self.cancel_pending_disconnect(turn, stream)?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Settle only this scope's still-uncommitted generated obligation before
+    /// removing either half of the plan/owner pair. Classification and Drop do
+    /// not prove accounting. Any checked failure retains the plan and owner,
+    /// including their already-confirmed Down and existing mandatory Close.
+    fn cancel_pending_disconnect(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        stream: StreamId,
+    ) -> Result<bool, SupervisorError> {
+        self.handle
+            .authority()
+            .validate_turn(turn)
+            .map_err(SupervisorError::Authority)?;
+        let runtime =
+            self.core
+                .streams
+                .get(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing cancellation scope",
+                ))?;
+        let pending = runtime.pending_disconnect;
+        match (pending, self.pending_owners.get(&stream)) {
+            (None, None) => return Ok(false),
+            (Some(plan), Some(_)) if plan.epoch == runtime.binding.tag.connection => {}
+            _ => {
+                return Err(SupervisorError::InvalidConfiguration(
+                    "pending disconnect owner mismatch",
+                ));
+            }
+        }
+        if self.handle.authority().status().storage_stopped.is_some() {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::StorageStopped,
+            ));
+        }
+        let runtime =
+            self.core
+                .streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing cancellation scope",
+                ))?;
+        let work =
+            self.pending_owners
+                .get(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing pending cancellation owner",
+                ))?;
+        self.handle
+            .cancel_generated_plan(turn, work)
+            .map_err(SupervisorError::Authority)?;
+        work.set_kind(turn, session::WorkKind::Command)
+            .map_err(SupervisorError::Authority)?;
+        // All fallible validation/settlement precedes either removal.
+        runtime.pending_disconnect = None;
+        self.pending_owners.remove(&stream);
+        Ok(true)
     }
 
     pub fn snapshot(&self, stream: StreamId) -> Option<StreamSupervisorSnapshot> {
@@ -3132,28 +3195,44 @@ impl PublicWsSupervisor {
                         .filter(|owner| owner.cut_side() == session::CutSide::PreCut)
                         .count(),
                 );
-                let runtime = self.core.streams.get_mut(&stream).expect("known scope");
+                let cancellation = self.cancel_pending_disconnect(turn, stream);
+                let runtime = match self.core.streams.get_mut(&stream) {
+                    Some(runtime) => runtime,
+                    None => {
+                        let commands = terminated
+                            .close
+                            .map(|lease| vec![lease.into_command()])
+                            .unwrap_or_default();
+                        let mut report = self.admission_report(
+                            Some(stream),
+                            Err(SupervisorError::InvalidConfiguration(
+                                "missing terminal scope",
+                            )),
+                            commands,
+                        );
+                        report.close_owner = Some(terminated.close_owner);
+                        return report;
+                    }
+                };
                 runtime.capture_terminated = true;
                 runtime.subscription = SubscriptionState::Degraded;
                 runtime.last_market_record = None;
                 if let session::AttemptIdentity::Candidate(attempt) = attempt {
                     runtime.capture_attempt_frontier = attempt.get();
                 }
-                let cancelled_plan = runtime.pending_disconnect.take().is_some();
                 runtime.next_ping_due_ns = None;
                 runtime.pong_deadline_ns = None;
                 runtime.ping_timer_owner = None;
                 runtime.pong_timeout_owner = None;
-                if let Some(work) = self.pending_owners.remove(&stream) {
-                    work.set_kind(turn, session::WorkKind::Command)
-                        .map_err(SupervisorError::Authority)
-                        .expect("rightful terminal owner");
-                }
                 let commands = terminated
                     .close
                     .map(|lease| vec![lease.into_command()])
                     .unwrap_or_default();
-                let mut report = self.admission_report(Some(stream), Err(error.clone()), commands);
+                let (outcome, cancelled_plan) = match cancellation {
+                    Ok(cancelled) => (Err(error), cancelled),
+                    Err(cancellation_error) => (Err(cancellation_error), false),
+                };
+                let mut report = self.admission_report(Some(stream), outcome, commands);
                 report.close_owner = Some(terminated.close_owner);
                 report.cancelled_plan = cancelled_plan;
                 report
@@ -3299,15 +3378,17 @@ impl PublicWsSupervisor {
             session::SessionLifecycle::DiagnosticClosing
                 | session::SessionLifecycle::DiagnosticClosed
         ) {
-            for runtime in self.core.streams.values_mut() {
-                runtime.pending_disconnect = None;
+            let streams: [Option<StreamId>; MAX_CONFIGURED_STREAMS] =
+                std::array::from_fn(|index| {
+                    self.core
+                        .streams
+                        .entries
+                        .get(index)
+                        .map(|(stream, _)| *stream)
+                });
+            for stream in streams.into_iter().flatten() {
+                self.cancel_pending_disconnect(turn, stream)?;
             }
-            for work in self.pending_owners.values() {
-                self.handle
-                    .cancel_generated_plan(turn, work)
-                    .map_err(SupervisorError::Authority)?;
-            }
-            self.pending_owners.clear();
         }
         let marker_due =
             status.marker == session::MarkerState::Pending && self.core.cut_remaining == Some(0);
@@ -3396,15 +3477,15 @@ impl PublicWsSupervisor {
             None
         };
         let cut_before = self.core.cut_remaining;
-        let owner = if let Some(stream) = completing {
-            self.pending_owners.remove(&stream)
+        let retained_owner = if let Some(stream) = completing {
+            self.pending_owners.get(&stream)
         } else {
-            self.queued_owners.pop_front()
+            self.queued_owners.front()
         };
-        if owner.is_none() {
+        if retained_owner.is_none() {
             return Ok(None);
         }
-        if let Some(owner) = &owner {
+        if let Some(owner) = retained_owner {
             owner
                 .set_kind(
                     turn,
@@ -3416,6 +3497,11 @@ impl PublicWsSupervisor {
                 )
                 .map_err(SupervisorError::Authority)?;
         }
+        let owner = if let Some(stream) = completing {
+            self.pending_owners.remove(&stream)
+        } else {
+            self.queued_owners.pop_front()
+        };
         let mut adapter = BoundAdapter {
             turn,
             sink,
@@ -3429,10 +3515,12 @@ impl PublicWsSupervisor {
             Err(error) => {
                 if let Some(owner) = owner {
                     if let Some(stream) = completing {
-                        owner
-                            .set_kind(turn, session::WorkKind::PendingPlan)
-                            .map_err(SupervisorError::Authority)?;
                         self.pending_owners.insert(stream, owner);
+                        if let Some(owner) = self.pending_owners.get(&stream) {
+                            owner
+                                .set_kind(turn, session::WorkKind::PendingPlan)
+                                .map_err(SupervisorError::Authority)?;
+                        }
                     } else if let Some(original) = original {
                         if let Ingress::Raw { stream, bytes, .. } = &original {
                             let runtime = self
@@ -3446,10 +3534,12 @@ impl PublicWsSupervisor {
                         }
                         self.core.queue.push_front(original);
                         self.core.cut_remaining = cut_before;
-                        owner
-                            .set_kind(turn, session::WorkKind::QueuedObservation)
-                            .map_err(SupervisorError::Authority)?;
                         self.queued_owners.push_front(owner);
+                        if let Some(owner) = self.queued_owners.front() {
+                            owner
+                                .set_kind(turn, session::WorkKind::QueuedObservation)
+                                .map_err(SupervisorError::Authority)?;
+                        }
                     }
                 }
                 self.latch_hard_stop(turn);
@@ -4380,6 +4470,200 @@ mod tests {
             dispatch_boundary(owner, turn, std::mem::take(&mut result.commands));
         }
         result
+    }
+
+    #[test]
+    fn checked_generated_cancellation_error_retains_plan_owner_close_and_rightful_retry() {
+        let policy = QueuePolicy {
+            max_total_items: 9,
+            ..QueuePolicy::default()
+        };
+        let (mut supervisor, mut owner, mut turn, mut sink, bindings, _) =
+            bound_boundary_fixture_with_policy(policy);
+        let a = &bindings[0];
+        let started = supervisor.start_commands(&mut turn);
+        started.outcome.expect("start");
+        dispatch_boundary(&mut owner, &mut turn, started.commands);
+        supervisor
+            .queue_connected(&mut turn, a.connection_id, a.tag.connection, stamp(1))
+            .outcome
+            .expect("admitted Up");
+        drop(drain_boundary(
+            &mut supervisor,
+            &mut owner,
+            &mut turn,
+            &mut sink,
+        ));
+        supervisor
+            .queue_disconnected(&mut turn, a.connection_id, a.tag.connection, stamp(2))
+            .outcome
+            .expect("admitted Down");
+        let mut down = supervisor
+            .drain_one(&mut turn, &mut sink)
+            .outcome
+            .expect("actual gate-confirmed Down")
+            .expect("Down result");
+        let close = std::mem::take(&mut down.commands)
+            .into_iter()
+            .next()
+            .expect("held mandatory Close");
+        let close_owner = close.close_owner().expect("Close identity").clone();
+        let work = supervisor
+            .pending_owners
+            .get(&a.id)
+            .expect("generated Down owner");
+        let work_id = work.id();
+        // Private invariant negative: classification changes never settle the
+        // genuine generated obligation. Force the checked cancellation error.
+        work.set_kind(&mut turn, session::WorkKind::Command)
+            .expect("rightful negative classification");
+        for n in 0..5 {
+            supervisor
+                .queue_connected(&mut turn, a.connection_id, a.tag.connection, stamp(3 + n))
+                .outcome
+                .expect("admitted barrier");
+        }
+        let prefix = supervisor.handle.prefix();
+        let before = supervisor.retention_report().ownership;
+        let failed = supervisor.queue_text(
+            &mut turn,
+            a.connection_id,
+            a.tag.connection,
+            stamp(10),
+            b"missing",
+        );
+        assert_eq!(
+            failed.outcome,
+            Err(SupervisorError::Authority(
+                session::AuthorityError::InvalidOwner
+            ))
+        );
+        assert!(!failed.cancelled_plan);
+        assert_eq!(failed.close_owner, Some(close_owner.clone()));
+        assert!(
+            failed.commands.is_empty(),
+            "existing lease is not duplicated"
+        );
+        assert_eq!(
+            supervisor
+                .pending_owners
+                .get(&a.id)
+                .expect("retained owner")
+                .id(),
+            work_id
+        );
+        assert!(supervisor.core.streams[&a.id].pending_disconnect.is_some());
+        assert_eq!(supervisor.handle.prefix(), prefix);
+        let status = supervisor.session_status();
+        assert!(status.failed);
+        assert_eq!(status.storage_stopped, None);
+        assert_eq!(status.first_abandonment, None);
+        let retained = supervisor.retention_report().ownership;
+        assert_eq!(
+            (
+                retained.work_used,
+                retained.work_references,
+                retained.pending_observations
+            ),
+            (
+                before.work_used,
+                before.work_references,
+                before.pending_observations
+            )
+        );
+
+        let (_, _foreign_owner, mut foreign_turn, _, _, _) = bound_boundary_fixture();
+        assert_eq!(
+            supervisor.cancel_pending_disconnect(&mut foreign_turn, a.id),
+            Err(SupervisorError::Authority(
+                session::AuthorityError::AuthorityMismatch
+            ))
+        );
+        assert_eq!(supervisor.session_status(), status);
+        assert_eq!(supervisor.handle.prefix(), prefix);
+        assert_eq!(
+            supervisor
+                .pending_owners
+                .get(&a.id)
+                .expect("rightful pending owner")
+                .id(),
+            work_id
+        );
+
+        assert_eq!(
+            owner
+                .close_diagnostic(&mut turn)
+                .outcome
+                .expect("poll diagnostic close"),
+            recording::DiagnosticCloseState::Closing
+        );
+        let closing = supervisor.session_status();
+        assert_eq!(
+            supervisor.drain_one(&mut turn, &mut sink).outcome.err(),
+            Some(SupervisorError::Authority(
+                session::AuthorityError::InvalidOwner
+            ))
+        );
+        assert_eq!(supervisor.session_status(), closing);
+        assert_eq!(supervisor.handle.prefix(), prefix);
+        assert_eq!(
+            supervisor
+                .pending_owners
+                .get(&a.id)
+                .expect("failed cancellation still owned")
+                .id(),
+            work_id
+        );
+        assert!(supervisor.core.streams[&a.id].pending_disconnect.is_some());
+
+        supervisor
+            .pending_owners
+            .get(&a.id)
+            .expect("same owner for retry")
+            .set_kind(&mut turn, session::WorkKind::PendingPlan)
+            .expect("restore classification");
+        supervisor
+            .synchronize_authority(&mut turn)
+            .expect("same authoritative plan settles");
+        assert!(!supervisor.pending_owners.contains_key(&a.id));
+        assert!(supervisor.core.streams[&a.id].pending_disconnect.is_none());
+        assert_eq!(supervisor.handle.prefix(), prefix);
+        assert_eq!(
+            supervisor.session_status().first_failure,
+            status.first_failure
+        );
+        assert_eq!(
+            supervisor.session_status().cut_sequence,
+            status.cut_sequence
+        );
+        assert_eq!(supervisor.retention_report().ownership.abandoned_work, 0);
+        assert!(matches!(
+            owner.dispatch(&mut turn, close, |_| Ok::<_, ()>(())),
+            session::DispatchReport::Dispatched
+        ));
+        drop(down);
+        for _ in 0..5 {
+            drop(drain_boundary(
+                &mut supervisor,
+                &mut owner,
+                &mut turn,
+                &mut sink,
+            ));
+        }
+        let marker = drain_boundary(&mut supervisor, &mut owner, &mut turn, &mut sink)
+            .expect("failure marker");
+        assert_eq!(marker.records.len(), 1);
+        drop(marker);
+        assert_eq!(supervisor.retention_report().ownership.work_used, 0);
+        assert_eq!(supervisor.session_status().storage_stopped, None);
+        assert_eq!(supervisor.session_status().first_abandonment, None);
+        assert_eq!(
+            owner
+                .close_diagnostic(&mut turn)
+                .outcome
+                .expect("complete diagnostic close"),
+            recording::DiagnosticCloseState::Closed
+        );
     }
 
     #[test]

@@ -1841,3 +1841,98 @@ Original immutable Windows319 PASS/42 platform failures and two Unix-only NOT_CO
 Prior handoff remains an exact byte prefix. ADR §§3/4/6/12 and existing31-row matrix preserve approved R1–R3, H1 completion-after-Close-settlement, scoped H2, Q1/Q2 and U-09/U-10/U-20/C-01/C-03 constraints. The new immutable containing SHA, eight-path compare, full-tree preservation, fresh exact-head CI checkout/commands/clean state and local post-save source match are verified in the existing PR/Issue record. No old PASS is transferred to a later head.
 
 **Next gate: complete independent QA of the new immutable remediation SHA**, covering B1/B2/B3, all31 acceptance families, Q1/Q2, all63 H1 faults, H2,12 Q2 faults and every prior regression. Worker PASS and CI do not grant Integrator/task acceptance, owner readiness, merge or auto-merge. PR #34 remains Draft.
+
+## QA-D1 remediation after independent QA — 2026-10-07
+
+**Worker disposition: REMEDIATED / QA_PENDING.** Q1 and Q2: **FIXED_IN_CODE / QA_PENDING**, worker code/check disposition only. Independent **CHANGES_REQUIRED** on rejected `dfe2c43efc2df0591d67daef4beac0d97fa3b050` is preserved; this delivery requires full independent QA of the new immutable containing SHA. Worker/CI PASS does not grant Integrator acceptance, owner readiness or merge approval.
+
+### Current provenance, inputs and scope
+
+Same Issue20/parent5, claim6024304772/recovery6025249885, branch `feat/REC-001D-ws-supervisor` and Draft PR34. Rejected start: `dfe2c43efc2df0591d67daef4beac0d97fa3b050`; sole approved contract: `cff1e398c3226bc2a86b51442e02054c5996e86a`; actual main/base: `39ff0dba797eb010586238ef06fb80e996340401`. Starting parent `ee4e85e5b9c74c8699628e39ea13281a2d91e611`, tree `d0f7b930013b8cd80ccfe7e27640f725119c9975`. Actual refs/Draft/open/unmerged/auto-merge=null and all133 starting blobs were verified before edits; no intervening foreign commit. Existing continuation record6041999036 records QA-D1 work, not a new claim.
+
+Three **current** originals are accessible/read and unmodified:
+
+| Current attached input | Bytes | SHA256 |
+|---|---:|---|
+| 03-REC-001D-QA-dfe2c43.md |40,713 | `900c0ce21e54e49ed5d7eed7314e278ae1df75d76683ce2a51fde77e178b3a93` |
+| 01-REC-001D-QA-dfe2c43-evidence.zip |174,252 | `d2e27b7c3e84bc06a1cb4a467baecd10504fff54e8e30fcc56a33020b51b671e` |
+| 02-REC-001D-QA-dfe2c43-reproductions.patch |16,577 | `4182515b0df7f3c6c604d7b66ceb57498ab68393563ad588a1db46bb69269282` |
+
+Safe ZIP extraction verified47 entries/753,288 expanded bytes and all43 manifest SHA256 entries. Embedded report and both embedded patch copies match uploaded bytes exactly. The report's four completed independent original Linux/Durable runs and exact-head CI37636862096 each show379 PASS/0 FAIL; these missed QA-D1 and remain rejected-head evidence. Other29 normative rows passed their stated library boundaries; rows6/26 failed. Original B1 Drop trigger and B2/B3 closure passed under the reviewed boundary; full B1/Q1/R2 cancellation intersection was not accepted.
+
+The new delta is exactly **four existing allowed paths**: market-data source/tests `ws_supervisor.rs`, ADR0003 and this handoff. All129 other original blobs are unchanged. No dependency/manifest/lock/workflow/toolchain, accepted specs/ADR, domain/recording source/tests, codec/reader/WAL, networking or composition change. §8 table and all31 §9 rows remain preserved; previous handoff is an exact byte prefix. No new claim/Issue/branch/PR, force-push, merge or auto-merge. The new immutable containing SHA, exact parent→head diff and fresh canonical CI are recorded in existing PR/Issue metadata after save, avoiding a self-referential SHA.
+
+### Minimal trigger and restored settlement
+
+Real gate-confirmed Down creates a Pending/Generated epoch-completion obligation and returns a Close on that same transferred W. Hold Close, drop or retain Down-result aliases, then saturate **the same scope**: cap5 has Down plus two Connected barriers; cap9 has A Down plus four A barriers and admitted B Raw. Rejected local install_received_failure reported cancelled_plan=true after removing the plan and changing WorkKind only. Later successful Close and alias release exposed the unsatisfied obligation as OwnershipAbandoned; next drain incorrectly Halted and prevented B's admitted Raw/marker.
+
+The common private `cancel_pending_disconnect(&mut SessionTurn, StreamId) -> Result<bool, SupervisorError>` now validates rightful turn and retained matching pair, calls checked `cancel_generated_plan`, reclassifies only after successful settlement, and clears/removes last. Local ingress failure, external scope terminal synchronization and applicable DiagnosticClosing/Closed paths use it. No remove/take/blanket clear or expect precedes fallible settlement. No pair returns false; attempted checked rejection retains the same plan, owner and Close and returns a typed error. Local cancelled_plan=true means successful settlement; cancellation error returns false with original terminal failure/cut and mandatory Close explicit. A scope-local failure cancels only its own plan.
+
+Gated Down/original stamp/WorkOwner/CloseOwnerRef and held legitimate lease survive. Reclaim creates no second lease/slot; Drop or ambiguous dispatch error leaves the same Close Pending. Settled is not reissued. Cancel settles only generated unadmitted output, never received Raw/GAP/control/timer; B1 reference-independent obligation retention remains. W is released only after legitimate remaining alias/Close settlement, not a WorkKind change. First failure/cut/prefix, pre-cut FIFO, neighbor service and W+N+1<=M remain unchanged.
+
+Completion ownership validation runs while still registered; on error the original owner/ingress is restored before fallible reclassification. Healthy generated completion requires three **fresh** receipts and exactly one epoch advance after Close settlement. StorageStopped preserves partially confirmed generated plans/owners; no wholly-uncommitted cancellation claim, successful accounting, retry suffix or rollback. Authority's authenticated trusted watermark remains the last good receipt; actual backend physical bytes/watermarks may include a rejected mismatch/weak-gate write. Descriptor closure reports undrained state and preserves mandatory Close. Lifecycle immediately revokes further generated effects; eligible supervisor ownership settlement occurs at the next rightful synchronize/drain boundary, potentially DiagnosticClosed, without owner-driven hidden drain.
+
+### Normative regressions
+
+Before production edits, all133 rejected-source hashes were matched, copied to an isolated baseline and the supplied patch applied only there (no manifest delta). Commands:
+
+`cargo test --manifest-path d1-baseline/Cargo.toml -p market-data --test ws_supervisor independent_qa_s -- --nocapture`
+and the same command with `--release`.
+
+Both compile and **FAIL behaviorally**, exit101 each:1 stale-Close control PASS/2 normative FAIL. The retained tests are:
+
+- `independent_qa_scope_cut_cancels_generated_down_plan_without_stopping_drain`;
+- `independent_qa_same_scope_plan_cut_preserves_queued_neighbor_raw`.
+
+After correction both names PASS debug/release. Assertions now require **full drain through the marker**, no false OwnershipAbandoned/Halted, exact B Raw bytes/tag/stamps/attempt/frontier, original Down, immutable first failure/cut and no canceled EpochAdvance/final seals. Actual canonical owner/sink and physical WalReader are used with **Durable** receipts.
+
+Allfour current QA patch functions were retained, including old-tag Candidate6/non-reuse/original identity and F2 Raw1 bytes/stamp10, GAP2..33/count32/stamp11 and neighbor service. Existing stale Close after actual epoch/W recycle and repeated Halted prefix/snapshot assertions remain.
+
+Four extra integration functions cover6 heldDown/Close release-order/reclaim/error/foreign/settled/repeat cases, external A terminal cancellation preserving B's3 fresh completion receipts/single advance,2 DiagnosticClosing/Closed cases and6 partial completion storage-fault cases. The private genuine-owner `checked_generated_cancellation_error_retains_plan_owner_close_and_rightful_retry` rejects changed-kind/foreign cancellation without removing the original plan/owner/lease, preserves false cancellation and first cut/prefix, then retries rightful settlement with that same owner. Total additions:8 integration functions+1 private function.
+
+Targeted commands after correction:
+
+| Filter/command | Debug | Release |
+|---|---|---|
+| MD integration `independent_qa_`, --locked -- --nocapture |5 PASS/exit0 (four new QA functions plus existing staleClose) |5 PASS/exit0 |
+| MD integration `qa_d1_`, --locked -- --nocapture |4 PASS/exit0 |4 PASS/exit0 |
+| Qualified private cancellation-error/retry function, --lib --locked |1 PASS/exit0, isolated target |1 PASS/exit0 |
+
+Initial test-authoring failures are distinct from product behavior: Close's W association is nested, so the incorrect general CommandLease.work_owner_id accessor was replaced with existing opaque CloseOwnerRef.storage and identity assertions. An incorrect equality of physical and authenticated watermarks was replaced with explicit separate assertions (the real backend can append/sync before mismatch/weak-gate rejection). An EpochPersistenceFault comparison compile error was corrected with matches!. Shared-target executable PermissionDenied and first direct-rustfmt missing-library attempts did not execute relevant checks; isolated/debug and correctly configured pinned runs then passed. No product semantic/assertion protection was weakened.
+
+### Complete original Linux/Durable checks
+
+Same pinned Linux x86_64 Rust1.98.1/compiler48a229ceaefd4985c50990b14116b6d856af0985, Cargo1.98.1/LLVM22.1.8, scratch-only verified toolchain and offline local workspace. Source env is `source ../rust-tools/env.sh`; root commands use equivalent `--manifest-path repo/Cargo.toml`. No source/fixture/gate/manifest or Flushed adaptation.
+
+| Actual command/check | Result |
+|---|---|
+| `cargo test --workspace --locked` | **PASS/exit0,388 passed/0 failed/0 ignored**,19 summaries. Counts21,13,80,9,18,27,33,10,7,13,80,0,15,3,22,26,4,3,4. |
+| `cargo test --workspace --release --locked` | **PASS/exit0,388/0/0**, same19 summaries. Initial isolated-target release attempt failed linking unchanged domain contracts before any test ran (exit101); unadapted same-command rerun using the working target passed. |
+| `rustfmt --edition 2024 --check` all68 tracked Rust files | **PASS/exit0**, all workspace roots/modules/tests. |
+| Pinned clippy-driver wrapper, `cargo check --workspace --all-targets --locked` with `-D warnings` | **PASS/exit0**, complete workspace. |
+| `cargo generate-lockfile --offline`; original lock comparison | **PASS/exit0**, unchanged Git blob `8fce3a61cc8dc1f72727ddf2c82c453c31be94bc`. |
+| `cargo build --workspace --locked` | **PASS/exit0**. |
+| Canonical local fmt/Clippy wrappers | Attempts exit101 before checking due absent /proc/self/exe: **NOT_RUN canonically locally**. Direct equivalents above actually ran; fresh exact-head canonical CI is recorded separately in PR/Issue. |
+| Full independent QA of new immutable head | **REQUIRED / NOT_RUN by worker**. |
+| Actual live socket/application/publication/closure/inventory producers | **NOT_RUN / OUT_OF_SCOPE**, no networking/composition expansion. |
+
+All31 §9 families remain exercised with strengthened6/26; B1/B2/B3 retained; all63 H1 fault variants (9+9+36+9), H2,12 Q2 storage faults, D−1/D/D+1/timer/FIFO, F1–F6/N1–N3, decoder/continuity/input safety/DataHealth/publication/WAL and real CLI pass in both original profiles. All26 unchanged WAL tests/all15 CLI tests and11 affine/reentry/borrow compile-fail tests pass. Approved H1 completion after Close settlement and scoped H2 exhaustion remain. Production PublicationUnavailable remains until sealed authenticated producers exist; tests do not implement those deferred applications.
+
+Allocation probes were rerun with --exact --nocapture in debug/release (four commands, exit0).100 failed/reclaim repeats remain flat; all tracked boundary objects release to0 requested bytes:
+
+| Probe | Debug peak | Release peak | Existing ceiling |
+|---|---:|---:|---:|
+| Full N1/M5/P4096 |56,495 B |56,495 B |10,256,027 B |
+| Full N2/M9/P4096 |60,389 B |60,389 B |10,409,926 B |
+| Concrete owner cap5 |29,588 B |29,588 B |8,574,778 B |
+| Concrete owner cap9 |31,315 B |31,315 B |8,710,228 B |
+
+Requested Layout bytes, not RSS/allocator usable size/end-to-end networking or a universal heap theorem. New helper retains no additional item/metadata lane; source types/formulas and ceilings unchanged. No unbounded allocation/actual heap overflow/RSS claim is added.
+
+### Delivery and independent gate
+
+Prior handoff/history is preserved exactly. Current QA report/ZIP/reproduction identity was reauthenticated; previous Windows319 PASS/42 failures, Flushed supplemental runs, older379/363 PASS and their CIs remain historical evidence, never acceptance of this head. No reader change conceals Complete bytes; unsealed prefix normally ValidPrefixIncomplete/quality None, owner completeness Unknown. Crash before marker cannot reconstruct missing observations; external inventory remains deferred. U-09/U-10/U-20/C-01/C-03 unchanged.
+
+The new immutable containing SHA, four-path actual diff,133-blob saved/tested source match, non-force expected-head update, fresh exact-head canonical fmt/Clippy/lock/build/test/clean-checkout results and post-save original debug/release runs are verified in existing PR/Issue metadata. PR #34 stays Draft/open/unmerged, auto-merge unset.
+
+**Next gate: full independent QA of the new immutable remediation SHA**, including QA-D1, all31 acceptance families (especially6/26), B1/B2/B3, Q1/Q2,63 H1 faults, H2,12 Q2 faults and every prior regression. Worker/CI PASS does not grant owner readiness or merge authorization.
