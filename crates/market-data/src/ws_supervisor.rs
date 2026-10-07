@@ -1782,9 +1782,7 @@ impl PublicWsSupervisor {
             (runtime.binding.connection_id, runtime.binding.tag, pending)
         };
         let Some(old_book) = old_tag.book else {
-            return self.halt_with(SupervisorError::InvalidConfiguration(
-                "missing book epoch",
-            ));
+            return self.halt_with(SupervisorError::InvalidConfiguration("missing book epoch"));
         };
         if old_tag.connection != pending.epoch
             || old_tag.subscription.checked_next().ok() != Some(pending.next_subscription)
