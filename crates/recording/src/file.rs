@@ -3,10 +3,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use domain::capture_session::{AuthorityError, CaptureSessionAuthority};
 use domain::identity::RecordNo;
-use domain::record::RecordFrame;
+use domain::record::{Record, RecordFrame};
 
-use crate::binary::CodecError;
+use crate::binary::{CodecError, Crc32};
 use crate::codec::{encode_frame, scan_frame};
 use crate::recovery::{ArchiveValidator, ValidationError};
 
@@ -17,6 +18,17 @@ pub struct StorageWatermarks {
     pub written: Option<RecordNo>,
     pub flushed: Option<RecordNo>,
     pub durable: Option<RecordNo>,
+}
+
+/// Fixed-size summary of successfully written frames. It does not retain a
+/// second copy of the archive and is independently checked by the WAL reader.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PrefixSummary {
+    pub frame_count: u64,
+    pub physical_bytes: u64,
+    pub crc32: u32,
+    pub prior_record: Option<RecordNo>,
+    pub has_gap: bool,
 }
 
 impl StorageWatermarks {
@@ -51,6 +63,9 @@ pub enum WriterError {
     RotationRequired,
     ArchiveNotSealed,
     OffsetOverflow,
+    Session(AuthorityError),
+    BoundRotationForbidden,
+    CanonicalSealRequired,
 }
 
 impl fmt::Display for WriterError {
@@ -68,6 +83,13 @@ impl fmt::Display for WriterError {
                 f.write_str("durable finalization requires an accepted ArchiveSeal")
             }
             Self::OffsetOverflow => f.write_str("WAL file offset overflow"),
+            Self::Session(error) => write!(f, "capture session: {error:?}"),
+            Self::BoundRotationForbidden => {
+                f.write_str("bounded capture sessions have one segment")
+            }
+            Self::CanonicalSealRequired => {
+                f.write_str("capture seals require the exclusive owner finalization boundary")
+            }
         }
     }
 }
@@ -97,8 +119,17 @@ impl From<ValidationError> for WriterError {
 
 struct FileBackend {
     path: PathBuf,
-    writer: BufWriter<File>,
+    writer: Option<BufWriter<File>>,
     creation_metadata_synced: bool,
+    suppress_flush_on_drop: bool,
+}
+
+impl Drop for FileBackend {
+    fn drop(&mut self) {
+        if self.suppress_flush_on_drop {
+            self.close_without_retry();
+        }
+    }
 }
 
 impl FileBackend {
@@ -106,27 +137,44 @@ impl FileBackend {
         let file = OpenOptions::new().write(true).create_new(true).open(path)?;
         Ok(Self {
             path: path.to_path_buf(),
-            writer: BufWriter::new(file),
+            writer: Some(BufWriter::new(file)),
             creation_metadata_synced: false,
+            suppress_flush_on_drop: false,
         })
     }
 
     fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)
+        self.writer_mut()?.write_all(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        self.writer_mut()?.flush()
     }
 
     fn sync_all(&mut self) -> io::Result<()> {
-        self.writer.flush()?;
-        self.writer.get_ref().sync_all()?;
+        self.writer_mut()?.flush()?;
+        self.writer_mut()?.get_ref().sync_all()?;
         if !self.creation_metadata_synced {
             sync_parent_directory(&self.path)?;
             self.creation_metadata_synced = true;
         }
         Ok(())
+    }
+
+    fn writer_mut(&mut self) -> io::Result<&mut BufWriter<File>> {
+        self.writer
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "closed WAL descriptor"))
+    }
+
+    fn close_without_retry(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            // into_parts never flushes. A stopped write must not be retried by
+            // BufWriter::drop, nor may discarded buffering be called durable.
+            let (file, buffer) = writer.into_parts();
+            drop(buffer);
+            drop(file);
+        }
     }
 }
 
@@ -161,6 +209,11 @@ pub struct WalWriter {
     watermarks: StorageWatermarks,
     poisoned: bool,
     closed: bool,
+    prefix_count: u64,
+    prefix_crc: Crc32,
+    prefix_has_gap: bool,
+    capture_authority: Option<CaptureSessionAuthority>,
+    owner_seal_authorized: bool,
 }
 
 impl WalWriter {
@@ -174,11 +227,33 @@ impl WalWriter {
             watermarks: StorageWatermarks::default(),
             poisoned: false,
             closed: false,
+            prefix_count: 0,
+            prefix_crc: Crc32::default(),
+            prefix_has_gap: false,
+            capture_authority: None,
+            owner_seal_authorized: false,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.backend.path
+    }
+
+    pub(crate) fn bind_capture_session(&mut self, authority: CaptureSessionAuthority) {
+        self.capture_authority = Some(authority);
+        self.backend.suppress_flush_on_drop = true;
+    }
+
+    pub(crate) fn authorize_owner_seals(&mut self) -> Result<(), WriterError> {
+        let authority = self
+            .capture_authority
+            .as_ref()
+            .ok_or(WriterError::CanonicalSealRequired)?;
+        authority
+            .ensure_finalization_authorized()
+            .map_err(WriterError::Session)?;
+        self.owner_seal_authorized = true;
+        Ok(())
     }
 
     pub const fn watermarks(&self) -> StorageWatermarks {
@@ -193,8 +268,61 @@ impl WalWriter {
         self.closed
     }
 
+    pub const fn prefix_summary(&self) -> PrefixSummary {
+        PrefixSummary {
+            frame_count: self.prefix_count,
+            physical_bytes: self.absolute_offset,
+            crc32: self.prefix_crc.digest(),
+            prior_record: self.watermarks.written,
+            has_gap: self.prefix_has_gap,
+        }
+    }
+
+    pub(crate) fn backend_capacity(&self) -> usize {
+        self.backend.path.capacity() + self.backend.writer.as_ref().map_or(0, BufWriter::capacity)
+    }
+
+    /// Close a diagnostic descriptor without producing either seal. Even a
+    /// poisoned writer may be closed, but it is never resumed or finalized.
+    pub(crate) fn close_diagnostic(&mut self) -> Result<StorageWatermarks, WriterError> {
+        if self.closed {
+            return Ok(self.watermarks);
+        }
+        let result = if self.poisoned {
+            Err(WriterError::Poisoned)
+        } else {
+            self.sync_all()
+        };
+        self.backend.close_without_retry();
+        self.closed = true;
+        result
+    }
+
     pub fn append(&mut self, frame: &RecordFrame) -> Result<StorageWatermarks, WriterError> {
         self.ensure_writable()?;
+        if let Some(authority) = &self.capture_authority {
+            if matches!(frame.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_))
+                && !self.owner_seal_authorized
+            {
+                return Err(WriterError::CanonicalSealRequired);
+            }
+            authority
+                .permit_writer(frame.value.kind())
+                .map_err(WriterError::Session)?;
+            if matches!(
+                frame.value,
+                Record::ArchiveStart(_)
+                    | Record::InstrumentSpec(_)
+                    | Record::StreamDefinition(_)
+                    | Record::ConfigDefinition(_)
+                    | Record::SegmentStart(_)
+            ) {
+                return Err(WriterError::BoundRotationForbidden);
+            }
+            if matches!(&frame.value, Record::SegmentSeal(seal) if !seal.is_final) {
+                return Err(WriterError::BoundRotationForbidden);
+            }
+        }
         let bytes = encode_frame(frame)?;
         let view = scan_frame(&bytes, self.absolute_offset)?;
         let protected_end = bytes
@@ -223,6 +351,12 @@ impl WalWriter {
         self.watermarks.written(frame.record_no);
 
         let frame_len = u64::try_from(bytes.len()).map_err(|_| WriterError::OffsetOverflow)?;
+        self.prefix_count = self
+            .prefix_count
+            .checked_add(1)
+            .ok_or(WriterError::OffsetOverflow)?;
+        self.prefix_crc.update(&bytes[..protected_end]);
+        self.prefix_has_gap |= matches!(frame.value, Record::Gap(_));
         self.local_offset = self
             .local_offset
             .checked_add(frame_len)
@@ -275,6 +409,9 @@ impl WalWriter {
     /// file. The next append is required to be the matching SegmentStart.
     pub fn rotate(&mut self, next_path: impl AsRef<Path>) -> Result<(), WriterError> {
         self.ensure_writable()?;
+        if self.capture_authority.is_some() {
+            return Err(WriterError::BoundRotationForbidden);
+        }
         if !self.validator.can_rotate() {
             return Err(WriterError::RotationRequired);
         }
@@ -299,6 +436,14 @@ impl WalWriter {
     /// are invented by this API.
     pub fn finish(&mut self) -> Result<StorageWatermarks, WriterError> {
         self.ensure_writable()?;
+        if let Some(authority) = &self.capture_authority {
+            if !self.owner_seal_authorized {
+                return Err(WriterError::CanonicalSealRequired);
+            }
+            authority
+                .ensure_finalization_authorized()
+                .map_err(WriterError::Session)?;
+        }
         if !self.validator.archive_sealed() {
             return Err(WriterError::ArchiveNotSealed);
         }
@@ -313,6 +458,11 @@ impl WalWriter {
         }
         if self.poisoned {
             return Err(WriterError::Poisoned);
+        }
+        if let Some(authority) = &self.capture_authority {
+            authority
+                .ensure_storage_writable()
+                .map_err(WriterError::Session)?;
         }
         Ok(())
     }

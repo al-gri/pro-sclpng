@@ -1,15 +1,15 @@
 # ADR 0003 — terminal capture saturation and archive session authority
 
-Status: **PROPOSED — DESIGN_PROPOSED / Q1_BLOCKED**. Date: 2026-10-07.
-Architecture direction: **ARCHITECTURE_DIRECTION_SET / DESIGN_REVISION_REQUIRED**.
+Status: **DESIGN_APPROVED_FOR_IMPLEMENTATION — IMPLEMENTED / QA_PENDING**. Date: 2026-10-07.
+Architecture direction: **ARCHITECTURE_DIRECTION_SET**.
 This is the bounded REC-001D design revision for [Issue #20](https://github.com/al-gri/pro-sclpng/issues/20), parent [#5](https://github.com/al-gri/pro-sclpng/issues/5), existing Draft [PR #34](https://github.com/al-gri/pro-sclpng/pull/34).
 Claim `6024304772`; recovery `6025249885`; latest incoming partial completion [6033824631](https://github.com/al-gri/pro-sclpng/issues/20#issuecomment-6033824631).
 Inspected immutable production head: `91e3702f75346e0f310532359a06daa9db701829`.
 Inspected main/base: `39ff0dba797eb010586238ef06fb80e996340401`.
-Architecture-reviewed proposal head: `750e85a7ecdd65b0c788726d05a4302b0b42225d`.
-Current docs-only revision addresses **R1–R3** from the supplied Architecture-review task packet, verdict **DESIGN_REVISION_REQUIRED / Q1_BLOCKED**. **DESIGN_APPROVED_FOR_IMPLEMENTATION has not been issued**. Earlier production/proposal provenance remains historical.
+Architecture-approved immutable proposal: `cff1e398c3226bc2a86b51442e02054c5996e86a`. Earlier reviewed proposal: `750e85a7ecdd65b0c788726d05a4302b0b42225d`.
+The owner supplied **DESIGN_APPROVED_FOR_IMPLEMENTATION** for the complete contract at `cff1e398…`, with R1/R2/R3 **DESIGN_RETEST_PASS** and whole-ADR consistency **DESIGN_REVIEW_PASS**. Exact allowlist and conditions are recorded in the supplied `REC-001D-Architecture-cff1e398.txt`. Earlier production/proposal provenance remains historical.
 
-Only this proposal and [REC-001D handoff](../handoffs/REC-001D.md) change in this revision. Normative MUST/MUST NOT statements below describe the proposed contract after approval; they are **not implemented or accepted** at the inspected head. Q1 is **BLOCKED / NOT_FIXED**; Q2 remains **FIXED_IN_CODE / QA_PENDING**. Passing the existing Q1 forensic reproductions demonstrates the outstanding defect. Docs-only CI cannot establish its repair.
+Normative MUST/MUST NOT statements below are the **approved implementation contract**, restricted to the exact paths in §8 and the two delivery documents. At the approved docs-only head they were **not implemented**: Q1 was **BLOCKED / NOT_FIXED**, Q2 **FIXED_IN_CODE / QA_PENDING**. Approval clears the design gate; it is not implementation acceptance or independent QA. Current implementation evidence is recorded in §11 and the [REC-001D handoff](../handoffs/REC-001D.md). Docs-only CI cannot establish Q1 repair.
 
 ## 1. Problem, authority and approval boundary
 
@@ -17,7 +17,7 @@ At the inspected head, sufficiently many separately stamped diagnostics or incom
 
 The selected design is **terminal affected capture, irreversible archive failure, bounded admitted diagnostic drain**. It reserves the first terminal failure of every configured scope inside the advertised cap and gives the writer owner enforceable authority over publication and finalization. It does not promise to capture every later input of a terminated scope.
 
-Read against current [AGENTS](../../AGENTS.md), [workflow](../WORKFLOW.md), [architecture](../ARCHITECTURE.md), [invariants](../INVARIANTS.md), [project state](../PROJECT_STATE.md), accepted [ADR 0002](0002-domain-event-wal-contracts.md), [WAL v1](../../specs/recording/wal-v1.md) and [DataHealth v1](../../specs/market-data/data-health-v1.md). Existing accepted files remain unchanged. The API/health deltas below require explicit **DESIGN_APPROVED_FOR_IMPLEMENTATION**, including approved paths, before production remediation. The next gate is an Integrator/Architecture review bound to the exact proposal commit SHA; after implementation a new immutable head requires full independent QA.
+Read against current [AGENTS](../../AGENTS.md), [workflow](../WORKFLOW.md), [architecture](../ARCHITECTURE.md), [invariants](../INVARIANTS.md), [project state](../PROJECT_STATE.md), accepted [ADR 0002](0002-domain-event-wal-contracts.md), [WAL v1](../../specs/recording/wal-v1.md) and [DataHealth v1](../../specs/market-data/data-health-v1.md). Existing accepted files remain unchanged. The API/health deltas below have explicit **DESIGN_APPROVED_FOR_IMPLEMENTATION**, restricted to §8 paths. After implementation a new immutable head requires full independent QA; no merge, readiness or task acceptance follows from design approval.
 
 U-09 **UNKNOWN/BLOCKED**, U-10 **UNKNOWN/BLOCKED**, U-20 **NOT_PROVEN/FORBIDDEN**, C-01 **CONTRACT_CONFLICT/BLOCKED**, C-03 **DOC_CONFLICT/UNKNOWN** remain unchanged. No networking, REST healing, RPI normalization, quantity/delete inference, private API, execution, REC-001F or application composition implementation is authorized by this ADR.
 
@@ -50,7 +50,7 @@ The first received input of a known configured scope that cannot be represented 
 
 ## 3. Chosen public API contract
 
-The proposed API is **owner-bound handles plus explicit admission/drain envelopes and consumed command leases**. These are semantic signatures, not a claim of compiling code at the inspected head:
+The approved API is **owner-bound handles plus explicit admission/drain envelopes and consumed command leases**. These semantic signatures are implemented within the bounded library profile; concrete Rust type/report spelling and execution evidence are recorded in §11:
 
 ```rust
 CaptureSessionOwner::create_new(path, accepted_start, bounded_profile)
@@ -84,11 +84,11 @@ CaptureSessionOwner::finalize(&mut SessionTurn, quiescence_proof) -> Result<Fina
 CaptureSessionOwner::close_diagnostic(&mut SessionTurn) -> DiagnosticCloseReport;
 ```
 
-`AdmissionReport { session_disposition, scope_disposition, outcome, commands }` places disposition **outside** its inner typed `Result`. On the first failure `outcome` retains `QueueExhausted { stream }` or `CounterExhausted("CaptureAttemptNo")`; the same report carries the installed failure identity, CloseOwnerRef and at most one terminal Close lease. Initial Close issuance uses the same Pending->Leased transition as reclaim; an existing Leased/Settled Down owner yields no second lease. An error must not discard mandatory Close ownership or hide archive failure. Ordinary received input has `Admitted`, `CoalescedLoss` or `AlreadyTerminated { failure_id }` outcome. New typed terminal/closed/authority errors are explicit API deltas. Reports use bounded fixed-capacity records/events/command views; they cannot grow a history.
+`AdmissionReport { session_disposition, scope_disposition, outcome, commands }` places disposition **outside** its inner typed `Result`. On the first failure `outcome` retains `QueueExhausted { stream }` or `CounterExhausted("CaptureAttemptNo")`; the same report carries the installed failure identity, CloseOwnerRef and at most one terminal Close lease. Initial Close issuance uses the same Pending->Leased transition as reclaim; an existing Leased/Settled Down owner yields no second lease. An error must not discard mandatory Close ownership or hide archive failure. Ordinary received input has `Admitted`, `CoalescedLoss` or `AlreadyTerminated` outcome with the immutable failure identity in the outer scope/failure fields. New typed terminal/closed/authority errors are explicit API deltas. Reports use bounded fixed-capacity records/events/command views; they cannot grow a history.
 
-`DrainReport { session_disposition, outcome: Result<Option<DrainObservation>, SupervisorError> }` exposes `DiagnosticOnly { archive, session, failure_id }` even on `None` or error. At the instant the archive latch is set, all previously admitted observations and all future healthy-neighbor observations become diagnostic-only. Drain checks that latch before releasing the result. Already returned results carry observation identity and no reusable publication permit; publication must revalidate through `owner.publish` at use time. A pre-failure result held across failure therefore cannot authorize a later market effect.
+`DrainReport { session_disposition, outcome: Result<Option<DrainResult>, SupervisorError> }` exposes `DiagnosticOnly { archive, session, failure_id }` even on `None` or error. At the instant the archive latch is set, all previously admitted observations and all future healthy-neighbor observations become diagnostic-only. Drain checks that latch before releasing the result. Already returned results carry observation identity and no reusable publication permit; publication must revalidate through `owner.publish` at use time. A pre-failure result held across failure therefore cannot authorize a later market effect.
 
-`BoundRecordSink` is private-field, non-clonable and minted by this owner with the supervisor handle. This initial profile registers exactly one supervisor for its complete fixed N-scope registry. `new` validates config's active Context, recording gate, segment and next RecordNo against that bound writer/accepted bootstrap state; they are not independent caller authority to assign an archive prefix. Replace the freely interchangeable `&mut impl RecordSink` at the canonical boundary; wrong owner/session/gate is rejected before a write. A test adapter must implement the same authority and gate validation, not manufacture a successful receipt to bypass it. No production sink binding or socket adapter is implemented in this docs task.
+`BoundRecordSink` is private-field, non-clonable and minted by this owner with the supervisor handle. This initial profile registers exactly one supervisor for its complete fixed N-scope registry. `new` validates config's active Context, recording gate, segment and next RecordNo against that bound writer/accepted bootstrap state; they are not independent caller authority to assign an archive prefix. Replace the freely interchangeable `&mut impl RecordSink` at the canonical boundary; wrong owner/session/gate is rejected before a write. A test adapter must implement the same authority and gate validation, not manufacture a successful receipt to bypass it. The bounded filesystem sink binding is implemented by the approved recording owner. A socket adapter remains outside scope.
 
 ### 3.1 Complete method outcomes
 
@@ -182,7 +182,7 @@ Borrowed incoming bytes belong to the caller; retention copies into a bounded se
 
 `retention_report()` returns `item_cap`, fixed owner reservations, queued/in-flight/pending/lease/candidate work counts, W used/free, PreCut/PostCut record-bearing ownership counts and immutable-cut status, Close states/storage associations, ticket/proof state, filled failure slots, marker state, per-stream raw frame/length/allocated-capacity counts, actual metadata/buffer allocations and the computed byte ceiling. References and bounded report copies do not become new retained work owners. The sum is asserted at each mutation, including reclaim/Drop/error/repeat/cancel/drain paths. `queued_items()` alone does not advertise M. Error strings are bounded typed descriptors. Repeated terminated ingress retains neither a new stamp nor a payload nor a new diagnostic item.
 
-### 4.2 Legal cap traces (required future acceptance, not current execution)
+### 4.2 Legal cap traces (normative; execution evidence in §11)
 
 Use a setup that drains epoch 1->2 reconnect/ack/snapshot, giving a consumed/accounted frontier `c=2` and empty work ledger. Releases of returned command/result leases are explicit. Each old input below is separately stamped, oversize, and requires its own existing stale diagnostic.
 
@@ -261,7 +261,7 @@ An **external inventory** is required to know expected archives/sessions and det
 
 ## 8. Compatibility and minimum future implementation paths
 
-All paths below are **proposed for review**, not authorized for modification by this docs-only task. Approval must name the final allowed paths. Existing accepted specs/ADR are not edited now; this ADR would carry the approved semantic extension.
+The exact paths below are **approved for bounded implementation** by the Architecture decision for `cff1e398…`; only these paths and this ADR/handoff may change. There is no wildcard expansion. Existing accepted specs/ADR, manifests, dependencies and application composition remain unchanged; this ADR carries the approved semantic extension.
 
 | Area | Existing contract preserved / exact proposed delta | Owner/replay/publication/finalization effect | Minimum proposed implementation paths |
 |---|---|---|---|
@@ -278,7 +278,7 @@ Implementation must establish these library boundaries before any later applicat
 
 ## 9. Acceptance matrix for the approved implementation
 
-All rows are **REQUIRED / NOT_RUN for this design proposal**. They define future implementation and independent-QA evidence; existing forensic tests and CI do not satisfy the new rows.
+At the approved docs-only SHA all 31 rows were **REQUIRED / NOT_RUN**. The matrix remains the normative implementation/independent-QA contract. Current worker execution evidence is mapped in §11 and the handoff; full independent QA of the new immutable implementation SHA is still **REQUIRED / NOT_RUN**. Historical forensic tests and docs-only CI do not establish these new behaviors.
 
 | Case | Stimulus / boundary | Required observable result |
 |---|---|---|
@@ -314,8 +314,82 @@ All rows are **REQUIRED / NOT_RUN for this design proposal**. They define future
 | R3 — failure during Closing | Gate/order/counter failure before Ready, and separately after Ready; repeat quiesce/finalize. | Terminal FinalizationInvalidated(ArchiveFailed), not NotReady loop; Closing->DiagnosticClosing with admission still closed; active ticket/issued proof invalidated, consumed issuance stays spent; no new generation or successful final seals. |
 | R3 — proof reuse | Finalize with first valid proof, then internal stale/duplicate authorization use; safe-Rust attempt to clone/reuse moved proof. | One-use consumption; ProofConsumed/InvalidProof/no duplicate seals, compile-fail affine reuse; failed/invalidated proof never finalizes; errors do not reopen admission. |
 
-## 10. Proposal delivery and next gate
+## 10. Approval provenance and next gate
 
-This revision changes no production semantics and claims no Q1 acceptance. R1 fixes admission-order cut membership/coalescing; R2 fixes concrete mandatory-Close discovery/reclaim/settlement; R3 fixes borrowed repeatable quiescence and one-use issuance/invalidation. Architecture must retest **all R1–R3** and review consistency of the entire new exact-SHA ADR, including terminal API outcomes, work/byte accounting, Close exception, owner authority/publication/finalization, marker/replay, H2 disposition delta and minimum future paths. No new claim/Issue/branch/PR, force-push, merge or auto-merge is part of delivery; PR #34 remains Draft.
+Architecture approved the entire immutable proposal `cff1e398c3226bc2a86b51442e02054c5996e86a` with **DESIGN_APPROVED_FOR_IMPLEMENTATION**. R1/R2/R3 were **DESIGN_RETEST_PASS** and whole-ADR consistency **DESIGN_REVIEW_PASS**. The approval explicitly restricts implementation to the exact §8 allowlist plus ADR/handoff, preserves the dependency graph and every U/C constraint, and requires all applicable acceptance rows and earlier regressions. Proposal CI `37601404244` passed on that docs-only SHA; it is historical design provenance and does not verify the implementation.
 
-Final proposal status: **DESIGN_PROPOSED / Q1_BLOCKED**; Q1 **BLOCKED / NOT_FIXED**, Q2 **FIXED_IN_CODE / QA_PENDING**. The exact committed proposal head and actual checks belong in existing PR/Issue metadata; a document cannot embed its own commit SHA without changing that SHA. Next: repeat Architecture review of the whole new proposal SHA with mandatory R1–R3 retest and ADR consistency review. **DESIGN_APPROVED_FOR_IMPLEMENTATION has not been issued**. Production remediation starts only after that explicit approval with approved API semantics/paths; afterward full independent QA must inspect the new immutable implementation head.
+This implementation continues the original claim/recovery, branch and Draft PR #34. No new claim, Issue, branch or PR, force-push, merge or auto-merge is authorized. The new implementation head and fresh exact-head CI belong in existing PR/Issue metadata after commit; the document cannot embed its own containing SHA without changing that SHA.
+
+The next gate is **full independent QA of the new immutable implementation head**, including all 31 acceptance rows, Q1/Q2, all 63 H1 faults, H2 and prior F1–F4/N1–N3/decoder/continuity/WAL regressions. Worker tests, allocation measurements and CI are evidence for that review; they do not constitute independent QA, Integrator acceptance, owner readiness or merge approval. Later code changes require a new exact-head verification and invalidate transferred implementation-QA evidence.
+
+## 11. Bounded implementation and worker evidence
+
+The approved contract is implemented in the exact §8 allowlist. Worker disposition is **IMPLEMENTED / QA_PENDING**: Q1 and Q2 are **FIXED_IN_CODE / QA_PENDING**. This denotes code and worker-check evidence, not independent acceptance that Q1 is fixed. Full independent QA of the containing implementation SHA remains **REQUIRED / NOT_RUN**. Earlier blocked/proposal dispositions in the handoff are historical and are superseded by its appended implementation delivery.
+
+### 11.1 Concrete library boundary
+
+| Boundary | Implemented Rust API / behavior |
+|---|---|
+| Fresh filesystem owner | `CaptureSessionOwner::create_new(path, &RecordFrame, BoundedCaptureProfile<'_>) -> Result<(Self, SessionTurn), OwnerError>` accepts ArchiveStart plus borrowed frozen bootstrap (at most64 records/65536 encoded bytes). Path is UTF-8 and at most4096 bytes. The exclusive single-segment writer has no export/adoption API. |
+| Registration | `owner.register_supervisor(&mut SessionTurn, &[ScopeBinding], RetentionBudget)` returns the non-clonable supervisor handle and bound sink. Accepted full `StreamBinding` values, prefix, gate and registry are checked, including full tag/profile rather than equal numeric scope IDs. `PublicWsSupervisor::new(config, handle)` cannot substitute its own prefix/context. |
+| Ingress | `queue_text` borrows `&[u8]`; other received methods preserve connection/epoch/stamp. `AdmissionReport` puts session/scope disposition and failure evidence outside the typed outcome, with fixed arrays for at most4 command leases/admitted scopes and explicit plan cancellation. `AlreadyTerminated` has the immutable failure in the outer fields. |
+| Drain and ownership | `drain_one(turn, &mut BoundRecordSink) -> DrainReport`; `DrainResult` retains its private W owner while the caller holds it. Results have at most3 RecordNos,1 command and4 events. Queue, in-flight result, pending Down plan and leases transfer/share the same counted unit. There is no public legacy core/free `RecordSink` boundary. |
+| Ordinary versus marker writes | `BoundRecordSink::persist_owned(turn, frame, gate, &WorkOwner)` checks authority, current prefix, counted ownership and cut ordering; `persist_marker` uses the reserved archive slot. Compatibility `persist` accepts only the failure marker. Gated confirmation is authenticated through the bound sink, not a caller-supplied RecordNo/receipt DTO. A valid direct archive-wide Failed observation fixes the same authoritative cut and retains an immutable bounded original context/reason/kind descriptor even when it must wait for PreCut drain. Confirmed direct writes advance the authenticated prefix without duplicate marker generation. |
+| Mandatory Close | Fixed `outstanding_close_owners`; `reclaim_close(turn, CloseOwnerRef) -> CloseLeaseReport`; consuming `CloseLease::into_command`; `dispatch(turn, CommandLease, effect) -> DispatchReport`; `confirm_closed` accepts an opaque `AuthenticatedClosure`. Drop/error returns the same owner Pending; foreign dispatch returns the legitimate lease. A W job is bound to one Close scope, including held old aliases; cross-scope reuse is rejected before mutation. Lease sharing is checked, never wrapped/panicked into a second active lease. |
+| H1 / epochs | Successful Down and Close return before fallible completion. Completion waits for Close settlement, then three gated epoch records authenticate advancement. Terminal failure cancels only uncommitted reconnect completion. The earlier Down and Close owner survive storage error/diagnostic closure. |
+| Finalization | `begin_finalization(turn)` creates the sole `CloseTicket`; `supervisor.quiesce(turn, &ticket)` performs no implicit drain. NotReady preserves it; Ready atomically consumes issuance and yields one affine proof. `finalize(turn, proof)` consumes authorization, checks latch before each final seal/finish, and never succeeds for a failed session. Bound generic seal append cannot reuse owner authorization. |
+| Diagnostic closure | `close_diagnostic(turn) -> DiagnosticCloseReport` is pollable. Writable DiagnosticClosing waits for caller-driven admitted drain/marker; StorageStopped can close descriptors while explicitly reporting undrained ownership. Close discovery/reclaim/dispatch remains available afterward. No hidden Drop flush/retry/seal or storage restart. |
+| Publication / trusted interfaces | The pure domain authority and `SessionRecordWriter` are a trusted backend/conformance contract: an implementation must report its actual accepted prefix/gate. They do not authenticate arbitrary implementations or another filesystem owner's authority. Canonical filesystem capture uses only the concrete owner-minted handle/sink. Sealed guard, canonical step/candidate/fence and external closure evidence have no public DTO constructors. **Production publication stays PublicationUnavailable** until both its sealed guard and authenticated canonical producer exist; application/transport producers are deferred. |
+| Replay / recovery | Reference health/publication interpreters latch every valid Failed recording observation while retaining later observed health separately. WAL schema/codec/reader remain unchanged. Marker/crash fixtures preserve physical status and quality Option; absent archives require external inventory, which is not implemented here. |
+
+Supervisor entry points synchronize authoritative CutSide, marker/prefix and scope termination rather than assuming all failure originated in their own ingress call. PreCut GAP remains frozen when a valid archive-wide failure was initiated directly through the concrete bound sink; a later scope failure cannot replace the earlier archive marker descriptor.
+
+Historical Connected/Pong admitted before any terminal Down can record gated diagnostic Up after failure without reviving live scheduling/subscription. The original same-generation terminal-Down suppression remains. Storage errors retain the original undrainable ingress/work identity or pending completion; they do not fabricate replacement records, promise rollback, or silently resume writes.
+
+### 11.2 Honest item, metadata and allocation evidence
+
+`OwnershipReport` exposes M, N+1 reservations, W used/free via the fixed limit, total references and PreCut/PostCut/before-failure counts. `SessionStatus` and `unsettled_summary` expose marker, lifecycle, failure, ticket/proof and Close state; `SupervisorRetentionReport` adds queued/pending work, exact raw Vec capacities, cut state and storage profile. The public reports distinguish known backing from modeled inline owner capacity and conservative metadata/workspace ceilings. Private BTree nodes are included in a structural ceiling for the pinned toolchain, not described as measured allocation. Decoder bounds include aggregate nested JSON/container/string growth and output staging; frozen validator cloning/encoding and path/backend buffering are explicit.
+
+The total ceiling is the §4 formula, realized as authority metadata ceiling + storage metadata ceiling + supervisor metadata ceiling + payload ceiling + decoder workspace ceiling + storage workspace/backend ceilings. W+N+1 remains within M at transfers/reclaim/Drop/error/repeats. Inline terminal Close and marker stay inside their reservations; no second owner lane is added. Cross-scope W/Close misuse and checked admission/RecordNo/CaptureAttempt boundaries have negative regressions. A received input rejected by exhausted AdmissionOrder keeps the original typed counter error and installs exact reserved scope failure evidence; generated work keeps its explicit checked outcome. Eligible F2 tail coalescing reserves neither a new W nor a new admission identity. The domain test sets the actual private counter to MAX; the supervisor test injects only its negative reservation outcome against a genuine accepted filesystem owner and then exercises public diagnostic drain/reclaim/neighbor paths.
+
+Std-only test allocator probes count requested allocation Layout sizes (not RSS, allocator usable size, or end-to-end network memory). They cover the full concrete owner/sink/supervisor lifecycle at N1/M5 and N2/M9, dense/nested legal decode, held result/command leases, tiny borrowed slices from an8MiB-capacity caller Vec and100 failed-ingress/reclaim cycles. Observed values and final command results are recorded in the handoff. They assert peak below the computed complete boundary ceiling, flat repeated-call retention and zero tracked live bytes after all boundary objects are dropped. The separate owner-only probe exercises the same cap/terminal/reclaim transfer discipline.
+
+### 11.3 Mapping all31 acceptance families to worker regressions
+
+MD means `crates/market-data/tests/ws_supervisor.rs`; MU its module-private source tests. DO/DU mean domain capture-session integration/conformance tests; RO means recording capture-session integration tests. Names below are unique test prefixes when abbreviated. This mapping records worker coverage, **not independent QA acceptance** or an end-to-end application/socket/inventory test.
+
+| §9 row | Executed worker regression family |
+|---|---|
+| 1 Single-stream cap5 | MD `q1_single_stream_legal_five_…`: exact candidate6, immutable failure/repeats, FIFO prefix, marker, no suffix. |
+| 2 Two-stream cap9 | MD `q1_two_stream_legal_nine_…`: both reserved failures and drain/free-W neighbor variant. |
+| 3 Mixed saturation | MD `q1_noncoalescing_saturation_…`: admitted raw/control/stale identity and exact scopes. |
+| 4 Ordinary F2 | MD `sustained_overflow_coalesces_loss_…`: Raw1/GAP2..33/count32 and neighbor service. |
+| 5 Repeated ingress/reconnect | MD cap5/cap9 repeats plus `held_pre_failure_connect_lease_…`: counted old command revoked before callback effect. |
+| 6 FIFO / neighbor controls | MD `admitted_connected_and_pong_without_prior_down_…`, `terminal_…`, `marker_precedes_post_cut_…` and H1 neighbor cases. |
+| 7 Marker error | MD `canonical_terminal_close_reclaim_…` and RO `marker_error_mismatch_and_weak_gate_…`; prefix errors in H1/Q2 suites. |
+| 8 Mismatch / weak / authority | Same three marker fault modes; DU authenticated marker confirmation, RO full binding and foreign owner negatives. |
+| 9 Marker ordering / watermark | MD `marker_precedes_post_cut_neighbor_raw_and_unadmitted_completion_with_held_close`; MU direct archive-wide marker/cut/prefix regressions; DU immutable archive descriptor and `earlier_stronger_watermark_…`; RO valid Failed/later Healthy. |
+| 10 Publication | DU full current projection, quiet expiry/mode, authenticated continuous fence, one-use publication and late-fence failure revocation; reference health/publication cases. Actual application producer remains unavailable. |
+| 11 Finalization boundary | MD borrowed quiescence/Closing storage fault; RO healthy finalization, generic seal rejection and diagnostic-close polling; affine/reentry compile-fail tests. |
+| 12 Crash before marker | RO `unsealed_prefix_before_marker_…`: no fabricated observation/quality. No external inventory producer exists; absent-whole-archive detection remains its explicitly documented responsibility. |
+| 13 After / torn / legacy seals | RO `valid_marker_retains_…`, `torn_failure_marker_…`, `old_nonfinal_segment_seal_…`, `physically_valid_legacy_sealed_bytes_…`. |
+| 14 CaptureAttempt MAX | MU `canonical_capture_attempt_exhaustion_…` current/old-tag variants plus original checked/near-MAX regressions; received AdmissionOrder exhaustion and zero-reservation F2 regressions. |
+| 15 Retention bytes / owners | MD full-supervisor allocator/tiny-slice tests; RO owner allocator; DO bounded sharing/ledger; DU cross-scope Close rejection. |
+| 16 Q2 / H1 / H2 / prior | All supervisor regressions,63 H1 fault variants,12 Q2 storage-fault variants, checked H2 tests and complete existing workspace/real-CLI/WAL suites. |
+| 17 R1 free W | MD `r1_pre_cut_tail_gap_…` free-W branch: old GAP frozen, separate counted PostCut GAP4, marker between owners. |
+| 18 R1 exhausted W | Same test exhausted branch: exact B candidate4 failure, no GAP extension/reuse, W6/total9. |
+| 19 R1 marker failure | MD `r1_marker_fault_…`: both W variants times error/mismatch/weak gate; immutable cut/old GAP, explicit stopped retained work. |
+| 20 R2 Drop / reclaim | MD canonical inline Close; DO `mandatory_close_drop_error_…`; RO `down_close_drop_error_…`: same owner and counts. |
+| 21 R2 dispatch error | Same families: effect Unknown, Pending retry, no exactly-once/absence-of-effect claim. |
+| 22 R2 double reclaim | Same families: AlreadyLeased, same snapshot and no second lease. |
+| 23 R2 foreign | DO foreign reclaim/dispatch; RO `foreign_dispatch_returns_…`; MD canonical fault suite; DU foreign/stale opaque closure. |
+| 24 R2 lifecycle | MD all marker faults through DiagnosticClosed; DO storage-stop/descriptor closure; RO `closing_keeps_down_close_…`. |
+| 25 R2 settled / stale | Same Close suites plus DU foreign/stale closure and canonical epoch scope tests; old lease alias retains its counted W until Drop. |
+| 26 R2 prior Down reuse | RO `down_close_drop_error_…`; MD held Close/deferred completion ordering; no extra terminal Close or W. |
+| 27 R3 repeated NotReady | MD canonical borrowed quiescence; DO borrowed-quiescence; RO `repeated_not_ready_…`; stable bounded summary/no drain. |
+| 28 R3 settlement / proof | Same families plus RO `healthy_owner_finalizes_…`: same ticket then sole proof. |
+| 29 R3 consumed / foreign | MD/DO/RO foreign ticket/turn and duplicate issuance tests; rightful issuance unchanged on error. |
+| 30 R3 failure during Closing | MD storage failure before Ready; DO failure before/after Ready; RO failed issued proof; DU failure after proof consumption before seals. |
+| 31 R3 proof reuse | DU `foreign_and_duplicate_proof_authorizations_…`; RO healthy single finalization; safe-Rust affine proof/reentry compile-fail regressions. |
+
+Final local Rust results, tool-wrapper limitations, allocation measurements, exact allowed diff and fresh exact-head CI are recorded in the appended handoff and existing PR/Issue metadata. No historical docs-only CI or worker conformance result is transferred into independent-QA acceptance.

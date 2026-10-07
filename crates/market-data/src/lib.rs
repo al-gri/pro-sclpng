@@ -26,9 +26,10 @@ pub use decoder::{
 };
 pub use json::{JsonError, JsonErrorKind};
 pub use ws_supervisor::{
-    BITGET_PUBLIC_WS_ENDPOINT, DrainResult, HEARTBEAT_INTERVAL_NS, MAX_CONFIGURED_STREAMS,
-    PONG_TIMEOUT_NS_V1, PersistError, PersistenceReceipt, PublicWsSupervisor, QueuePolicy,
-    RECONNECT_BASE_NS_V1, RECONNECT_MAX_NS_V1, ReceiveStamp, RecordSink, SUPERVISOR_POLICY_VERSION,
-    StreamSupervisorSnapshot, SubscriptionState, SupervisorError, SupervisorEvent,
+    AdmissionOutcome, AdmissionReport, BITGET_PUBLIC_WS_ENDPOINT, BoundedList, DrainReport,
+    DrainResult, HEARTBEAT_INTERVAL_NS, MAX_CONFIGURED_STREAMS, PONG_TIMEOUT_NS_V1, PersistError,
+    PersistenceReceipt, PublicWsSupervisor, QueuePolicy, RECONNECT_BASE_NS_V1, RECONNECT_MAX_NS_V1,
+    RawRetention, ReceiveStamp, SUPERVISOR_POLICY_VERSION, StreamSupervisorSnapshot,
+    SubscriptionState, SupervisorError, SupervisorEvent, SupervisorRetentionReport,
     TransportCommand, WsSupervisorConfig, reconnect_delay_ns,
 };

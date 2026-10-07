@@ -1612,3 +1612,157 @@ remediation waits for explicit approval of API semantics and allowed paths.
 After implementation the new immutable head requires full independent QA of
 Q1/Q2, H1/H2 and all prior regressions. No worker self-approval or owner/merge
 readiness is declared.
+
+## Architecture approval and bounded implementation delivery — 2026-10-07
+
+Current worker disposition: **IMPLEMENTED / QA_PENDING**. Q1 and Q2 are
+**FIXED_IN_CODE / QA_PENDING**. This records implementation and worker verification,
+not an independent finding that Q1 is fixed or whole-task acceptance. It supersedes
+the blocked/proposal dispositions above; all previous forensic and review history
+is preserved as an exact prefix. **DESIGN_APPROVED_FOR_IMPLEMENTATION** was issued
+for the whole immutable ADR proposal `cff1e398c3226bc2a86b51442e02054c5996e86a`.
+The supplied `REC-001D-Architecture-cff1e398.txt` contains the exact approval,
+allowlist, R1/R2/R3 retest and full-ADR consistency verdict. The design gate is
+cleared; independent implementation QA is not.
+
+Same lineage: repository `al-gri/pro-sclpng`; Issue #20 / parent #5;
+claim `6024304772`; recovery `6025249885`; branch
+`feat/REC-001D-ws-supervisor`; existing Draft PR #34. Incoming head and sole
+implementation parent is `cff1e398c3226bc2a86b51442e02054c5996e86a`;
+main/base is `39ff0dba797eb010586238ef06fb80e996340401`.
+Actual branch/PR/base were independently verified against those values, with
+zero foreign/intervening commits, open/Draft/unmerged state and auto-merge unset.
+Current repository policies, accepted contracts and the whole approved ADR were
+read before implementation. All129 original file blobs were materialized and
+matched the immutable tree; this workspace has no git checkout. Delivery uses
+that parent tree and a non-force expected-head ref update, followed by exact
+remote compare/tree/CI checks. The containing implementation SHA and fresh CI
+run are recorded in existing PR/Issue metadata after commit, avoiding a
+self-referential SHA. Earlier proposal CI `37601404244` is historical only.
+
+### Implemented contract and review mapping
+
+| Finding / boundary | Implementation and worker evidence |
+|---|---|
+| R1 | Authority fixes each counted record-bearing owner's CutSide by admission order. No PreCut GAP stamp/range/count changes after cut. Separate PostCut owner or exact reserved neighbor failure; free/exhausted cap9 traces and six marker-fault variants cover both paths. A direct valid archive-wide Failed observation uses the same cut and immutable archive descriptor, even when it returns NotQuiescent before prefix drain. Supervisor synchronizes authoritative cut/prefix/marker state; later scope failure cannot replace the first archive stamp/reason/kind. |
+| R2 | Bounded outstanding Close discovery, opaque ref, checked affine reclaim/dispatch and Pending/Leased/Settled. Drop/error returns the same owner Pending; AlreadyLeased creates no second lease. Foreign dispatch returns the legitimate lease. Existing Down-owned W is reused; reserved terminal Close stays inline. Discovery/reclaim/dispatch survives storage stop/Closing/DiagnosticClosed. Cross-scope reuse of one W and held settled aliases are rejected without mutation; internal alias capacity returns a typed error instead of panic/wrap. Physical dispatch error remains effect Unknown; retry is idempotent for that same epoch, not exactly-once. |
+| R3 | Borrowed CloseTicket survives repeated bounded NotReady without implicit drain. First Ready atomically consumes issuance; duplicate/foreign calls do not issue another proof. Proof is affine and consumed once. Failure before/after Ready or after proof consumption invalidates finalization terminally, preserves closed admission and prevents successful final SegmentSeal/ArchiveSeal/finish. |
+| Terminal scope / archive | First unrepresentable validated received input retains exact original identity and consumes its candidate once as evidence, never Raw/GAP coverage. Archive failure is irreversible and diagnostic-only before report use. Already-admitted FIFO work drains through the concrete bound gate; active neighbors retain admissible transport/diagnostic service. CaptureAttempt MAX and received AdmissionOrder exhaustion retain exact failures without wrap/reuse. Same-side F2 tail coalescing uses no additional owner/admission identity. |
+| Writer / publication | Fresh exclusive one-segment filesystem owner, frozen bounded bootstrap, pointer-bound handle/sink and unique SessionTurn. Canonical seals/finish enforce latch and one-use proof; no writer export/adoption. Pure domain SessionRecordWriter is a trusted backend/conformance interface, not a guarantee about arbitrary implementations. Production publication remains PublicationUnavailable until sealed guard plus authenticated canonical producer exist. No application/transport/inventory wiring is added. |
+| Persistence / recovery | Existing RecordingEvidence schema and truthful earlier nonregressing watermark. One immutable failure marker descriptor, authenticated confirmation only after actual gate, no duplicate marker. Persist error/mismatch/weak gate is explicit and sticky; no rollback/durable-marker/absent-failed-bytes promise. Unsealed reader returns ValidPrefixIncomplete with normally None quality; live owner reports Unknown completeness. Torn/segment-only/legacy Complete bytes retain accepted physical semantics. No recovery of a nonexistent observation; absent archives require external inventory. |
+
+[ADR0003](../adr/0003-ws-capture-saturation.md) §11 records concrete Rust APIs,
+byte/accounting formulas and a row-for-row mapping of all31 acceptance families
+to worker tests. Full independent QA of every applicable row remains
+**REQUIRED / NOT_RUN**. Source-level peer audits are worker checks, not that gate.
+Opaque authenticated closure has private conformance coverage and dispatch
+settlement works; an actual trusted transport producer remains out of scope.
+
+### Exact implementation scope
+
+The delivery changes17 paths, all inside the18-path approval allowlist:
+
+- `crates/domain/src/capture_session.rs` (new);
+- `crates/domain/src/lib.rs`;
+- `crates/domain/tests/capture_session.rs` (new);
+- `crates/market-data/src/ws_supervisor.rs`;
+- `crates/market-data/src/lib.rs`;
+- `crates/market-data/tests/ws_supervisor.rs`;
+- `crates/recording/src/capture_session.rs` (new);
+- `crates/recording/src/lib.rs`;
+- `crates/recording/src/file.rs`;
+- `crates/recording/tests/capture_session.rs` (new);
+- `crates/domain/tests/support/health/mod.rs`;
+- `crates/domain/tests/support/health/transitions.rs`;
+- `crates/domain/tests/support/publication.rs`;
+- `crates/domain/tests/cases/health.rs`;
+- `crates/domain/tests/cases/publication.rs`;
+- `docs/adr/0003-ws-capture-saturation.md`;
+- `docs/handoffs/REC-001D.md`.
+
+Allowed `crates/recording/tests/wal.rs` remains byte-for-byte unchanged; its26
+regressions run. The other116 original blobs remain unchanged, including accepted
+specs/ADR0002, dependencies/manifests/lock/toolchain/workflow and composition.
+The market-data production dependency remains domain-only; recording stays dev-only.
+No new claim/Issue/branch/PR, force-push, merge, auto-merge, networking,
+REST healing, RPI/quantity/delete inference, private API, execution or REC-001F.
+U-09/U-10 **UNKNOWN/BLOCKED**, U-20 **NOT_PROVEN/FORBIDDEN**,
+C-01 **CONTRACT_CONFLICT/BLOCKED**, C-03 **DOC_CONFLICT/UNKNOWN** are preserved.
+
+Approved H1/H2 deltas are explicit: Down/Close is returned before fallible
+completion, which now waits for mandatory Close settlement; CaptureAttempt
+exhaustion terminates its affected scope while admitted diagnostic drain and
+neighbor service continue. Checked error/frontier/no-wrap/no-reuse and H1
+successful durable-result ownership are preserved. Q2 owner/cancellation rules
+and all prior regressions remain. The three forensic `q1_blocker_*` tests are
+replaced by actual normative cap5/cap9/mixed regressions. Two caller-forged
+RecordNo integration fixtures are replaced by authenticated constructor rejection
+and the retained private protocol/domain counter-before-write checks; they are
+not used to bypass an accepted writer. Other original supervisor tests remain.
+
+### Actual final worker verification
+
+Pinned Rust **1.98.1** (`48a229ceaefd4985c50990b14116b6d856af0985`),
+Cargo1.98.1 (`797e8a9bc`), LLVM22.1.8. Official pinned components were verified
+and installed into the transient workspace without changing repository toolchain,
+manifest, lock or dependencies. The restricted runtime lacks `/proc/self/exe`;
+Cargo's fmt/clippy wrappers and the default lld wrapper fail current-executable
+lookup. Direct pinned rustfmt/Clippy driver work; tests use the same sysroot with
+GNU linker and a writable temporary directory. Historical cargo-unavailable
+attempts above remain historical, not the result of this implementation run.
+
+| Check | Actual result |
+|---|---|
+| `cargo test --workspace --locked` | **PASS**, exit0:363 tests across19 suite results; no failed/ignored tests. Includes domain19 conformance +10 authority integration +80 contracts +9 identity +18 numeric +27 wire; market-data32 unit +10 fixtures +7 architecture +13 input-safety +65 supervisor integration; real CLI15; recording1 unit +21 owner +26 WAL;3 domain +3 existing market-data +4 recording compile-fail doctests. |
+| Direct pinned `rustfmt --edition 2024 --check` on changed crate roots/tests and domain contract root | **PASS**, exit0; recursively checks changed modules/support cases. Canonical local `cargo fmt --all -- --check` wrapper is **NOT_RUN** after its environment lookup failure (exit101); the canonical command is required in fresh CI. |
+| Pinned `clippy-driver` as `RUSTC_WORKSPACE_WRAPPER`, `cargo check --workspace --all-targets --locked`, `-D warnings` | **PASS**, exit0 across the complete workspace. Canonical local `cargo clippy --workspace --all-targets --locked -- -D warnings` wrapper is **NOT_RUN** after the same environment failure (exit101); fresh CI runs it canonically. |
+| H1/Q2 fault loops | **PASS** in current supervisor suite: all63 H1 variants (9 immediate,9 Pong,36 four barrier variants,9 neighbor) and12 Q2 storage-fault variants. D-1/D/D+1/FIFO/obsolete owner and checked near-MAX scenarios also run. |
+| R1/R2/R3, guard/finalization, crash/WAL, negative/compile-fail | **PASS** in the mapped worker suites; direct Failed marker, cross-scope Close and foreign/duplicate/after-consumption proof regressions included. No independent acceptance is claimed. |
+| AdmissionOrder MAX | Actual private domain counter is set to MAX and rejects reservation without wrap/new W. Source tests inject only that negative reservation outcome against a genuine accepted owner for Raw/Pong/Connected/Disconnected/NoSuccessor, then verify exact failure/reclaim/drain/neighbor service; no public test hook or fabricated successful gate. Separate open/PostCut F2 case proves zero reservation, while PreCut cannot coalesce. |
+| Static/byte audit | No outside-allowlist change; untouched blobs match baseline; earlier handoff is an exact prefix; accepted dependency/architecture tests pass; all31 normative rows and31 worker mappings retained; UTF-8/newline/links/trailing whitespace checked. Remote commit compare/tree and fresh exact-head CI are reported in PR/Issue after save. |
+
+Early integration failures were corrected before these final passes: source-only
+fixture cleanup violated the unchanged architecture scanner; a Close test compared
+modeled alias bytes as though they were unchanged known backing; the immutable
+Durable marker fixture needed its proper watermark kind. The negative fault,
+ledger and byte expectations were preserved. Worker audit additionally found and
+fixed cross-scope W/Close reuse, direct Failed cut synchronization and received
+AdmissionOrder failure accounting. No out-of-scope test guard was weakened.
+
+### Allocation/item evidence
+
+Std-only thread-local allocator instrumentation measures requested Layout bytes,
+not RSS/usable allocator overhead or a network adapter. Known Vec/Rc/path/backend
+backing and explicit modeled inline charges are distinct; private BTree/decoder/
+encoder allocations are covered by derived ceilings. Representative final
+executed `--nocapture` traces:
+
+| Boundary / profile | Peak requested bytes | Computed full profile ceiling | Repeat / teardown evidence |
+|---|---:|---:|---|
+| Concrete owner/sink/supervisor N1/M5/P4096 | 55,882 | 10,255,419 |100 failed-ingress/reclaim cycles keep live bytes/W flat; final tracked live0. |
+| Concrete owner/sink/supervisor N2/M9/P4096 | 59,328 | 10,408,870 |Same flat/released0 assertions; held result/command and dense nested decode included. |
+| Owner/sink cap5 | 29,576 | 8,574,170 |Constructed/terminal live21,206;100 reclaim cycles flat; final live0. |
+| Owner/sink cap9 | 31,303 | 8,709,172 |Constructed/terminal live22,291;100 reclaim cycles flat; final live0. |
+
+Numbers are observations of these bounded offline traces, not a throughput,
+RSS or exhaustive platform benchmark. Tiny borrowed slices from an8MiB-capacity
+caller Vec retain only the copied slice capacity. W+N+1<=M, exact raw capacities,
+PreCut/PostCut counts/frontiers and reclaim/Drop/error transfers are asserted
+throughout. The static ceilings include the maximum allowed profile/workspace;
+these small-cap probes do not pretend to measure every maximum-sized input.
+
+### Immutable delivery and next gate
+
+The commit is a single child of the approved proposal. Its exact SHA,17-path
+compare, preserved base/Draft state and fresh CI results are attached to the
+existing PR/Issue metadata after the expected-head save. The Rust source snapshot
+checked locally must match that immutable tree; any later code change requires
+fresh exact-head verification.
+
+**Next gate: full independent QA of the new immutable implementation head**,
+including all31 ADR acceptance families, Q1/Q2, all63 H1 faults, H2 and prior
+F1–F4/N1–N3/decoder/continuity/WAL/CLI regressions. Worker tests and CI do not
+constitute independent QA, Integrator/task acceptance or owner/merge readiness.
+PR #34 remains **Draft**; merge and auto-merge are not authorized. External
+inventory and canonical application/transport/publication producers remain
+deferred. No old QA or docs-only CI result is transferred to this new code head.

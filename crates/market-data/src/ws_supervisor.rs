@@ -1,14 +1,16 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
+use domain::capture_session as session;
+pub use domain::capture_session::{PersistError, PersistenceReceipt};
 use domain::event::{ActiveContext, InputContext};
 use domain::identity::{
     BookEpoch, BookId, CaptureAttemptNo, Channel, ConnectionEpoch, ConnectionId, EpochTag,
     IdentityError, LocalUnixNs, MarketKind, MonotonicNs, RecordNo, SegmentNo, StreamBinding,
     StreamId, SubscriptionEpoch,
 };
-use domain::policy::RecordingGate;
+use domain::policy::{RecordingGate, WatermarkKind};
 use domain::record::{
     Control, ControlRecord, EpochChange, Gap, GapScope, GapTarget, RawInput, Reason, Record,
     RecordFrame, Transport, WireContext,
@@ -20,8 +22,81 @@ use crate::{
     decode_message_with_limits,
 };
 
+/// Sorted fixed registry with observable backing capacity and no growth.
+struct FixedRegistry<K, V> {
+    entries: Vec<(K, V)>,
+}
+impl<K: Ord, V> FixedRegistry<K, V> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::with_capacity(MAX_CONFIGURED_STREAMS),
+        }
+    }
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+    fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+    fn get(&self, key: &K) -> Option<&V> {
+        self.entries
+            .iter()
+            .find(|(stored, _)| stored == key)
+            .map(|(_, value)| value)
+    }
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.entries
+            .iter_mut()
+            .find(|(stored, _)| stored == key)
+            .map(|(_, value)| value)
+    }
+    fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if let Some(prior) = self.get_mut(&key) {
+            return Some(std::mem::replace(prior, value));
+        }
+        assert!(
+            self.entries.len() < MAX_CONFIGURED_STREAMS,
+            "fixed registry capacity"
+        );
+        self.entries.push((key, value));
+        self.entries
+            .sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        None
+    }
+    fn remove(&mut self, key: &K) -> Option<V> {
+        self.entries
+            .iter()
+            .position(|(stored, _)| stored == key)
+            .map(|index| self.entries.remove(index).1)
+    }
+    fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.iter().map(|(key, _)| key)
+    }
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, value)| value)
+    }
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.entries.iter_mut().map(|(_, value)| value)
+    }
+    fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries.iter_mut().map(|(key, value)| (&*key, value))
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+impl<K: Ord, V> std::ops::Index<&K> for FixedRegistry<K, V> {
+    type Output = V;
+    fn index(&self, key: &K) -> &Self::Output {
+        self.get(key).expect("configured registry key")
+    }
+}
+
 pub const BITGET_PUBLIC_WS_ENDPOINT: &str = "wss://ws.bitget.com/v3/ws/public";
-pub const SUPERVISOR_POLICY_VERSION: u32 = 1;
+pub const SUPERVISOR_POLICY_VERSION: u32 = 2;
 pub const MAX_CONFIGURED_STREAMS: usize = 4;
 pub const HEARTBEAT_INTERVAL_NS: u64 = 30_000_000_000;
 pub const PONG_TIMEOUT_NS_V1: u64 = 15_000_000_000;
@@ -33,7 +108,6 @@ const HARD_MAX_RAW_BYTES_PER_STREAM: usize = 1_000_000;
 const HARD_MAX_RAW_MESSAGE_BYTES: usize = 1_000_000;
 const HARD_MAX_TOTAL_ITEMS: usize = 256;
 const CONTROL_RESERVE_PER_STREAM: usize = 4;
-const LOSS_RESERVE_PER_STREAM: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReceiveStamp {
@@ -113,34 +187,7 @@ pub struct WsSupervisorConfig {
     pub streams: Vec<StreamBinding>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PersistenceReceipt {
-    pub through: RecordNo,
-    pub achieved: RecordingGate,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PersistError {
-    message: String,
-}
-
-impl PersistError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for PersistError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Error for PersistError {}
-
-pub trait RecordSink {
+trait RecordSink {
     fn persist(
         &mut self,
         frame: &RecordFrame,
@@ -179,6 +226,7 @@ pub enum SupervisorError {
         achieved: RecordingGate,
     },
     Halted,
+    Authority(session::AuthorityError),
 }
 
 impl From<IdentityError> for SupervisorError {
@@ -214,6 +262,10 @@ pub struct StreamSupervisorSnapshot {
     pub transport: Transport,
     pub subscription: SubscriptionState,
     pub capture_attempt_frontier: u64,
+    pub accounted_attempt_frontier: u64,
+    pub capture_terminated: bool,
+    pub session_disposition: Option<session::SessionDisposition>,
+    pub first_failure: Option<session::TerminalFailure>,
     pub queued_raw_frames: usize,
     pub queued_raw_bytes: usize,
     pub last_market_record: Option<RecordNo>,
@@ -299,7 +351,7 @@ pub enum SupervisorEvent {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct DrainResult {
+struct CoreDrainResult {
     pub records: Vec<RecordNo>,
     pub commands: Vec<TransportCommand>,
     pub events: Vec<SupervisorEvent>,
@@ -325,6 +377,8 @@ struct StreamRuntime {
     subscription: SubscriptionState,
     continuity: ContinuityClassifier,
     capture_attempt_frontier: u64,
+    accounted_attempt_frontier: u64,
+    capture_terminated: bool,
     queued_raw_frames: usize,
     queued_raw_bytes: usize,
     reconnect_failures: u32,
@@ -336,6 +390,8 @@ struct StreamRuntime {
     timer_frontier: u64,
     last_market_record: Option<RecordNo>,
     pending_disconnect: Option<PendingDisconnect>,
+    close_settled: bool,
+    terminal_down_epoch: Option<ConnectionEpoch>,
 }
 
 impl StreamRuntime {
@@ -347,6 +403,10 @@ impl StreamRuntime {
             transport: self.transport,
             subscription: self.subscription,
             capture_attempt_frontier: self.capture_attempt_frontier,
+            accounted_attempt_frontier: self.accounted_attempt_frontier,
+            capture_terminated: self.capture_terminated,
+            session_disposition: None,
+            first_failure: None,
             queued_raw_frames: self.queued_raw_frames,
             queued_raw_bytes: self.queued_raw_bytes,
             last_market_record: self.last_market_record,
@@ -363,6 +423,7 @@ impl StreamRuntime {
     }
 }
 
+#[derive(Clone)]
 enum Ingress {
     Connected {
         stream: StreamId,
@@ -469,7 +530,7 @@ struct GapLoss {
     loss_count: Option<u64>,
 }
 
-pub struct PublicWsSupervisor {
+struct SupervisorCore {
     active_context: ActiveContext,
     recording_gate: RecordingGate,
     segment_no: SegmentNo,
@@ -477,14 +538,18 @@ pub struct PublicWsSupervisor {
     queue_policy: QueuePolicy,
     raw_item_limit: usize,
     queued_raw_items: usize,
-    streams: BTreeMap<StreamId, StreamRuntime>,
-    by_connection: BTreeMap<ConnectionId, StreamId>,
+    work_limit: usize,
+    external_work: usize,
+    cut_remaining: Option<usize>,
+    marker_settled: bool,
+    streams: FixedRegistry<StreamId, StreamRuntime>,
+    by_connection: FixedRegistry<ConnectionId, StreamId>,
     queue: VecDeque<Ingress>,
     started: bool,
     halted: bool,
 }
 
-impl PublicWsSupervisor {
+impl SupervisorCore {
     pub fn new(config: WsSupervisorConfig) -> Result<Self, SupervisorError> {
         if config.streams.is_empty() || config.streams.len() > MAX_CONFIGURED_STREAMS {
             return Err(SupervisorError::InvalidConfiguration("streams"));
@@ -506,8 +571,8 @@ impl PublicWsSupervisor {
         let mut connection_ids = BTreeSet::new();
         let mut book_ids = BTreeSet::new();
         let mut registered = Vec::with_capacity(config.streams.len());
-        let mut streams = BTreeMap::new();
-        let mut by_connection = BTreeMap::new();
+        let mut streams = FixedRegistry::new();
+        let mut by_connection = FixedRegistry::new();
 
         for binding in config.streams {
             binding.validate_registration(&registered)?;
@@ -544,6 +609,8 @@ impl PublicWsSupervisor {
                     subscription: SubscriptionState::Disconnected,
                     continuity: ContinuityClassifier::new(),
                     capture_attempt_frontier: 0,
+                    accounted_attempt_frontier: 0,
+                    capture_terminated: false,
                     queued_raw_frames: 0,
                     queued_raw_bytes: 0,
                     reconnect_failures: 0,
@@ -555,6 +622,8 @@ impl PublicWsSupervisor {
                     timer_frontier: 0,
                     last_market_record: None,
                     pending_disconnect: None,
+                    close_settled: false,
+                    terminal_down_epoch: None,
                 },
             );
         }
@@ -567,9 +636,13 @@ impl PublicWsSupervisor {
             queue_policy,
             raw_item_limit,
             queued_raw_items: 0,
+            work_limit: queue_policy.max_total_items - streams.len() - 1,
+            external_work: 0,
+            cut_remaining: None,
+            marker_settled: false,
             streams,
             by_connection,
-            queue: VecDeque::new(),
+            queue: VecDeque::with_capacity(queue_policy.max_total_items - stream_ids.len() - 1),
             started: false,
             halted: false,
         })
@@ -672,8 +745,9 @@ impl PublicWsSupervisor {
         connection: ConnectionId,
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
-        bytes: Vec<u8>,
+        bytes: impl AsRef<[u8]>,
     ) -> Result<(), SupervisorError> {
+        let bytes = bytes.as_ref();
         self.ensure_started()?;
         let stream = self.stream_for_connection(connection)?;
 
@@ -704,7 +778,7 @@ impl PublicWsSupervisor {
                 .tag_for_observed_connection(epoch)
                 .ok_or(SupervisorError::UnknownConnectionEpoch { connection, epoch })?;
             let Some(attempt_value) = runtime.capture_attempt_frontier.checked_add(1) else {
-                return self.halt_with(SupervisorError::CounterExhausted("CaptureAttemptNo"));
+                return Err(SupervisorError::CounterExhausted("CaptureAttemptNo"));
             };
             let attempt = CaptureAttemptNo::new(attempt_value)?;
             let next_bytes = runtime.queued_raw_bytes.checked_add(bytes.len());
@@ -716,20 +790,8 @@ impl PublicWsSupervisor {
             (tag, current, attempt, per_stream_room)
         };
 
-        let loss_reserve = self
-            .streams
-            .len()
-            .checked_mul(LOSS_RESERVE_PER_STREAM)
-            .ok_or(SupervisorError::InvalidConfiguration(
-                "loss reserve overflow",
-            ))?;
-        let loss_safe_limit = self
-            .queue_policy
-            .max_total_items
-            .checked_sub(loss_reserve)
-            .ok_or(SupervisorError::InvalidConfiguration("max_total_items"))?;
-        let global_raw_room =
-            self.queued_raw_items < self.raw_item_limit && self.queue.len() < loss_safe_limit;
+        let global_raw_room = self.queued_raw_items < self.raw_item_limit
+            && self.queue.len() + self.external_work < self.work_limit;
 
         if global_raw_room && per_stream_room {
             let runtime = self
@@ -747,7 +809,7 @@ impl PublicWsSupervisor {
                 tag,
                 attempt,
                 stamp,
-                bytes,
+                bytes: bytes.to_vec(),
             });
             return Ok(());
         }
@@ -775,14 +837,15 @@ impl PublicWsSupervisor {
 
     pub fn queue_tick(&mut self, stamp: ReceiveStamp) -> Result<(), SupervisorError> {
         self.ensure_started()?;
-        let stream_ids: Vec<StreamId> = self.streams.keys().copied().collect();
-        for stream in stream_ids {
+        let stream_ids: [Option<StreamId>; MAX_CONFIGURED_STREAMS] =
+            std::array::from_fn(|index| self.streams.keys().nth(index).copied());
+        for stream in stream_ids.into_iter().flatten() {
             let candidate = {
                 let runtime = self
                     .streams
                     .get(&stream)
                     .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
-                if runtime.transport != Transport::Up {
+                if runtime.capture_terminated || runtime.transport != Transport::Up {
                     None
                 } else if runtime
                     .pong_deadline_ns
@@ -859,11 +922,13 @@ impl PublicWsSupervisor {
     pub fn drain_one(
         &mut self,
         sink: &mut impl RecordSink,
-    ) -> Result<Option<DrainResult>, SupervisorError> {
+    ) -> Result<Option<CoreDrainResult>, SupervisorError> {
         self.ensure_started()?;
 
-        let mut ready = DrainResult::default();
-        self.finish_ready_disconnects(sink, &mut ready)?;
+        let mut ready = CoreDrainResult::default();
+        if self.cut_remaining.is_none() || self.marker_settled {
+            self.finish_ready_disconnects(sink, &mut ready)?;
+        }
         if !ready.records.is_empty() || !ready.commands.is_empty() || !ready.events.is_empty() {
             return Ok(Some(ready));
         }
@@ -871,6 +936,9 @@ impl PublicWsSupervisor {
         let Some(ingress) = self.queue.pop_front() else {
             return Ok(None);
         };
+        if let Some(remaining) = self.cut_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(1);
+        }
         let result = match ingress {
             Ingress::Connected {
                 stream,
@@ -950,7 +1018,7 @@ impl PublicWsSupervisor {
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let (connection, symbol, current_epoch, terminal) = {
             let runtime =
                 self.streams
@@ -968,19 +1036,41 @@ impl PublicWsSupervisor {
                     .as_str()
                     .to_owned(),
                 runtime.binding.tag.connection,
-                runtime
-                    .pending_disconnect
-                    .is_some_and(|pending| pending.epoch == epoch),
+                runtime.terminal_down_epoch == Some(epoch),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
         if terminal {
-            return Ok(DrainResult {
+            return Ok(CoreDrainResult {
                 records: Vec::new(),
                 commands: Vec::new(),
                 events: vec![SupervisorEvent::ObsoleteControl { stream, epoch }],
+            });
+        }
+
+        if self.streams[&stream].capture_terminated {
+            let record = self.persist_record(
+                stamp,
+                Record::Control(ControlRecord {
+                    context: stamp.wire_context(self.active_context),
+                    value: Control::Transport {
+                        connection,
+                        epoch,
+                        value: Transport::Up,
+                    },
+                }),
+                sink,
+            )?;
+            return Ok(CoreDrainResult {
+                records: vec![record],
+                commands: Vec::new(),
+                events: vec![SupervisorEvent::TransportRecorded {
+                    stream,
+                    record,
+                    value: Transport::Up,
+                }],
             });
         }
 
@@ -1015,7 +1105,7 @@ impl PublicWsSupervisor {
         runtime.ping_timer_owner = None;
         runtime.pong_timeout_owner = None;
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![record],
             commands: vec![TransportCommand::SendText {
                 connection,
@@ -1036,7 +1126,7 @@ impl PublicWsSupervisor {
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         self.begin_disconnect(stream, epoch, stamp, sink)
     }
 
@@ -1046,7 +1136,7 @@ impl PublicWsSupervisor {
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let (connection, current_epoch, terminal) = {
             let runtime = self
                 .streams
@@ -1055,19 +1145,44 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
-                runtime
-                    .pending_disconnect
-                    .is_some_and(|pending| pending.epoch == epoch),
+                runtime.terminal_down_epoch == Some(epoch),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
         if terminal {
-            return Ok(DrainResult {
+            return Ok(CoreDrainResult {
                 records: Vec::new(),
                 commands: Vec::new(),
                 events: vec![SupervisorEvent::ObsoleteControl { stream, epoch }],
+            });
+        }
+
+        if self.streams[&stream].capture_terminated {
+            let record = self.persist_record(
+                stamp,
+                Record::Control(ControlRecord {
+                    context: stamp.wire_context(self.active_context),
+                    value: Control::Transport {
+                        connection,
+                        epoch,
+                        value: Transport::Up,
+                    },
+                }),
+                sink,
+            )?;
+            return Ok(CoreDrainResult {
+                records: vec![record],
+                commands: Vec::new(),
+                events: vec![
+                    SupervisorEvent::TransportRecorded {
+                        stream,
+                        record,
+                        value: Transport::Up,
+                    },
+                    SupervisorEvent::PongRecorded { stream, record },
+                ],
             });
         }
 
@@ -1099,7 +1214,7 @@ impl PublicWsSupervisor {
         runtime.ping_timer_owner = None;
         runtime.pong_timeout_owner = None;
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![record],
             commands: Vec::new(),
             events: vec![
@@ -1121,7 +1236,7 @@ impl PublicWsSupervisor {
         timer_id: u64,
         deadline_ns: u64,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let (connection, current_epoch, active) = {
             let runtime =
                 self.streams
@@ -1132,7 +1247,8 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
-                runtime.transport == Transport::Up
+                !runtime.capture_terminated
+                    && runtime.transport == Transport::Up
                     && runtime.pending_disconnect.is_none()
                     && runtime.pong_deadline_ns.is_none()
                     && runtime.next_ping_due_ns == Some(deadline_ns)
@@ -1178,7 +1294,7 @@ impl PublicWsSupervisor {
         timer_id: u64,
         deadline_ns: u64,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let (connection, current_epoch, active) = {
             let runtime =
                 self.streams
@@ -1189,7 +1305,8 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
-                runtime.transport == Transport::Up
+                !runtime.capture_terminated
+                    && runtime.transport == Transport::Up
                     && runtime.pending_disconnect.is_none()
                     && runtime.pong_deadline_ns == Some(deadline_ns)
                     && runtime.pong_timeout_owner == Some(timer_id),
@@ -1221,7 +1338,7 @@ impl PublicWsSupervisor {
         timer_id: u64,
         deadline_ns: u64,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let record = self.persist_record(
             stamp,
             Record::Control(ControlRecord {
@@ -1234,7 +1351,7 @@ impl PublicWsSupervisor {
             }),
             sink,
         )?;
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![record],
             commands: Vec::new(),
             events: vec![SupervisorEvent::HeartbeatTimerRecorded {
@@ -1252,7 +1369,7 @@ impl PublicWsSupervisor {
         loss: GapLoss,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let first_attempt =
             loss.range
                 .map(|(first, _)| first)
@@ -1278,7 +1395,7 @@ impl PublicWsSupervisor {
             runtime.last_market_record = None;
         }
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![record],
             commands: Vec::new(),
             events: vec![SupervisorEvent::QueueGapRecorded {
@@ -1296,7 +1413,7 @@ impl PublicWsSupervisor {
         attempt: CaptureAttemptNo,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let raw_record = self.persist_record(
             stamp,
             Record::RawInput(RawInput {
@@ -1310,7 +1427,7 @@ impl PublicWsSupervisor {
         )?;
         let gap_record = self.persist_gap(stream, tag, stamp, Reason::Unknown, None, sink)?;
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![raw_record, gap_record],
             commands: Vec::new(),
             events: vec![SupervisorEvent::ObsoleteRawRecorded {
@@ -1329,7 +1446,7 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         bytes: Vec<u8>,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let raw_record = self.persist_record(
             stamp,
             Record::RawInput(RawInput {
@@ -1348,8 +1465,8 @@ impl PublicWsSupervisor {
             .ok_or(SupervisorError::InvalidConfiguration("missing raw stream"))?
             .binding
             .tag;
-        if tag != current_tag {
-            return Ok(DrainResult {
+        if tag != current_tag || self.streams[&stream].capture_terminated {
+            return Ok(CoreDrainResult {
                 records: vec![raw_record],
                 commands: Vec::new(),
                 events: vec![SupervisorEvent::ObsoleteRawRecorded {
@@ -1366,7 +1483,7 @@ impl PublicWsSupervisor {
             .pending_disconnect
             .is_some_and(|pending| pending.epoch == tag.connection);
         if terminal {
-            return Ok(DrainResult {
+            return Ok(CoreDrainResult {
                 records: vec![raw_record],
                 commands: Vec::new(),
                 events: vec![SupervisorEvent::ObsoleteRawRecorded {
@@ -1404,7 +1521,7 @@ impl PublicWsSupervisor {
                 }
                 runtime.subscription = SubscriptionState::AwaitingSnapshot;
                 runtime.continuity.clear_for_new_generation();
-                Ok(DrainResult {
+                Ok(CoreDrainResult {
                     records: vec![raw_record],
                     commands: Vec::new(),
                     events: vec![SupervisorEvent::SubscriptionAccepted {
@@ -1453,7 +1570,7 @@ impl PublicWsSupervisor {
                         .ok_or(SupervisorError::InvalidConfiguration("missing raw stream"))?;
                     runtime.continuity.observe(&frame)
                 };
-                let mut result = DrainResult {
+                let mut result = CoreDrainResult {
                     records: vec![raw_record],
                     commands: Vec::new(),
                     events: vec![SupervisorEvent::RawBookRecorded {
@@ -1520,7 +1637,7 @@ impl PublicWsSupervisor {
         raw_record: RecordNo,
         reason: Reason,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let tag = self
             .streams
             .get(&stream)
@@ -1539,7 +1656,7 @@ impl PublicWsSupervisor {
         runtime.subscription = SubscriptionState::Degraded;
         runtime.continuity.clear_for_new_generation();
         runtime.last_market_record = None;
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![raw_record, gap_record],
             commands: Vec::new(),
             events: vec![SupervisorEvent::SourceGapRecorded {
@@ -1556,7 +1673,7 @@ impl PublicWsSupervisor {
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let plan = self.preflight_disconnect(stream, epoch, stamp, 0)?;
         self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)
     }
@@ -1589,12 +1706,14 @@ impl PublicWsSupervisor {
                     .book_id
                     .ok_or(SupervisorError::InvalidConfiguration("missing book id"))?,
                 runtime.reconnect_failures,
-                runtime
-                    .pending_disconnect
-                    .is_some_and(|pending| pending.epoch == epoch),
+                runtime.terminal_down_epoch == Some(epoch),
             )
         };
 
+        if self.streams[&stream].capture_terminated {
+            self.ensure_record_capacity(records_before_down + 1)?;
+            return Ok(None);
+        }
         let required_records = records_before_down + if duplicate_pending { 1 } else { 4 };
         self.ensure_record_capacity(required_records)?;
         if duplicate_pending {
@@ -1645,7 +1764,7 @@ impl PublicWsSupervisor {
         stamp: ReceiveStamp,
         plan: Option<PendingDisconnect>,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let connection = self
             .streams
             .get(&stream)
@@ -1668,8 +1787,12 @@ impl PublicWsSupervisor {
             sink,
         )?;
 
+        self.streams
+            .get_mut(&stream)
+            .expect("recorded Down scope")
+            .terminal_down_epoch = Some(epoch);
         let Some(plan) = plan else {
-            return Ok(DrainResult {
+            return Ok(CoreDrainResult {
                 records: vec![down_record],
                 commands: Vec::new(),
                 events: vec![SupervisorEvent::TransportRecorded {
@@ -1695,8 +1818,9 @@ impl PublicWsSupervisor {
         runtime.pong_timeout_owner = None;
         runtime.last_market_record = None;
         runtime.pending_disconnect = Some(plan);
+        runtime.close_settled = false;
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![down_record],
             commands: vec![TransportCommand::Close { connection, epoch }],
             events: vec![SupervisorEvent::TransportRecorded {
@@ -1714,17 +1838,19 @@ impl PublicWsSupervisor {
         let Some(pending) = runtime.pending_disconnect else {
             return false;
         };
-        !self
-            .queue
-            .iter()
-            .any(|ingress| ingress.belongs_to_connection_epoch(stream, pending.epoch))
+        runtime.close_settled
+            && !runtime.capture_terminated
+            && !self
+                .queue
+                .iter()
+                .any(|ingress| ingress.belongs_to_connection_epoch(stream, pending.epoch))
     }
 
     fn finish_ready_disconnect_for(
         &mut self,
         stream: StreamId,
         sink: &mut impl RecordSink,
-        result: &mut DrainResult,
+        result: &mut CoreDrainResult,
     ) -> Result<(), SupervisorError> {
         if !self.disconnect_ready(stream) {
             return Ok(());
@@ -1739,7 +1865,7 @@ impl PublicWsSupervisor {
     fn finish_ready_disconnects(
         &mut self,
         sink: &mut impl RecordSink,
-        result: &mut DrainResult,
+        result: &mut CoreDrainResult,
     ) -> Result<(), SupervisorError> {
         let ready = self
             .streams
@@ -1756,7 +1882,7 @@ impl PublicWsSupervisor {
         &mut self,
         stream: StreamId,
         sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
+    ) -> Result<CoreDrainResult, SupervisorError> {
         let (connection, old_tag, pending) = {
             let runtime =
                 self.streams
@@ -1843,6 +1969,7 @@ impl PublicWsSupervisor {
                         "missing disconnected stream",
                     ))?;
             runtime.previous_tag = Some(old_tag);
+            runtime.terminal_down_epoch = None;
             runtime.binding.tag.connection = pending.next_connection;
             runtime.binding.tag.subscription = pending.next_subscription;
             runtime.binding.tag.book = Some(pending.next_book);
@@ -1860,7 +1987,7 @@ impl PublicWsSupervisor {
             runtime.binding.tag
         };
 
-        Ok(DrainResult {
+        Ok(CoreDrainResult {
             records: vec![connection_record, subscription_record, book_record],
             commands: vec![TransportCommand::ReconnectAfter {
                 connection,
@@ -1919,6 +2046,16 @@ impl PublicWsSupervisor {
             segment_no: self.segment_no,
             value,
         };
+        let accounted = match &frame.value {
+            Record::RawInput(raw) => Some((raw.stream, raw.attempt.get())),
+            Record::Gap(gap) => match &gap.scope {
+                GapScope::ExplicitTargets(targets) if targets.len() == 1 => targets[0]
+                    .range
+                    .map(|(_, last)| (targets[0].stream, last.get())),
+                _ => None,
+            },
+            _ => None,
+        };
         let receipt = match sink.persist(&frame, self.recording_gate) {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1933,12 +2070,17 @@ impl PublicWsSupervisor {
                 actual: receipt.through,
             });
         }
-        if !receipt.achieved.covers(self.recording_gate) {
+        if !receipt.achieved_gate.covers(self.recording_gate) {
             self.halted = true;
             return Err(SupervisorError::PersistenceGateTooWeak {
                 required: self.recording_gate,
-                achieved: receipt.achieved,
+                achieved: receipt.achieved_gate,
             });
+        }
+        if let Some((stream, frontier)) = accounted
+            && let Some(runtime) = self.streams.get_mut(&stream)
+        {
+            runtime.accounted_attempt_frontier = frontier;
         }
         self.next_record_no = Some(next_record_no);
         Ok(record_no)
@@ -1958,13 +2100,18 @@ impl PublicWsSupervisor {
         attempt: CaptureAttemptNo,
         stamp: ReceiveStamp,
     ) -> Result<(), SupervisorError> {
-        if let Some(Ingress::QueueGap {
-            stream: queued_stream,
-            tag: queued_tag,
-            last_attempt,
-            loss_count,
-            ..
-        }) = self.queue.back_mut()
+        let tail_is_post_cut = self.cut_remaining.is_none()
+            || self
+                .cut_remaining
+                .is_some_and(|remaining| self.queue.len() > remaining);
+        if tail_is_post_cut
+            && let Some(Ingress::QueueGap {
+                stream: queued_stream,
+                tag: queued_tag,
+                last_attempt,
+                loss_count,
+                ..
+            }) = self.queue.back_mut()
             && *queued_stream == stream
             && *queued_tag == tag
             && last_attempt.get().checked_add(1) == Some(attempt.get())
@@ -1989,32 +2136,63 @@ impl PublicWsSupervisor {
         )
     }
 
+    /// An existing counted tail may represent this exact loss without a new
+    /// admission owner. This preflight reads bytes only for the Pong delimiter;
+    /// it does not decode or retain caller payload.
+    fn received_loss_can_coalesce(
+        &self,
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+        bytes: &[u8],
+    ) -> bool {
+        if bytes == b"pong" {
+            return false;
+        }
+        let runtime = &self.streams[&stream];
+        let Some((tag, current)) = runtime.tag_for_observed_connection(epoch) else {
+            return false;
+        };
+        let Some(attempt) = runtime.capture_attempt_frontier.checked_add(1) else {
+            return false;
+        };
+        let per_stream_room = runtime.queued_raw_frames
+            < self.queue_policy.max_raw_frames_per_stream
+            && runtime
+                .queued_raw_bytes
+                .checked_add(bytes.len())
+                .is_some_and(|value| value <= self.queue_policy.max_raw_bytes_per_stream)
+            && bytes.len() <= self.queue_policy.max_raw_message_bytes;
+        let global_room = self.queued_raw_items < self.raw_item_limit
+            && self.queue.len() + self.external_work < self.work_limit;
+        let same_cut = self.cut_remaining.is_none()
+            || self
+                .cut_remaining
+                .is_some_and(|remaining| self.queue.len() > remaining);
+        current
+            && !(per_stream_room && global_room)
+            && same_cut
+            && matches!(self.queue.back(), Some(Ingress::QueueGap {
+                stream: queued_stream,
+                tag: queued_tag,
+                last_attempt,
+                loss_count,
+                ..
+            }) if *queued_stream == stream
+                && *queued_tag == tag
+                && last_attempt.get().checked_add(1) == Some(attempt)
+                && loss_count.checked_add(1).is_some())
+    }
+
     fn push_loss_ingress(
         &mut self,
         stream: StreamId,
         ingress: Ingress,
     ) -> Result<(), SupervisorError> {
-        if self.queue.len() >= self.queue_policy.max_total_items {
-            return Err(SupervisorError::QueueExhausted { stream });
-        }
-        self.queue.push_back(ingress);
-        Ok(())
+        self.push_ingress(stream, ingress)
     }
 
     fn push_ingress(&mut self, stream: StreamId, ingress: Ingress) -> Result<(), SupervisorError> {
-        let loss_reserve = self
-            .streams
-            .len()
-            .checked_mul(LOSS_RESERVE_PER_STREAM)
-            .ok_or(SupervisorError::InvalidConfiguration(
-                "loss reserve overflow",
-            ))?;
-        let control_limit = self
-            .queue_policy
-            .max_total_items
-            .checked_sub(loss_reserve)
-            .ok_or(SupervisorError::InvalidConfiguration("max_total_items"))?;
-        if self.queue.len() >= control_limit {
+        if self.queue.len() + self.external_work >= self.work_limit {
             return Err(SupervisorError::QueueExhausted { stream });
         }
         self.queue.push_back(ingress);
@@ -2059,6 +2237,1275 @@ impl PublicWsSupervisor {
             Err(SupervisorError::NotStarted)
         }
     }
+}
+
+/// Fixed-capacity output storage. Its backing cannot grow while a result
+/// retains a counted work owner. Conversion transfers data to caller storage.
+pub struct BoundedList<T, const N: usize> {
+    entries: [Option<T>; N],
+    len: usize,
+}
+impl<T, const N: usize> Default for BoundedList<T, N> {
+    fn default() -> Self {
+        Self {
+            entries: std::array::from_fn(|_| None),
+            len: 0,
+        }
+    }
+}
+impl<T, const N: usize> BoundedList<T, N> {
+    fn from_vec(values: Vec<T>) -> Self {
+        assert!(values.len() <= N, "bounded supervisor output plan");
+        let mut result = Self::default();
+        for value in values {
+            result.entries[result.len] = Some(value);
+            result.len += 1;
+        }
+        result
+    }
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.entries.iter().flatten()
+    }
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.entries.get(index).and_then(Option::as_ref)
+    }
+    pub fn into_vec(self) -> Vec<T> {
+        self.into_iter().collect()
+    }
+}
+impl<T, const N: usize> IntoIterator for BoundedList<T, N> {
+    type Item = T;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<T>, N>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter().flatten()
+    }
+}
+impl<T: fmt::Debug, const N: usize> fmt::Debug for BoundedList<T, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+impl<T, const N: usize> std::ops::Index<usize> for BoundedList<T, N> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        self.get(index).expect("bounded list index")
+    }
+}
+
+/// Admission is an observation, never a reusable publication permit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionOutcome {
+    Admitted,
+    CoalescedLoss,
+    AlreadyTerminated,
+}
+
+pub struct AdmissionReport {
+    pub session_disposition: domain::capture_session::SessionDisposition,
+    pub scope_disposition: Option<domain::capture_session::ScopeDisposition>,
+    pub outcome: Result<AdmissionOutcome, SupervisorError>,
+    pub commands: BoundedList<domain::capture_session::CommandLease, MAX_CONFIGURED_STREAMS>,
+    pub failure: Option<domain::capture_session::TerminalFailure>,
+    pub close_owner: Option<domain::capture_session::CloseOwnerRef>,
+    pub admitted_scopes: [Option<StreamId>; MAX_CONFIGURED_STREAMS],
+    pub cancelled_plan: bool,
+}
+
+/// The private work token retains the same counted owner while a caller holds
+/// its observation. Commands are affine authority-bound leases.
+pub struct DrainResult {
+    pub records: BoundedList<RecordNo, 3>,
+    pub commands: BoundedList<domain::capture_session::CommandLease, 1>,
+    pub events: BoundedList<SupervisorEvent, 4>,
+    _owner: Option<domain::capture_session::WorkOwner>,
+}
+
+pub struct DrainReport {
+    pub session_disposition: domain::capture_session::SessionDisposition,
+    pub outcome: Result<Option<DrainResult>, SupervisorError>,
+}
+
+/// Sole canonical public supervisor. The protocol core and its interchangeable
+/// sink adapter are private; accepted session authority authenticates every
+/// mutation and every persist operation.
+pub struct PublicWsSupervisor {
+    core: SupervisorCore,
+    handle: domain::capture_session::SupervisorSessionHandle,
+    queued_owners: VecDeque<domain::capture_session::WorkOwner>,
+    pending_owners: FixedRegistry<StreamId, domain::capture_session::WorkOwner>,
+}
+
+impl PublicWsSupervisor {
+    pub fn new(
+        config: WsSupervisorConfig,
+        handle: session::SupervisorSessionHandle,
+    ) -> Result<Self, SupervisorError> {
+        let status = handle.authority().status();
+        if status.failed {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::ArchiveFailed,
+            ));
+        }
+        if status.storage_stopped.is_some() {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::StorageStopped,
+            ));
+        }
+        if status.lifecycle != session::SessionLifecycle::Open {
+            return Err(SupervisorError::Authority(
+                if status.lifecycle == session::SessionLifecycle::Closing {
+                    session::AuthorityError::SessionClosing
+                } else {
+                    session::AuthorityError::SessionClosed
+                },
+            ));
+        }
+        handle
+            .validate_stream_bindings(&config.streams)
+            .map_err(SupervisorError::Authority)?;
+        let prefix = handle.prefix();
+        let budget = handle.budget();
+        if prefix.context != config.active_context
+            || prefix.recording_gate != config.recording_gate
+            || prefix.segment != config.segment_no
+            || prefix.next_record != config.next_record_no
+            || budget.item_cap != config.queue_policy.max_total_items
+            || budget.raw_frame_limit != config.queue_policy.max_raw_frames_per_stream
+            || budget.raw_byte_limit != config.queue_policy.max_raw_bytes_per_stream
+            || budget.max_message_bytes != config.queue_policy.max_raw_message_bytes
+        {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::InvalidBinding,
+            ));
+        }
+        let bound = handle.scopes();
+        if bound.iter().flatten().count() != config.streams.len()
+            || config.streams.iter().any(|binding| {
+                !bound.iter().flatten().any(|scope| {
+                    scope.stream == binding.id
+                        && scope.connection == binding.connection_id
+                        && scope.epoch == binding.tag.connection
+                })
+            })
+        {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::InvalidBinding,
+            ));
+        }
+        let core = SupervisorCore::new(config)?;
+        let work_limit = core.work_limit;
+        Ok(Self {
+            core,
+            handle,
+            queued_owners: VecDeque::with_capacity(work_limit),
+            pending_owners: FixedRegistry::new(),
+        })
+    }
+
+    fn synchronize_authority(
+        &mut self,
+        turn: &mut session::SessionTurn,
+    ) -> Result<(), SupervisorError> {
+        self.handle
+            .authority()
+            .validate_turn(turn)
+            .map_err(SupervisorError::Authority)?;
+        let status = self.handle.authority().status();
+        self.core.next_record_no = Some(self.handle.prefix().next_record);
+        if status.failed {
+            self.core.cut_remaining = Some(
+                self.queued_owners
+                    .iter()
+                    .filter(|owner| owner.cut_side() == session::CutSide::PreCut)
+                    .count(),
+            );
+        }
+        self.core.marker_settled = matches!(status.marker, session::MarkerState::Confirmed(_));
+        for (stream, runtime) in self.core.streams.iter_mut() {
+            if let Some(failure) = self.handle.authority().terminal_failure(*stream) {
+                runtime.capture_terminated = true;
+                runtime.subscription = SubscriptionState::Degraded;
+                runtime.last_market_record = None;
+                runtime.next_ping_due_ns = None;
+                runtime.pong_deadline_ns = None;
+                runtime.ping_timer_owner = None;
+                runtime.pong_timeout_owner = None;
+                match failure.attempt {
+                    session::AttemptIdentity::Candidate(attempt) => {
+                        runtime.capture_attempt_frontier =
+                            runtime.capture_attempt_frontier.max(attempt.get())
+                    }
+                    session::AttemptIdentity::NoRepresentableSuccessor { frontier } => {
+                        runtime.capture_attempt_frontier =
+                            runtime.capture_attempt_frontier.max(frontier)
+                    }
+                    session::AttemptIdentity::NotRaw => {}
+                }
+                runtime.pending_disconnect = None;
+                if let Some(work) = self.pending_owners.remove(stream) {
+                    work.set_kind(turn, session::WorkKind::Command)
+                        .map_err(SupervisorError::Authority)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self, stream: StreamId) -> Option<StreamSupervisorSnapshot> {
+        self.core.snapshot(stream).map(|mut snapshot| {
+            snapshot.session_disposition = Some(self.handle.authority().disposition());
+            snapshot.first_failure = self.terminal_failure(stream);
+            snapshot.capture_terminated = snapshot.first_failure.is_some();
+            if let Some(failure) = snapshot.first_failure {
+                match failure.attempt {
+                    session::AttemptIdentity::Candidate(attempt) => {
+                        snapshot.capture_attempt_frontier =
+                            snapshot.capture_attempt_frontier.max(attempt.get())
+                    }
+                    session::AttemptIdentity::NoRepresentableSuccessor { frontier } => {
+                        snapshot.capture_attempt_frontier =
+                            snapshot.capture_attempt_frontier.max(frontier)
+                    }
+                    session::AttemptIdentity::NotRaw => {}
+                }
+            }
+            snapshot
+        })
+    }
+    pub fn queued_items(&self) -> usize {
+        self.core.queued_items()
+    }
+    pub fn is_halted(&self) -> bool {
+        self.core.is_halted() || self.handle.authority().status().storage_stopped.is_some()
+    }
+    pub fn session_status(&self) -> session::SessionStatus {
+        self.handle.authority().status()
+    }
+    pub fn terminal_failure(&self, stream: StreamId) -> Option<session::TerminalFailure> {
+        self.handle.authority().terminal_failure(stream)
+    }
+    pub fn quiesce(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        ticket: &session::CloseTicket,
+    ) -> session::QuiescenceReport {
+        let report = self.handle.quiesce(turn, ticket);
+        if !matches!(report, session::QuiescenceReport::Rejected(_))
+            && let Err(SupervisorError::Authority(error)) = self.synchronize_authority(turn)
+        {
+            return session::QuiescenceReport::Rejected(error);
+        }
+        report
+    }
+
+    pub fn retention_report(&self) -> SupervisorRetentionReport {
+        let ownership = self.handle.authority().ownership_report();
+        let mut raw = [RawRetention::default(); MAX_CONFIGURED_STREAMS];
+        for (index, runtime) in self.core.streams.values().enumerate() {
+            raw[index] = RawRetention {
+                stream: Some(runtime.binding.id),
+                frames: runtime.queued_raw_frames,
+                payload_bytes: runtime.queued_raw_bytes,
+                allocated_bytes: 0,
+            };
+        }
+        for ingress in &self.core.queue {
+            if let Ingress::Raw { stream, bytes, .. } = ingress
+                && let Some(slot) = raw.iter_mut().find(|slot| slot.stream == Some(*stream))
+            {
+                slot.allocated_bytes += bytes.capacity();
+            }
+        }
+        let payload_ceiling_bytes = self.core.streams.len()
+            * self.core.queue_policy.max_raw_bytes_per_stream.min(
+                self.core.queue_policy.max_raw_frames_per_stream
+                    * self.core.queue_policy.max_raw_message_bytes,
+            );
+        // Each fixed registry has <=4 entries. Stable registry allocation is
+        // included in the bounded construction profile; work backing includes
+        // both queue arrays and fixed per-job output capacities.
+        let supervisor_metadata_backing_bytes = std::mem::size_of::<Self>()
+            + self.core.queue.capacity() * std::mem::size_of::<Ingress>()
+            + self.queued_owners.capacity() * std::mem::size_of::<session::WorkOwner>()
+            + self.core.streams.capacity() * std::mem::size_of::<(StreamId, StreamRuntime)>()
+            + self.core.by_connection.capacity() * std::mem::size_of::<(ConnectionId, StreamId)>()
+            + self.pending_owners.capacity()
+                * std::mem::size_of::<(StreamId, session::WorkOwner)>()
+            + self
+                .core
+                .streams
+                .values()
+                .map(|runtime| binding_text_bytes(&runtime.binding))
+                .sum::<usize>();
+        let work_output_ceiling_bytes = self.core.work_limit
+            * (std::mem::size_of::<DrainResult>() + 3 * std::mem::size_of::<RecordNo>() + 4096);
+        let supervisor_metadata_ceiling_bytes =
+            supervisor_metadata_backing_bytes + work_output_ceiling_bytes;
+        // The accepted decoder uses bounded 1MiB message input, bounded parser
+        // depth/items and bounded strings. Include Raw clone plus decode tree
+        // and both source/sink encoding buffers in the workspace allowance.
+        let message = self.core.queue_policy.max_raw_message_bytes;
+        // One JSON value/key requires at least one input byte. Every container
+        // edge therefore contributes at most one of message+1 logical slots.
+        // Pinned std Vec growth is <=2*len+4 slots (u8 strings <=2*len+8).
+        // Summing edges and all empty-container minima gives <=6*(P+1)
+        // aggregate array/object slots. UTF-8 and numeric text capacity adds
+        // <=10*P; decoded owned fields/frames and error text add <=16*P.
+        // Four Raw representations cover queued backup, handler Raw clone,
+        // input decoder and encoder staging; storage encoding is separately
+        // reported by OwnershipReport.storage_memory.
+        let largest_json_slot =
+            std::mem::size_of::<JsonValue>().max(std::mem::size_of::<(String, JsonValue)>());
+        let decoder_workspace_ceiling_bytes = 6 * (message + 1) * largest_json_slot
+            + 30 * message
+            + 1024 * std::mem::size_of::<crate::WireTrade>()
+            + 100 * std::mem::size_of::<crate::WireLevel>()
+            + 16 * 1024;
+        let storage = ownership.storage_memory;
+        let metadata_ceiling_bytes = ownership.metadata_ceiling_bytes
+            + storage.metadata_ceiling_bytes
+            + supervisor_metadata_ceiling_bytes;
+        let retained_bytes_ceiling = metadata_ceiling_bytes
+            + payload_ceiling_bytes
+            + decoder_workspace_ceiling_bytes
+            + storage.workspace_ceiling_bytes
+            + storage.backend_ceiling_bytes;
+        let reported_backing_bytes = ownership.metadata_backing_bytes
+            + storage.metadata_backing_bytes
+            + supervisor_metadata_backing_bytes
+            + raw.iter().map(|raw| raw.allocated_bytes).sum::<usize>()
+            + storage.workspace_backing_bytes
+            + storage.backend_backing_bytes;
+        SupervisorRetentionReport {
+            ownership,
+            raw,
+            queued_work: self.queued_owners.len(),
+            pending_work: self.pending_owners.len(),
+            filled_terminal_slots: self
+                .core
+                .streams
+                .values()
+                .filter(|runtime| {
+                    self.handle
+                        .authority()
+                        .terminal_failure(runtime.binding.id)
+                        .is_some()
+                })
+                .count(),
+            cut_remaining: if self.handle.authority().status().failed {
+                Some(
+                    self.queued_owners
+                        .iter()
+                        .filter(|owner| owner.cut_side() == session::CutSide::PreCut)
+                        .count(),
+                )
+            } else {
+                None
+            },
+            payload_ceiling_bytes,
+            supervisor_metadata_backing_bytes,
+            supervisor_metadata_ceiling_bytes,
+            decoder_workspace_ceiling_bytes,
+            metadata_ceiling_bytes,
+            retained_bytes_ceiling,
+            reported_backing_bytes,
+        }
+    }
+
+    fn admission_report(
+        &self,
+        stream: Option<StreamId>,
+        outcome: Result<AdmissionOutcome, SupervisorError>,
+        commands: Vec<session::CommandLease>,
+    ) -> AdmissionReport {
+        AdmissionReport {
+            session_disposition: self.handle.authority().disposition(),
+            scope_disposition: stream
+                .and_then(|stream| self.handle.authority().scope_disposition(stream).ok()),
+            outcome,
+            commands: BoundedList::from_vec(commands),
+            failure: stream.and_then(|stream| self.terminal_failure(stream)),
+            close_owner: None,
+            admitted_scopes: [None; MAX_CONFIGURED_STREAMS],
+            cancelled_plan: false,
+        }
+    }
+
+    pub fn start_commands(&mut self, turn: &mut session::SessionTurn) -> AdmissionReport {
+        let result = (|| {
+            self.synchronize_authority(turn)?;
+            if self.is_halted() {
+                return Err(SupervisorError::Halted);
+            }
+            self.handle
+                .authority()
+                .ensure_admission_open(turn)
+                .map_err(SupervisorError::Authority)?;
+            if self.core.started {
+                return Err(SupervisorError::AlreadyStarted);
+            }
+            let ownership = self.handle.authority().ownership_report();
+            if ownership.work_limit - ownership.work_used < self.core.streams.len() {
+                return Err(SupervisorError::Authority(
+                    session::AuthorityError::WorkExhausted,
+                ));
+            }
+            let mut work = Vec::with_capacity(self.core.streams.len());
+            for _ in 0..self.core.streams.len() {
+                work.push(
+                    self.handle
+                        .reserve_work(turn, session::WorkKind::Command)
+                        .map_err(SupervisorError::Authority)?,
+                );
+            }
+            let views = self.core.start_commands()?;
+            let mut commands = Vec::with_capacity(views.len());
+            for (view, owner) in views.into_iter().zip(work) {
+                commands.extend(self.lease_command(turn, view, &owner)?);
+            }
+            Ok(commands)
+        })();
+        match result {
+            Ok(commands) => self.admission_report(None, Ok(AdmissionOutcome::Admitted), commands),
+            Err(error) => {
+                if matches!(
+                    error,
+                    SupervisorError::Authority(session::AuthorityError::CounterExhausted(_))
+                ) {
+                    self.latch_hard_stop(turn);
+                }
+                self.admission_report(None, Err(error), Vec::new())
+            }
+        }
+    }
+
+    pub fn queue_text(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        connection: ConnectionId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+        bytes: &[u8],
+    ) -> AdmissionReport {
+        self.admit(
+            turn,
+            Some(connection),
+            Some(epoch),
+            stamp,
+            ReceivedCall::Text(bytes),
+        )
+    }
+    pub fn queue_connected(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        connection: ConnectionId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+    ) -> AdmissionReport {
+        self.admit(
+            turn,
+            Some(connection),
+            Some(epoch),
+            stamp,
+            ReceivedCall::Connected,
+        )
+    }
+    pub fn queue_disconnected(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        connection: ConnectionId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+    ) -> AdmissionReport {
+        self.admit(
+            turn,
+            Some(connection),
+            Some(epoch),
+            stamp,
+            ReceivedCall::Disconnected,
+        )
+    }
+    pub fn queue_tick(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        stamp: ReceiveStamp,
+    ) -> AdmissionReport {
+        self.admit(turn, None, None, stamp, ReceivedCall::Tick)
+    }
+
+    fn admit(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        connection: Option<ConnectionId>,
+        epoch: Option<ConnectionEpoch>,
+        stamp: ReceiveStamp,
+        call: ReceivedCall<'_>,
+    ) -> AdmissionReport {
+        self.admit_with_reserver(turn, connection, epoch, stamp, call, |handle, turn| {
+            handle.reserve_work(turn, session::WorkKind::QueuedObservation)
+        })
+    }
+
+    fn admit_with_reserver(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        connection: Option<ConnectionId>,
+        epoch: Option<ConnectionEpoch>,
+        stamp: ReceiveStamp,
+        call: ReceivedCall<'_>,
+        mut reserve: impl FnMut(
+            &session::SupervisorSessionHandle,
+            &mut session::SessionTurn,
+        ) -> Result<session::WorkOwner, session::AuthorityError>,
+    ) -> AdmissionReport {
+        let stream =
+            connection.and_then(|connection| self.core.by_connection.get(&connection).copied());
+        if let Err(error) = self.handle.authority().validate_turn(turn) {
+            return self.admission_report(
+                stream,
+                Err(SupervisorError::Authority(error)),
+                Vec::new(),
+            );
+        }
+        if let Err(error) = self.synchronize_authority(turn) {
+            return self.admission_report(stream, Err(error), Vec::new());
+        }
+        if !self.core.started {
+            return self.admission_report(stream, Err(SupervisorError::NotStarted), Vec::new());
+        }
+        if let Some(stream) = stream
+            && self.terminal_failure(stream).is_some()
+        {
+            return self.admission_report(
+                Some(stream),
+                Ok(AdmissionOutcome::AlreadyTerminated),
+                Vec::new(),
+            );
+        }
+        if self.is_halted() {
+            return self.admission_report(stream, Err(SupervisorError::Halted), Vec::new());
+        }
+        if let Err(error) = self.handle.authority().ensure_admission_open(turn) {
+            return self.admission_report(
+                stream,
+                Err(SupervisorError::Authority(error)),
+                Vec::new(),
+            );
+        }
+        if let Some(connection) = connection
+            && stream.is_none()
+        {
+            return self.admission_report(
+                None,
+                Err(SupervisorError::UnknownConnection(connection)),
+                Vec::new(),
+            );
+        }
+        if matches!(call, ReceivedCall::Tick) {
+            for (stream, runtime) in self.core.streams.iter_mut() {
+                if self.handle.authority().terminal_failure(*stream).is_some() {
+                    runtime.capture_terminated = true;
+                }
+            }
+        }
+        let before = self.core.queue.len();
+        let ownership = self.handle.authority().ownership_report();
+        let free = ownership.work_limit - ownership.work_used;
+        if let (Some(stream), Some(connection), Some(epoch)) = (stream, connection, epoch) {
+            let runtime = &self.core.streams[&stream];
+            let valid = match call {
+                ReceivedCall::Text(bytes) if bytes != b"pong" => {
+                    runtime.tag_for_observed_connection(epoch).is_some()
+                }
+                _ => runtime.binding.tag.connection == epoch,
+            };
+            if !valid {
+                return self.admission_report(
+                    Some(stream),
+                    Err(SupervisorError::UnknownConnectionEpoch { connection, epoch }),
+                    Vec::new(),
+                );
+            }
+            if matches!(call, ReceivedCall::Connected)
+                && let Some(not_before_ns) = runtime.reconnect_not_before_ns
+                && stamp.monotonic_ns < not_before_ns
+            {
+                return self.admission_report(
+                    Some(stream),
+                    Err(SupervisorError::ReconnectTooEarly {
+                        connection,
+                        not_before_ns,
+                        observed_ns: stamp.monotonic_ns,
+                    }),
+                    Vec::new(),
+                );
+            }
+        }
+        self.core.external_work = ownership.work_used - self.queued_owners.len();
+        let reuses_loss_owner = match (stream, epoch, call) {
+            (Some(stream), Some(epoch), ReceivedCall::Text(bytes)) => {
+                self.core.received_loss_can_coalesce(stream, epoch, bytes)
+            }
+            _ => false,
+        };
+        let proposed = if reuses_loss_owner {
+            0
+        } else if matches!(call, ReceivedCall::Tick) {
+            self.core
+                .streams
+                .values()
+                .filter(|runtime| {
+                    !runtime.capture_terminated
+                        && runtime.transport == Transport::Up
+                        && ((runtime
+                            .pong_deadline_ns
+                            .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
+                            && runtime.pong_timeout_owner.is_none())
+                            || (runtime.pong_deadline_ns.is_none()
+                                && runtime
+                                    .next_ping_due_ns
+                                    .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
+                                && runtime.ping_timer_owner.is_none()))
+                })
+                .count()
+        } else {
+            1
+        };
+        let stage_count = free.min(proposed);
+        let mut staged = VecDeque::with_capacity(stage_count);
+        for _ in 0..stage_count {
+            match reserve(&self.handle, turn) {
+                Ok(work) => staged.push_back(work),
+                Err(error) => {
+                    if matches!(
+                        error,
+                        session::AuthorityError::CounterExhausted("AdmissionOrder")
+                    ) && !matches!(call, ReceivedCall::Tick)
+                    {
+                        return self.install_received_failure(
+                            turn,
+                            stream.expect("validated received scope"),
+                            epoch.expect("validated received epoch"),
+                            stamp,
+                            call,
+                            SupervisorError::Authority(error),
+                        );
+                    }
+                    let _ = self.handle.authority().hard_stop(
+                        turn,
+                        PersistError::typed(
+                            session::PersistErrorKind::Counter,
+                            "work admission order exhausted",
+                        ),
+                    );
+                    return self.admission_report(
+                        stream,
+                        Err(SupervisorError::Authority(error)),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+        // Staged tokens already reserve the prospective jobs. The protocol
+        // core's capacity check excludes them, but includes all held results,
+        // pending plans and command leases from earlier jobs.
+        let outcome = match call {
+            ReceivedCall::Text(bytes) => self.core.queue_text(
+                connection.expect("received connection"),
+                epoch.expect("received epoch"),
+                stamp,
+                bytes,
+            ),
+            ReceivedCall::Connected => self.core.queue_connected(
+                connection.expect("received connection"),
+                epoch.expect("received epoch"),
+                stamp,
+            ),
+            ReceivedCall::Disconnected => self.core.queue_disconnected(
+                connection.expect("received connection"),
+                epoch.expect("received epoch"),
+                stamp,
+            ),
+            ReceivedCall::Tick => self.core.queue_tick(stamp),
+        };
+        let added = self.core.queue.len() - before;
+        let mut admitted = [None; MAX_CONFIGURED_STREAMS];
+        for (index, ingress) in self.core.queue.iter().skip(before).enumerate() {
+            admitted[index] = Some(ingress.stream());
+            self.queued_owners.push_back(
+                staged
+                    .pop_front()
+                    .expect("reserved work for admitted ingress"),
+            );
+        }
+        drop(staged);
+        if let Err(
+            ref error @ (SupervisorError::QueueExhausted { .. }
+            | SupervisorError::CounterExhausted("CaptureAttemptNo")),
+        ) = outcome
+            && !matches!(call, ReceivedCall::Tick)
+        {
+            let mut report = self.install_received_failure(
+                turn,
+                stream.expect("known received scope"),
+                epoch.expect("received epoch"),
+                stamp,
+                call,
+                error.clone(),
+            );
+            report.admitted_scopes = admitted;
+            return report;
+        }
+        if self.core.halted {
+            self.latch_hard_stop(turn);
+        }
+        let mut report = self.admission_report(
+            stream,
+            outcome.map(|()| {
+                if added == 0 && matches!(call, ReceivedCall::Text(bytes) if bytes != b"pong") {
+                    AdmissionOutcome::CoalescedLoss
+                } else {
+                    AdmissionOutcome::Admitted
+                }
+            }),
+            Vec::new(),
+        );
+        report.admitted_scopes = admitted;
+        report
+    }
+
+    fn install_received_failure(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+        call: ReceivedCall<'_>,
+        error: SupervisorError,
+    ) -> AdmissionReport {
+        let runtime = &self.core.streams[&stream];
+        let observed_tag = runtime
+            .tag_for_observed_connection(epoch)
+            .map_or(runtime.binding.tag, |(tag, _)| tag);
+        let attempt = if matches!(call, ReceivedCall::Text(bytes) if bytes != b"pong") {
+            runtime
+                .capture_attempt_frontier
+                .checked_add(1)
+                .and_then(|number| CaptureAttemptNo::new(number).ok())
+                .map_or(
+                    session::AttemptIdentity::NoRepresentableSuccessor {
+                        frontier: runtime.capture_attempt_frontier,
+                    },
+                    session::AttemptIdentity::Candidate,
+                )
+        } else {
+            session::AttemptIdentity::NotRaw
+        };
+        let failure = session::TerminalFailure {
+            stream,
+            connection: runtime.binding.connection_id,
+            observed_tag,
+            current_epoch: runtime.binding.tag.connection,
+            context: self.core.active_context,
+            stamp: session::ReceiveStamp {
+                unix_ns: stamp.unix_ns,
+                monotonic_ns: stamp.monotonic_ns,
+            },
+            input_class: match call {
+                ReceivedCall::Text(bytes) if bytes == b"pong" => session::InputClass::Pong,
+                ReceivedCall::Text(_) => session::InputClass::Raw,
+                ReceivedCall::Connected => session::InputClass::Connected,
+                ReceivedCall::Disconnected => session::InputClass::Disconnected,
+                ReceivedCall::Tick => unreachable!(),
+            },
+            attempt,
+            cause: match error {
+                SupervisorError::CounterExhausted("CaptureAttemptNo") => {
+                    session::FailureCause::CaptureAttemptExhausted
+                }
+                SupervisorError::Authority(session::AuthorityError::CounterExhausted(name)) => {
+                    session::FailureCause::CounterExhausted(name)
+                }
+                _ => session::FailureCause::QueueOverflow,
+            },
+        };
+        match self.handle.terminate(turn, failure) {
+            Ok(terminated) => {
+                self.core.cut_remaining = Some(
+                    self.queued_owners
+                        .iter()
+                        .filter(|owner| owner.cut_side() == session::CutSide::PreCut)
+                        .count(),
+                );
+                let runtime = self.core.streams.get_mut(&stream).expect("known scope");
+                runtime.capture_terminated = true;
+                runtime.subscription = SubscriptionState::Degraded;
+                runtime.last_market_record = None;
+                if let session::AttemptIdentity::Candidate(attempt) = attempt {
+                    runtime.capture_attempt_frontier = attempt.get();
+                }
+                let cancelled_plan = runtime.pending_disconnect.take().is_some();
+                runtime.next_ping_due_ns = None;
+                runtime.pong_deadline_ns = None;
+                runtime.ping_timer_owner = None;
+                runtime.pong_timeout_owner = None;
+                if let Some(work) = self.pending_owners.remove(&stream) {
+                    work.set_kind(turn, session::WorkKind::Command)
+                        .map_err(SupervisorError::Authority)
+                        .expect("rightful terminal owner");
+                }
+                let commands = terminated
+                    .close
+                    .map(|lease| vec![lease.into_command()])
+                    .unwrap_or_default();
+                let mut report = self.admission_report(Some(stream), Err(error.clone()), commands);
+                report.close_owner = Some(terminated.close_owner);
+                report.cancelled_plan = cancelled_plan;
+                report
+            }
+            Err(error) => self.admission_report(
+                Some(stream),
+                Err(SupervisorError::Authority(error)),
+                Vec::new(),
+            ),
+        }
+    }
+
+    fn latch_hard_stop(&mut self, turn: &mut session::SessionTurn) {
+        let _ = self.handle.authority().hard_stop(
+            turn,
+            PersistError::typed(
+                session::PersistErrorKind::Counter,
+                "terminal supervisor hard stop",
+            ),
+        );
+        if self.core.cut_remaining.is_none() {
+            self.core.cut_remaining = Some(self.core.queue.len());
+        }
+    }
+
+    fn lease_command(
+        &self,
+        turn: &mut session::SessionTurn,
+        view: TransportCommand,
+        work: &session::WorkOwner,
+    ) -> Result<Option<session::CommandLease>, SupervisorError> {
+        let (connection, epoch, kind) = match view {
+            TransportCommand::Connect {
+                connection,
+                epoch,
+                endpoint,
+            } => (
+                connection,
+                epoch,
+                session::CommandKind::Connect { endpoint },
+            ),
+            TransportCommand::SendText {
+                connection,
+                epoch,
+                text,
+            } => (connection, epoch, session::CommandKind::SendText { text }),
+            TransportCommand::ReconnectAfter {
+                connection,
+                epoch,
+                delay_ns,
+            } => (
+                connection,
+                epoch,
+                session::CommandKind::ReconnectAfter { delay_ns },
+            ),
+            TransportCommand::Close { connection, epoch } => {
+                let stream = self.core.by_connection[&connection];
+                let owner = self
+                    .handle
+                    .mandatory_close(turn, stream, epoch, Some(work))
+                    .map_err(SupervisorError::Authority)?;
+                return match self.handle.authority().reclaim_close(turn, owner) {
+                    session::CloseLeaseReport::Leased(lease) => Ok(Some(lease.into_command())),
+                    session::CloseLeaseReport::AlreadyLeased
+                    | session::CloseLeaseReport::AlreadySettled => Ok(None),
+                    session::CloseLeaseReport::Rejected(error) => {
+                        Err(SupervisorError::Authority(error))
+                    }
+                };
+            }
+        };
+        let stream = self.core.by_connection[&connection];
+        match self.handle.command(turn, stream, epoch, kind, work) {
+            Ok(command) => Ok(Some(command)),
+            Err(
+                session::AuthorityError::CommandRevoked
+                | session::AuthorityError::SessionClosing
+                | session::AuthorityError::SessionClosed,
+            ) => Ok(None),
+            Err(error) => Err(SupervisorError::Authority(error)),
+        }
+    }
+
+    pub fn drain_one(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        sink: &mut session::BoundRecordSink,
+    ) -> DrainReport {
+        let outcome = self.drain_bound(turn, sink);
+        DrainReport {
+            session_disposition: self.handle.authority().disposition(),
+            outcome,
+        }
+    }
+
+    fn drain_bound(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        sink: &mut session::BoundRecordSink,
+    ) -> Result<Option<DrainResult>, SupervisorError> {
+        self.handle
+            .authority()
+            .validate_turn(turn)
+            .map_err(SupervisorError::Authority)?;
+        if !self.handle.authority().same_authority(sink.authority()) {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::AuthorityMismatch,
+            ));
+        }
+        self.synchronize_authority(turn)?;
+        if !self.core.started {
+            return Err(SupervisorError::NotStarted);
+        }
+        if self.is_halted() {
+            return Err(SupervisorError::Halted);
+        }
+        for (stream, runtime) in self.core.streams.iter_mut() {
+            if let Some(pending) = runtime.pending_disconnect {
+                runtime.close_settled = self
+                    .handle
+                    .authority()
+                    .close_state(*stream, pending.epoch)
+                    .ok()
+                    == Some(session::CloseState::Settled);
+            }
+        }
+        let status = self.session_status();
+        if matches!(
+            status.lifecycle,
+            session::SessionLifecycle::Closing
+                | session::SessionLifecycle::DiagnosticClosing
+                | session::SessionLifecycle::DiagnosticClosed
+        ) {
+            for runtime in self.core.streams.values_mut() {
+                runtime.next_ping_due_ns = None;
+                runtime.pong_deadline_ns = None;
+                runtime.ping_timer_owner = None;
+                runtime.pong_timeout_owner = None;
+            }
+        }
+        if matches!(
+            status.lifecycle,
+            session::SessionLifecycle::DiagnosticClosing
+                | session::SessionLifecycle::DiagnosticClosed
+        ) {
+            for runtime in self.core.streams.values_mut() {
+                runtime.pending_disconnect = None;
+            }
+            self.pending_owners.clear();
+        }
+        let marker_due =
+            status.marker == session::MarkerState::Pending && self.core.cut_remaining == Some(0);
+        if marker_due {
+            let mut adapter = BoundAdapter {
+                turn,
+                sink,
+                error: None,
+                owner: None,
+            };
+            let observation = status
+                .archive_observation
+                .or_else(|| {
+                    status
+                        .first_failure
+                        .map(|failure| session::ArchiveFailureObservation {
+                            context: ReceiveStamp {
+                                unix_ns: failure.stamp.unix_ns,
+                                monotonic_ns: failure.stamp.monotonic_ns,
+                            }
+                            .wire_context(failure.context),
+                            kind: match self.core.recording_gate {
+                                RecordingGate::Written => WatermarkKind::Written,
+                                RecordingGate::Flushed => WatermarkKind::Flushed,
+                                RecordingGate::Durable => WatermarkKind::Durable,
+                            },
+                            reason: if failure.cause == session::FailureCause::QueueOverflow {
+                                Reason::QueueOverflow
+                            } else {
+                                Reason::Unknown
+                            },
+                        })
+                })
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "marker lacks archive failure observation",
+                ))?;
+            let stamp = ReceiveStamp {
+                unix_ns: observation.context.unix_ns.get(),
+                monotonic_ns: observation.context.monotonic_ns.get(),
+            };
+            let record = self.core.persist_record(
+                stamp,
+                Record::Control(ControlRecord {
+                    context: observation.context,
+                    value: Control::Recording(domain::record::RecordingEvidence {
+                        health: domain::record::RecordingHealth::Failed,
+                        kind: observation.kind,
+                        through: self.handle.authority().trusted_watermark(observation.kind),
+                        reason: observation.reason,
+                    }),
+                }),
+                &mut adapter,
+            );
+            let boundary_error = adapter.error;
+            let record = match record {
+                Ok(record) => record,
+                Err(error) => {
+                    self.latch_hard_stop(turn);
+                    return Err(map_boundary(error, boundary_error));
+                }
+            };
+            self.handle
+                .authority()
+                .marker_confirmed(turn, record)
+                .map_err(SupervisorError::Authority)?;
+            self.core.marker_settled = true;
+            return Ok(Some(DrainResult {
+                records: BoundedList::from_vec(vec![record]),
+                commands: BoundedList::default(),
+                events: BoundedList::default(),
+                _owner: None,
+            }));
+        }
+        let completing = if self.core.cut_remaining.is_none() || self.core.marker_settled {
+            self.core
+                .streams
+                .keys()
+                .copied()
+                .find(|stream| self.core.disconnect_ready(*stream))
+        } else {
+            None
+        };
+        let original = if completing.is_none() {
+            self.core.queue.front().cloned()
+        } else {
+            None
+        };
+        let cut_before = self.core.cut_remaining;
+        let owner = if let Some(stream) = completing {
+            self.pending_owners.remove(&stream)
+        } else {
+            self.queued_owners.pop_front()
+        };
+        if owner.is_none() {
+            return Ok(None);
+        }
+        if let Some(owner) = &owner {
+            owner
+                .set_kind(
+                    turn,
+                    if completing.is_some() {
+                        session::WorkKind::PendingPlan
+                    } else {
+                        session::WorkKind::InFlightObservation
+                    },
+                )
+                .map_err(SupervisorError::Authority)?;
+        }
+        let mut adapter = BoundAdapter {
+            turn,
+            sink,
+            error: None,
+            owner: owner.as_ref(),
+        };
+        let result = self.core.drain_one(&mut adapter);
+        let boundary_error = adapter.error;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(owner) = owner {
+                    if let Some(stream) = completing {
+                        owner
+                            .set_kind(turn, session::WorkKind::PendingPlan)
+                            .map_err(SupervisorError::Authority)?;
+                        self.pending_owners.insert(stream, owner);
+                    } else if let Some(original) = original {
+                        if let Ingress::Raw { stream, bytes, .. } = &original {
+                            let runtime = self
+                                .core
+                                .streams
+                                .get_mut(stream)
+                                .expect("retained raw scope");
+                            runtime.queued_raw_frames += 1;
+                            runtime.queued_raw_bytes += bytes.len();
+                            self.core.queued_raw_items += 1;
+                        }
+                        self.core.queue.push_front(original);
+                        self.core.cut_remaining = cut_before;
+                        owner
+                            .set_kind(turn, session::WorkKind::QueuedObservation)
+                            .map_err(SupervisorError::Authority)?;
+                        self.queued_owners.push_front(owner);
+                    }
+                }
+                self.latch_hard_stop(turn);
+                return Err(map_boundary(error, boundary_error));
+            }
+        };
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        let owner = owner.ok_or(SupervisorError::InvalidConfiguration(
+            "drain without retained owner",
+        ))?;
+        for event in &result.events {
+            if let SupervisorEvent::EpochAdvanced { stream, tag, .. } = event {
+                let previous = self.core.streams[stream]
+                    .previous_tag
+                    .expect("completed previous epoch")
+                    .connection;
+                self.handle
+                    .authority()
+                    .advance_epoch(turn, *stream, previous, tag.connection)
+                    .map_err(SupervisorError::Authority)?;
+            }
+        }
+        let mut commands = Vec::with_capacity(result.commands.len());
+        for view in result.commands {
+            commands.extend(self.lease_command(turn, view, &owner)?);
+        }
+        for event in &result.events {
+            if let SupervisorEvent::TransportRecorded {
+                stream,
+                value: Transport::Down,
+                ..
+            } = event
+                && self.core.streams[stream].pending_disconnect.is_some()
+                && !self.pending_owners.contains_key(stream)
+            {
+                self.pending_owners
+                    .insert(*stream, owner.share().map_err(SupervisorError::Authority)?);
+            }
+        }
+        owner.set_kind(turn, if result.events.iter().any(|event| matches!(event, SupervisorEvent::TransportRecorded { stream, value: Transport::Down, .. } if self.pending_owners.contains_key(stream))) {
+            session::WorkKind::PendingPlan
+        } else { session::WorkKind::Result }).map_err(SupervisorError::Authority)?;
+        Ok(Some(DrainResult {
+            records: BoundedList::from_vec(result.records),
+            commands: BoundedList::from_vec(commands),
+            events: BoundedList::from_vec(result.events),
+            _owner: Some(owner),
+        }))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReceivedCall<'a> {
+    Text(&'a [u8]),
+    Connected,
+    Disconnected,
+    Tick,
+}
+
+impl Ingress {
+    fn stream(&self) -> StreamId {
+        match self {
+            Self::Connected { stream, .. }
+            | Self::Disconnected { stream, .. }
+            | Self::Raw { stream, .. }
+            | Self::RejectedStaleRaw { stream, .. }
+            | Self::QueueGap { stream, .. }
+            | Self::Pong { stream, .. }
+            | Self::PingTimer { stream, .. }
+            | Self::PongTimeout { stream, .. } => *stream,
+        }
+    }
+}
+
+struct BoundAdapter<'a, 'w> {
+    turn: &'a mut session::SessionTurn,
+    sink: &'a mut session::BoundRecordSink,
+    error: Option<session::PersistBoundaryError>,
+    owner: Option<&'w session::WorkOwner>,
+}
+impl RecordSink for BoundAdapter<'_, '_> {
+    fn persist(
+        &mut self,
+        frame: &RecordFrame,
+        gate: RecordingGate,
+    ) -> Result<PersistenceReceipt, PersistError> {
+        let receipt = match self.owner {
+            Some(owner) => self.sink.persist_owned(self.turn, frame, gate, owner),
+            None => self.sink.persist_marker(self.turn, frame, gate),
+        };
+        match receipt {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.error = Some(error);
+                Err(PersistError::typed(
+                    session::PersistErrorKind::Adapter,
+                    "bound persistence failed",
+                ))
+            }
+        }
+    }
+}
+fn map_boundary(
+    fallback: SupervisorError,
+    error: Option<session::PersistBoundaryError>,
+) -> SupervisorError {
+    match error {
+        Some(session::PersistBoundaryError::Authority(error)) => SupervisorError::Authority(error),
+        Some(session::PersistBoundaryError::Persistence(error)) => {
+            SupervisorError::Persistence(error)
+        }
+        Some(session::PersistBoundaryError::ReceiptMismatch { expected, actual }) => {
+            SupervisorError::PersistenceReceiptMismatch { expected, actual }
+        }
+        Some(session::PersistBoundaryError::WeakGate { required, achieved }) => {
+            SupervisorError::PersistenceGateTooWeak { required, achieved }
+        }
+        None => fallback,
+    }
+}
+fn binding_text_bytes(binding: &StreamBinding) -> usize {
+    binding.spec.instrument.venue.as_str().len()
+        + binding.spec.instrument.product_namespace.as_str().len()
+        + binding.spec.instrument.native_symbol.as_str().len()
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RawRetention {
+    pub stream: Option<StreamId>,
+    pub frames: usize,
+    pub payload_bytes: usize,
+    pub allocated_bytes: usize,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SupervisorRetentionReport {
+    pub ownership: session::OwnershipReport,
+    pub raw: [RawRetention; MAX_CONFIGURED_STREAMS],
+    pub queued_work: usize,
+    pub pending_work: usize,
+    pub filled_terminal_slots: usize,
+    pub cut_remaining: Option<usize>,
+    pub payload_ceiling_bytes: usize,
+    pub supervisor_metadata_backing_bytes: usize,
+    pub supervisor_metadata_ceiling_bytes: usize,
+    pub decoder_workspace_ceiling_bytes: usize,
+    pub metadata_ceiling_bytes: usize,
+    pub retained_bytes_ceiling: usize,
+    pub reported_backing_bytes: usize,
 }
 
 pub fn reconnect_delay_ns(attempt: u32, stream: StreamId) -> u64 {
@@ -2180,12 +3627,12 @@ mod tests {
             self.frames.push(frame.clone());
             Ok(PersistenceReceipt {
                 through: frame.record_no,
-                achieved: required_gate,
+                achieved_gate: required_gate,
             })
         }
     }
 
-    fn fixture() -> (PublicWsSupervisor, StreamBinding, MemorySink) {
+    fn fixture() -> (SupervisorCore, StreamBinding, MemorySink) {
         let spec = SpecVersion::new(1).expect("spec");
         let binding = StreamBinding {
             id: StreamId::new(1).expect("stream"),
@@ -2210,7 +3657,7 @@ mod tests {
             },
             feed_profile: FeedProfileVersion::new(1).expect("profile"),
         };
-        let mut supervisor = PublicWsSupervisor::new(WsSupervisorConfig {
+        let mut supervisor = SupervisorCore::new(WsSupervisorConfig {
             active_context: ActiveContext {
                 config: ConfigVersion::new(1).expect("config"),
                 normalizer: NormalizerVersion::new(1).expect("normalizer"),
@@ -2247,15 +3694,22 @@ mod tests {
         .to_vec()
     }
 
-    fn drain_all(supervisor: &mut PublicWsSupervisor, sink: &mut MemorySink) {
-        while supervisor.drain_one(sink).expect("drain").is_some() {}
+    fn drain_all(supervisor: &mut SupervisorCore, sink: &mut MemorySink) {
+        while let Some(result) = supervisor.drain_one(sink).expect("drain") {
+            for command in result.commands {
+                if let TransportCommand::Close { connection, .. } = command {
+                    let stream = supervisor.by_connection[&connection];
+                    supervisor
+                        .streams
+                        .get_mut(&stream)
+                        .expect("stream")
+                        .close_settled = true;
+                }
+            }
+        }
     }
 
-    fn advance(
-        supervisor: &mut PublicWsSupervisor,
-        binding: &StreamBinding,
-        sink: &mut MemorySink,
-    ) {
+    fn advance(supervisor: &mut SupervisorCore, binding: &StreamBinding, sink: &mut MemorySink) {
         supervisor
             .queue_disconnected(binding.connection_id, binding.tag.connection, stamp(10))
             .expect("disconnect ingress");
@@ -2264,89 +3718,54 @@ mod tests {
         assert_eq!(snapshot.tag.connection.get(), 2);
     }
 
-    fn set_frontier(supervisor: &mut PublicWsSupervisor, stream: StreamId, frontier: u64) {
+    fn set_frontier(supervisor: &mut SupervisorCore, stream: StreamId, frontier: u64) {
         let runtime = supervisor.streams.get_mut(&stream).expect("runtime");
         runtime.capture_attempt_frontier = frontier;
     }
 
     #[test]
-    fn capture_attempt_exhaustion_halts_current_and_previous_generation_without_mutation() {
+    fn checked_capture_attempt_boundary_preserves_admitted_max_without_wrap() {
         for previous_generation in [false, true] {
             let (mut supervisor, binding, mut sink) = fixture();
             if previous_generation {
                 advance(&mut supervisor, &binding, &mut sink);
             }
-            let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
-            let current_epoch = snapshot.tag.connection;
-            let observed_epoch = if previous_generation {
+            let current = supervisor
+                .snapshot(binding.id)
+                .expect("snapshot")
+                .tag
+                .connection;
+            let observed = if previous_generation {
                 binding.tag.connection
             } else {
-                current_epoch
+                current
             };
-            // Private boundary setup represents an archive whose earlier attempts are exhausted.
             set_frontier(&mut supervisor, binding.id, u64::MAX - 1);
             supervisor
-                .queue_text(binding.connection_id, current_epoch, stamp(20), ack())
-                .expect("last representable raw ingress");
+                .queue_text(binding.connection_id, current, stamp(20), ack())
+                .expect("MAX ingress");
             let before = supervisor.snapshot(binding.id).expect("snapshot");
-            let queued_items = supervisor.queued_items();
-            let queued_raw_items = supervisor.queued_raw_items;
-            let next_record_no = supervisor.next_record_no;
-            let durable_prefix = sink.frames.clone();
             assert_eq!(before.capture_attempt_frontier, u64::MAX);
-            assert_eq!(before.queued_raw_frames, 1);
-
             assert_eq!(
-                supervisor.queue_text(binding.connection_id, observed_epoch, stamp(21), ack()),
+                supervisor.queue_text(binding.connection_id, observed, stamp(21), ack()),
                 Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
             );
-            assert!(supervisor.is_halted());
+            assert!(!supervisor.is_halted());
             assert_eq!(supervisor.snapshot(binding.id).expect("snapshot"), before);
-            assert_eq!(supervisor.queued_items(), queued_items);
-            assert_eq!(supervisor.queued_raw_items, queued_raw_items);
-            assert_eq!(supervisor.next_record_no, next_record_no);
-            assert!(matches!(
-                supervisor.queue.front(),
-                Some(Ingress::Raw { attempt, .. }) if attempt.get() == u64::MAX
-            ));
-
-            for _ in 0..3 {
-                assert_eq!(
-                    supervisor.queue_text(binding.connection_id, observed_epoch, stamp(22), ack()),
-                    Err(SupervisorError::Halted)
-                );
-                assert_eq!(
-                    supervisor.queue_text(
-                        binding.connection_id,
-                        current_epoch,
-                        stamp(22),
-                        b"pong".to_vec(),
-                    ),
-                    Err(SupervisorError::Halted)
-                );
-                assert_eq!(
-                    supervisor.queue_connected(binding.connection_id, current_epoch, stamp(22)),
-                    Err(SupervisorError::Halted)
-                );
-                assert_eq!(
-                    supervisor.queue_disconnected(binding.connection_id, current_epoch, stamp(22)),
-                    Err(SupervisorError::Halted)
-                );
-                assert_eq!(
-                    supervisor.queue_tick(stamp(u64::MAX)),
-                    Err(SupervisorError::Halted)
-                );
-                assert_eq!(supervisor.start_commands(), Err(SupervisorError::Halted));
-                assert_eq!(
-                    supervisor.drain_one(&mut sink),
-                    Err(SupervisorError::Halted)
-                );
-            }
-            assert_eq!(sink.frames, durable_prefix);
-            assert_eq!(supervisor.snapshot(binding.id).expect("snapshot"), before);
-            assert_eq!(supervisor.queued_items(), 1);
-            assert_eq!(supervisor.queued_raw_items, 1);
-            assert_eq!(supervisor.next_record_no, next_record_no);
+            assert!(
+                matches!(supervisor.queue.front(), Some(Ingress::Raw { attempt, .. }) if attempt.get() == u64::MAX)
+            );
+            // The canonical wrapper installs the reserved terminal owner; this
+            // private counter test proves the protocol core does not fabricate
+            // MAX+1 or retract the previously admitted final attempt.
+            drain_all(&mut supervisor, &mut sink);
+            assert_eq!(
+                supervisor
+                    .snapshot(binding.id)
+                    .expect("snapshot")
+                    .accounted_attempt_frontier,
+                u64::MAX
+            );
         }
     }
 
@@ -2420,13 +3839,1485 @@ mod tests {
             ),
             Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
         );
-        assert!(supervisor.is_halted());
-        assert_eq!(
-            supervisor.drain_one(&mut sink),
-            Err(SupervisorError::Halted)
-        );
+        assert!(!supervisor.is_halted());
+        assert_eq!(supervisor.drain_one(&mut sink), Ok(None));
         assert_eq!(sink.frames, durable_prefix);
         let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
         assert_eq!(snapshot.capture_attempt_frontier, u64::MAX);
+    }
+    #[test]
+    fn disconnect_record_counter_preflight_never_writes_partial_terminal_down() {
+        for next in [u64::MAX - 1, u64::MAX - 4] {
+            let (mut core, binding, mut sink) = fixture();
+            core.next_record_no = Some(RecordNo::new(next).expect("near-max record"));
+            core.queue_connected(binding.connection_id, binding.tag.connection, stamp(10))
+                .expect("admitted Up");
+            let up = core
+                .drain_one(&mut sink)
+                .expect("Up durable")
+                .expect("Up result");
+            assert_eq!(up.records, [RecordNo::new(next).expect("record")]);
+            let before = core.snapshot(binding.id).expect("snapshot");
+            let prefix = sink.frames.clone();
+            core.queue_disconnected(binding.connection_id, binding.tag.connection, stamp(11))
+                .expect("admitted Down");
+            assert_eq!(
+                core.drain_one(&mut sink),
+                Err(SupervisorError::CounterExhausted("RecordNo"))
+            );
+            assert!(core.is_halted());
+            assert_eq!(core.snapshot(binding.id).expect("snapshot"), before);
+            assert_eq!(sink.frames, prefix);
+            assert!(sink.frames.iter().all(|frame| !matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Transport {
+                        value: Transport::Down,
+                        ..
+                    },
+                    ..
+                })
+            )));
+        }
+    }
+
+    fn json_backing(value: &JsonValue) -> usize {
+        match value {
+            JsonValue::Array(values) => {
+                values.capacity() * std::mem::size_of::<JsonValue>()
+                    + values.iter().map(json_backing).sum::<usize>()
+            }
+            JsonValue::Object(values) => {
+                values.capacity() * std::mem::size_of::<(String, JsonValue)>()
+                    + values
+                        .iter()
+                        .map(|(key, value)| key.capacity() + json_backing(value))
+                        .sum::<usize>()
+            }
+            JsonValue::String(value) | JsonValue::Number(value) => value.capacity(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn adversarial_dense_and_nested_parser_backing_fits_derived_workspace() {
+        let (core, _, _) = fixture();
+        let message = core.queue_policy.max_raw_message_bytes;
+        let largest_slot =
+            std::mem::size_of::<JsonValue>().max(std::mem::size_of::<(String, JsonValue)>());
+        let ceiling = 6 * (message + 1) * largest_slot + 30 * message;
+        let limits = ParserLimits {
+            max_nesting_depth: 16,
+            max_container_items: 2048,
+            max_string_bytes: 4096,
+        };
+        let dense = format!(
+            "[{}]",
+            std::iter::repeat_n("[0]", 2048)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let objects = format!(
+            "[{}]",
+            std::iter::repeat_n(r#"{"k":[0,0,0,0]}"#, 1024)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let nested = format!("{}0{}", "[".repeat(15), "]".repeat(15));
+        for bytes in [dense, objects, nested] {
+            assert!(bytes.len() <= message);
+            let parsed = parse_json(bytes.as_bytes(), limits).expect("bounded adversarial JSON");
+            assert!(json_backing(&parsed) <= ceiling);
+        }
+    }
+
+    fn bound_boundary_fixture() -> (
+        PublicWsSupervisor,
+        recording::CaptureSessionOwner,
+        session::SessionTurn,
+        session::BoundRecordSink,
+        Vec<StreamBinding>,
+        std::path::PathBuf,
+    ) {
+        bound_boundary_fixture_with_policy(QueuePolicy::default())
+    }
+
+    fn bound_boundary_fixture_with_policy(
+        policy: QueuePolicy,
+    ) -> (
+        PublicWsSupervisor,
+        recording::CaptureSessionOwner,
+        session::SessionTurn,
+        session::BoundRecordSink,
+        Vec<StreamBinding>,
+        std::path::PathBuf,
+    ) {
+        use domain::identity::{ArchiveId, CaptureSessionId, ClockId};
+        use domain::numeric::ExactDecimal;
+        use domain::policy::{DurabilityMode, PolicyFields, SilenceRule};
+        use domain::qualified::{NumericSpec, NumericSpecFields, PriceUnits};
+        use domain::record::{
+            ArchiveStart, ConfigDefinition, InstrumentSpecRecord, ProvenanceKind, StreamDefinition,
+        };
+        let (core, first, _) = fixture();
+        let mut second = first.clone();
+        second.id = StreamId::new(2).expect("stream");
+        second.instrument_slot = InstrumentSlot::new(2).expect("slot");
+        second.connection_id = ConnectionId::new(2).expect("connection");
+        second.book_id = Some(BookId::new(2).expect("book"));
+        second.spec.instrument.native_symbol = Token::new("ETHUSDT").expect("symbol");
+        let bindings = vec![first, second];
+        let proof = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+            .parse::<domain::artifact::ArtifactRef>()
+            .expect("proof");
+        let bootstrap_stamp = |number: u64| WireContext {
+            unix_ns: LocalUnixNs::new(number as i64),
+            monotonic_ns: MonotonicNs::new(number),
+            context: InputContext::Bootstrap,
+        };
+        let mut frames = vec![RecordFrame {
+            record_no: RecordNo::new(1).expect("record"),
+            segment_no: SegmentNo::new(0),
+            value: Record::ArchiveStart(ArchiveStart {
+                archive: ArchiveId::new([7; 16]).expect("archive"),
+                session: CaptureSessionId::new([8; 16]).expect("session"),
+                clock: ClockId::new(1).expect("clock"),
+                mode: DurabilityMode::Buffered,
+                previous_archive: None,
+            }),
+        }];
+        for binding in &bindings {
+            let number = frames.len() as u64 + 1;
+            let numeric = NumericSpec::new(NumericSpecFields {
+                reference: binding.spec.clone(),
+                price_units: PriceUnits {
+                    quote: Token::new("USDT").expect("quote"),
+                    basis: Token::new("BTC").expect("basis"),
+                },
+                quantity_unit: Token::new("BTC").expect("qty"),
+                base_asset: Token::new("BTC").expect("base"),
+                price_increment: ExactDecimal::ONE,
+                quantity_increment: ExactDecimal::ONE,
+                quantity_to_base_multiplier: Some(ExactDecimal::ONE),
+            })
+            .expect("numeric");
+            frames.push(RecordFrame {
+                record_no: RecordNo::new(number).expect("record"),
+                segment_no: SegmentNo::new(0),
+                value: Record::InstrumentSpec(InstrumentSpecRecord {
+                    context: bootstrap_stamp(number),
+                    slot: binding.instrument_slot,
+                    numeric,
+                    provenance: proof,
+                }),
+            });
+            frames.push(RecordFrame {
+                record_no: RecordNo::new(number + 1).expect("record"),
+                segment_no: SegmentNo::new(0),
+                value: Record::StreamDefinition(StreamDefinition {
+                    context: bootstrap_stamp(number + 1),
+                    binding: binding.clone(),
+                    provenance: proof,
+                }),
+            });
+        }
+        frames.push(RecordFrame {
+            record_no: RecordNo::new(6).expect("record"),
+            segment_no: SegmentNo::new(0),
+            value: Record::ConfigDefinition(ConfigDefinition {
+                context: bootstrap_stamp(6),
+                next: core.active_context,
+                provenance_kind: ProvenanceKind::Synthetic,
+                evidence: proof,
+                fields: PolicyFields {
+                    silence_rule: SilenceRule::UnknownOnSilence,
+                    freshness_deadline_ns: Some(1_000_000_000),
+                    warmup_min_updates: Some(1),
+                    warmup_min_elapsed_ns: Some(0),
+                    allow_quiet_with_proof: false,
+                    require_two_sided_snapshot: true,
+                    recording_gate: RecordingGate::Durable,
+                },
+            }),
+        });
+        static NEXT_BOUNDARY_WAL: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let mut created = None;
+        // The recording owner exclusively creates fresh storage. Fixture
+        // selection retries only a bounded number of preexisting names;
+        // filesystem cleanup belongs to the test runner's scratch lifecycle.
+        for _ in 0..10_000 {
+            let serial = NEXT_BOUNDARY_WAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "rec001d-boundary-{}-{serial}.wal",
+                policy.max_total_items
+            ));
+            match recording::CaptureSessionOwner::create_new(
+                &path,
+                &frames[0],
+                recording::BoundedCaptureProfile::new(&frames[1..]),
+            ) {
+                Ok((owner, turn)) => {
+                    created = Some((owner, turn, path));
+                    break;
+                }
+                Err(recording::OwnerError::Create(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    continue;
+                }
+                Err(error) => panic!("accepted fresh owner: {error}"),
+            }
+        }
+        let (mut owner, mut turn, path) = created.expect("bounded fresh fixture name");
+        let scopes: Vec<_> = bindings
+            .iter()
+            .map(|binding| session::ScopeBinding {
+                stream: binding.id,
+                connection: binding.connection_id,
+                epoch: binding.tag.connection,
+            })
+            .collect();
+        let (handle, sink) = owner
+            .register_supervisor(
+                &mut turn,
+                &scopes,
+                session::RetentionBudget {
+                    item_cap: policy.max_total_items,
+                    raw_frame_limit: policy.max_raw_frames_per_stream,
+                    raw_byte_limit: policy.max_raw_bytes_per_stream,
+                    max_message_bytes: policy.max_raw_message_bytes,
+                },
+            )
+            .expect("bound registration");
+        let supervisor = PublicWsSupervisor::new(
+            WsSupervisorConfig {
+                active_context: core.active_context,
+                recording_gate: RecordingGate::Durable,
+                segment_no: SegmentNo::new(0),
+                next_record_no: RecordNo::new(7).expect("next"),
+                queue_policy: policy,
+                streams: bindings.clone(),
+            },
+            handle,
+        )
+        .expect("bound supervisor");
+        (supervisor, owner, turn, sink, bindings, path)
+    }
+
+    fn dispatch_boundary(
+        owner: &mut recording::CaptureSessionOwner,
+        turn: &mut session::SessionTurn,
+        commands: impl IntoIterator<Item = session::CommandLease>,
+    ) {
+        for command in commands {
+            assert!(matches!(
+                owner.dispatch(turn, command, |_| Ok::<(), ()>(())),
+                session::DispatchReport::Dispatched
+            ));
+        }
+    }
+
+    fn drain_boundary(
+        supervisor: &mut PublicWsSupervisor,
+        owner: &mut recording::CaptureSessionOwner,
+        turn: &mut session::SessionTurn,
+        sink: &mut session::BoundRecordSink,
+    ) -> Option<DrainResult> {
+        let mut result = supervisor
+            .drain_one(turn, sink)
+            .outcome
+            .expect("gated drain");
+        if let Some(result) = result.as_mut() {
+            dispatch_boundary(owner, turn, std::mem::take(&mut result.commands));
+        }
+        result
+    }
+
+    #[test]
+    fn canonical_capture_attempt_exhaustion_terminates_scope_and_preserves_neighbor_diagnostic_service()
+     {
+        for old_tag in [false, true] {
+            let (mut supervisor, mut owner, mut turn, mut sink, bindings, path) =
+                bound_boundary_fixture();
+            let a = &bindings[0];
+            let b = &bindings[1];
+            let started = supervisor.start_commands(&mut turn);
+            started.outcome.expect("start");
+            dispatch_boundary(&mut owner, &mut turn, started.commands);
+            for binding in &bindings {
+                supervisor
+                    .queue_connected(
+                        &mut turn,
+                        binding.connection_id,
+                        binding.tag.connection,
+                        stamp(0),
+                    )
+                    .outcome
+                    .expect("connected");
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+            }
+            if old_tag {
+                supervisor
+                    .queue_disconnected(&mut turn, a.connection_id, a.tag.connection, stamp(1))
+                    .outcome
+                    .expect("disconnect");
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+                let epoch = supervisor.snapshot(a.id).expect("new tag").tag.connection;
+                supervisor
+                    .queue_connected(
+                        &mut turn,
+                        a.connection_id,
+                        epoch,
+                        stamp(RECONNECT_MAX_NS_V1 + 10),
+                    )
+                    .outcome
+                    .expect("reconnected");
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+            }
+            let tag = supervisor.snapshot(a.id).expect("tag").tag;
+            // Synthetic but WAL-valid earlier accounting compresses the
+            // counter-boundary fixture; no MAX+1, raw fabrication or writer
+            // export is used to establish its accepted prefix.
+            let gap_owner = supervisor
+                .handle
+                .reserve_work(&mut turn, session::WorkKind::InFlightObservation)
+                .expect("counted seed");
+            let gap_no = supervisor.handle.prefix().next_record;
+            let seed = RecordFrame {
+                record_no: gap_no,
+                segment_no: SegmentNo::new(0),
+                value: Record::Gap(Gap {
+                    context: stamp(RECONNECT_MAX_NS_V1 + 11)
+                        .wire_context(supervisor.core.active_context),
+                    scope: GapScope::ExplicitTargets(vec![GapTarget {
+                        stream: a.id,
+                        tag,
+                        range: Some((
+                            CaptureAttemptNo::new(1).expect("first"),
+                            CaptureAttemptNo::new(u64::MAX - 1).expect("last"),
+                        )),
+                        loss_count: Some(u64::MAX - 1),
+                    }]),
+                    reason: Reason::QueueOverflow,
+                }),
+            };
+            sink.persist_owned(&mut turn, &seed, RecordingGate::Durable, &gap_owner)
+                .expect("truthful seed receipt");
+            drop(gap_owner);
+            supervisor.core.next_record_no = Some(supervisor.handle.prefix().next_record);
+            let runtime = supervisor.core.streams.get_mut(&a.id).expect("scope");
+            runtime.capture_attempt_frontier = u64::MAX - 1;
+            runtime.accounted_attempt_frontier = u64::MAX - 1;
+            supervisor
+                .queue_text(
+                    &mut turn,
+                    a.connection_id,
+                    tag.connection,
+                    stamp(RECONNECT_MAX_NS_V1 + 20),
+                    b"{",
+                )
+                .outcome
+                .expect("MAX admitted");
+            let observed = if old_tag {
+                a.tag.connection
+            } else {
+                tag.connection
+            };
+            let failed = supervisor.queue_text(
+                &mut turn,
+                a.connection_id,
+                observed,
+                stamp(RECONNECT_MAX_NS_V1 + 21),
+                b"unrepresented",
+            );
+            assert_eq!(
+                failed.outcome,
+                Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
+            );
+            let failure = failed.failure.expect("reserved exact failure");
+            assert_eq!(
+                failure.attempt,
+                session::AttemptIdentity::NoRepresentableSuccessor { frontier: u64::MAX }
+            );
+            assert_eq!(failure.current_epoch, tag.connection);
+            assert_eq!(failure.observed_tag.connection, observed);
+            assert_eq!(failure.stamp.monotonic_ns, RECONNECT_MAX_NS_V1 + 21);
+            assert!(matches!(
+                failed.session_disposition,
+                session::SessionDisposition::DiagnosticOnly { .. }
+            ));
+            dispatch_boundary(&mut owner, &mut turn, failed.commands);
+            let count = supervisor.retention_report().ownership.work_used;
+            for _ in 0..3 {
+                assert_eq!(
+                    supervisor
+                        .queue_text(
+                            &mut turn,
+                            a.connection_id,
+                            observed,
+                            stamp(u64::MAX),
+                            b"unrepresented"
+                        )
+                        .outcome,
+                    Ok(AdmissionOutcome::AlreadyTerminated)
+                );
+                assert_eq!(
+                    supervisor
+                        .queue_text(
+                            &mut turn,
+                            a.connection_id,
+                            tag.connection,
+                            stamp(u64::MAX),
+                            b"pong"
+                        )
+                        .outcome,
+                    Ok(AdmissionOutcome::AlreadyTerminated)
+                );
+                assert_eq!(
+                    supervisor
+                        .queue_connected(
+                            &mut turn,
+                            a.connection_id,
+                            tag.connection.checked_next().expect("next"),
+                            stamp(u64::MAX)
+                        )
+                        .outcome,
+                    Ok(AdmissionOutcome::AlreadyTerminated)
+                );
+                assert_eq!(
+                    supervisor
+                        .queue_disconnected(
+                            &mut turn,
+                            a.connection_id,
+                            tag.connection,
+                            stamp(u64::MAX)
+                        )
+                        .outcome,
+                    Ok(AdmissionOutcome::AlreadyTerminated)
+                );
+                assert_eq!(supervisor.terminal_failure(a.id), Some(failure));
+                assert_eq!(supervisor.retention_report().ownership.work_used, count);
+            }
+            assert_eq!(
+                supervisor
+                    .snapshot(a.id)
+                    .expect("frontier")
+                    .capture_attempt_frontier,
+                u64::MAX
+            );
+            assert_eq!(
+                supervisor
+                    .snapshot(a.id)
+                    .expect("frontier")
+                    .accounted_attempt_frontier,
+                u64::MAX - 1
+            );
+            let report = supervisor.drain_one(&mut turn, &mut sink);
+            assert!(matches!(
+                report.session_disposition,
+                session::SessionDisposition::DiagnosticOnly { .. }
+            ));
+            let result = report
+                .outcome
+                .expect("MAX diagnostic drain")
+                .expect("MAX result");
+            assert_eq!(result.records.len(), 1);
+            drop(result);
+            assert_eq!(
+                supervisor
+                    .snapshot(a.id)
+                    .expect("accounted")
+                    .accounted_attempt_frontier,
+                u64::MAX
+            );
+            drop(drain_boundary(
+                &mut supervisor,
+                &mut owner,
+                &mut turn,
+                &mut sink,
+            ));
+            supervisor.queue_text(&mut turn, b.connection_id, b.tag.connection, stamp(RECONNECT_MAX_NS_V1 + 22), br#"{"event":"subscribe","arg":{"instType":"usdt-futures","topic":"books50","symbol":"ETHUSDT"}}"#).outcome.expect("neighbor raw");
+            drop(drain_boundary(
+                &mut supervisor,
+                &mut owner,
+                &mut turn,
+                &mut sink,
+            ));
+            supervisor
+                .queue_tick(&mut turn, stamp(RECONNECT_MAX_NS_V1 + 23))
+                .outcome
+                .expect("neighbor ping proposal");
+            let report = supervisor.drain_one(&mut turn, &mut sink);
+            let mut result = report
+                .outcome
+                .expect("neighbor timer")
+                .expect("neighbor result");
+            assert!(result.commands.iter().any(|command| command.connection() == b.connection_id && matches!(command.kind(), session::CommandKind::SendText { text } if text == "ping")));
+            dispatch_boundary(&mut owner, &mut turn, std::mem::take(&mut result.commands));
+            drop(result);
+            assert!(!supervisor.is_halted());
+            assert!(owner.begin_finalization(&mut turn).is_err());
+            drop(sink);
+            drop(owner);
+            let mut reader = recording::WalReader::open(&path).expect("reader");
+            while reader
+                .next_record()
+                .expect("valid bounded prefix")
+                .is_some()
+            {}
+            assert_eq!(
+                reader.report().status,
+                recording::ArchiveStatus::ValidPrefixIncomplete
+            );
+            assert_eq!(reader.report().input_quality, None);
+            drop(reader);
+        }
+    }
+
+    #[test]
+    fn capture_termination_drains_admitted_connected_and_pong_without_live_revival() {
+        let policy = QueuePolicy {
+            max_total_items: 9,
+            ..QueuePolicy::default()
+        };
+        let (mut supervisor, mut owner, mut turn, mut sink, bindings, path) =
+            bound_boundary_fixture_with_policy(policy);
+        let a = &bindings[0];
+        let b = &bindings[1];
+        let started = supervisor.start_commands(&mut turn);
+        started.outcome.expect("start");
+        dispatch_boundary(&mut owner, &mut turn, started.commands);
+        supervisor
+            .queue_connected(&mut turn, a.connection_id, a.tag.connection, stamp(10))
+            .outcome
+            .expect("precut Connected A");
+        supervisor
+            .queue_text(
+                &mut turn,
+                a.connection_id,
+                a.tag.connection,
+                stamp(11),
+                b"pong",
+            )
+            .outcome
+            .expect("precut Pong A");
+        supervisor
+            .queue_connected(&mut turn, b.connection_id, b.tag.connection, stamp(12))
+            .outcome
+            .expect("precut Connected B");
+        supervisor
+            .queue_text(
+                &mut turn,
+                b.connection_id,
+                b.tag.connection,
+                stamp(13),
+                b"pong",
+            )
+            .outcome
+            .expect("precut Pong B");
+        supervisor
+            .queue_text(
+                &mut turn,
+                a.connection_id,
+                a.tag.connection,
+                stamp(14),
+                b"{",
+            )
+            .outcome
+            .expect("precut Raw A1");
+        supervisor
+            .queue_text(
+                &mut turn,
+                a.connection_id,
+                a.tag.connection,
+                stamp(15),
+                b"pong",
+            )
+            .outcome
+            .expect("precut later Pong A");
+        let failed = supervisor.queue_text(
+            &mut turn,
+            a.connection_id,
+            a.tag.connection,
+            stamp(16),
+            b"{",
+        );
+        assert_eq!(
+            failed.outcome,
+            Err(SupervisorError::QueueExhausted { stream: a.id })
+        );
+        dispatch_boundary(&mut owner, &mut turn, failed.commands);
+        let before = supervisor.snapshot(a.id).expect("terminated scope");
+        assert!(before.capture_terminated);
+        assert_eq!(before.transport, Transport::Unknown);
+        for index in 0..6 {
+            let report = supervisor.drain_one(&mut turn, &mut sink);
+            assert!(matches!(
+                report.session_disposition,
+                session::SessionDisposition::DiagnosticOnly { .. }
+            ));
+            let mut result = report
+                .outcome
+                .expect("historical gated drain")
+                .expect("record");
+            assert_eq!(result.records.len(), 1);
+            if [0, 1, 5].contains(&index) {
+                assert!(result.commands.is_empty());
+            }
+            dispatch_boundary(&mut owner, &mut turn, std::mem::take(&mut result.commands));
+            assert_eq!(
+                supervisor
+                    .snapshot(a.id)
+                    .expect("no capture revival")
+                    .transport,
+                Transport::Unknown
+            );
+        }
+        drop(drain_boundary(
+            &mut supervisor,
+            &mut owner,
+            &mut turn,
+            &mut sink,
+        ));
+        let mut expected = before;
+        expected.accounted_attempt_frontier = 1;
+        expected.queued_raw_frames = 0;
+        expected.queued_raw_bytes = 0;
+        assert_eq!(supervisor.snapshot(a.id).expect("same failure"), expected);
+        drop(sink);
+        drop(owner);
+        let mut reader = recording::WalReader::open(&path).expect("reader");
+        let mut observed = Vec::new();
+        while let Some(frame) = reader.next_record().expect("accepted prefix") {
+            if let Record::Control(ControlRecord {
+                context,
+                value:
+                    Control::Transport {
+                        connection,
+                        value: Transport::Up,
+                        ..
+                    },
+            }) = frame.value
+            {
+                observed.push((connection, context.monotonic_ns.get()));
+            }
+        }
+        assert_eq!(
+            observed,
+            [
+                (a.connection_id, 10),
+                (a.connection_id, 11),
+                (b.connection_id, 12),
+                (b.connection_id, 13),
+                (a.connection_id, 15)
+            ]
+        );
+        drop(reader);
+    }
+    fn external_failed_marker(
+        supervisor: &PublicWsSupervisor,
+        at: u64,
+        reason: Reason,
+    ) -> RecordFrame {
+        RecordFrame {
+            record_no: supervisor.handle.prefix().next_record,
+            segment_no: supervisor.core.segment_no,
+            value: Record::Control(ControlRecord {
+                context: stamp(at).wire_context(supervisor.core.active_context),
+                value: Control::Recording(domain::record::RecordingEvidence {
+                    health: domain::record::RecordingHealth::Failed,
+                    kind: WatermarkKind::Durable,
+                    through: supervisor
+                        .handle
+                        .authority()
+                        .trusted_watermark(WatermarkKind::Durable),
+                    reason,
+                }),
+            }),
+        }
+    }
+
+    fn boundary_queue_gap(
+        supervisor: &PublicWsSupervisor,
+        stream: StreamId,
+    ) -> (u64, u64, u64, ReceiveStamp) {
+        supervisor
+            .core
+            .queue
+            .iter()
+            .find_map(|ingress| match ingress {
+                Ingress::QueueGap {
+                    stream: stored,
+                    first_attempt,
+                    last_attempt,
+                    loss_count,
+                    stamp,
+                    ..
+                } if *stored == stream => {
+                    Some((first_attempt.get(), last_attempt.get(), *loss_count, *stamp))
+                }
+                _ => None,
+            })
+            .expect("exact admitted GAP")
+    }
+
+    #[test]
+    fn external_archive_failure_freezes_pre_cut_gap_and_preserves_first_marker_descriptor() {
+        for free_work in [false, true] {
+            let policy = QueuePolicy {
+                max_total_items: 9,
+                ..QueuePolicy::default()
+            };
+            let (mut supervisor, mut owner, mut turn, mut sink, bindings, path) =
+                bound_boundary_fixture_with_policy(policy);
+            let a = &bindings[0];
+            let b = &bindings[1];
+            let started = supervisor.start_commands(&mut turn);
+            started.outcome.expect("start");
+            dispatch_boundary(&mut owner, &mut turn, started.commands);
+            for binding in &bindings {
+                supervisor
+                    .queue_connected(
+                        &mut turn,
+                        binding.connection_id,
+                        binding.tag.connection,
+                        stamp(0),
+                    )
+                    .outcome
+                    .expect("connected");
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+            }
+            supervisor.queue_text(&mut turn, b.connection_id, b.tag.connection, stamp(1), br#"{"event":"subscribe","arg":{"instType":"usdt-futures","topic":"books50","symbol":"ETHUSDT"}}"#).outcome.expect("B Raw1");
+            drop(drain_boundary(
+                &mut supervisor,
+                &mut owner,
+                &mut turn,
+                &mut sink,
+            ));
+            for at in 10..15 {
+                supervisor
+                    .queue_text(
+                        &mut turn,
+                        a.connection_id,
+                        a.tag.connection,
+                        stamp(at),
+                        b"pong",
+                    )
+                    .outcome
+                    .expect("five distinct earlier owners");
+            }
+            let too_large = vec![b'x'; policy.max_raw_message_bytes + 1];
+            supervisor
+                .queue_text(
+                    &mut turn,
+                    b.connection_id,
+                    b.tag.connection,
+                    stamp(20),
+                    &too_large,
+                )
+                .outcome
+                .expect("B Gap2");
+            supervisor
+                .queue_text(
+                    &mut turn,
+                    b.connection_id,
+                    b.tag.connection,
+                    stamp(21),
+                    &too_large,
+                )
+                .outcome
+                .expect("B Gap2..3");
+            assert_eq!(supervisor.retention_report().ownership.work_used, 6);
+            let frozen = boundary_queue_gap(&supervisor, b.id);
+            assert_eq!(frozen, (2, 3, 2, stamp(20)));
+            let external = external_failed_marker(&supervisor, 25, Reason::Unknown);
+            assert_eq!(
+                sink.persist_marker(&mut turn, &external, RecordingGate::Durable),
+                Err(session::PersistBoundaryError::Authority(
+                    session::AuthorityError::NotQuiescent
+                ))
+            );
+            assert!(supervisor.session_status().failed);
+            assert_eq!(supervisor.session_status().storage_stopped, None);
+            assert_eq!(supervisor.session_status().first_failure, None);
+            assert_eq!(supervisor.retention_report().cut_remaining, Some(6));
+            assert_eq!(supervisor.retention_report().ownership.pre_cut, 6);
+            if free_work {
+                drop(drain_boundary(
+                    &mut supervisor,
+                    &mut owner,
+                    &mut turn,
+                    &mut sink,
+                ));
+            }
+            let post = supervisor.queue_text(
+                &mut turn,
+                b.connection_id,
+                b.tag.connection,
+                stamp(40),
+                &too_large,
+            );
+            if free_work {
+                post.outcome.expect("separate counted PostCut GAP4");
+                assert!(post.failure.is_none());
+                assert_eq!(supervisor.retention_report().ownership.pre_cut, 5);
+                assert_eq!(supervisor.retention_report().ownership.post_cut, 1);
+            } else {
+                assert_eq!(
+                    post.outcome,
+                    Err(SupervisorError::QueueExhausted { stream: b.id })
+                );
+                let failure = post.failure.expect("exact B terminal");
+                assert_eq!(
+                    failure.attempt,
+                    session::AttemptIdentity::Candidate(
+                        CaptureAttemptNo::new(4).expect("candidate")
+                    )
+                );
+                assert_eq!(failure.stamp.monotonic_ns, 40);
+                dispatch_boundary(&mut owner, &mut turn, post.commands);
+            }
+            assert_eq!(boundary_queue_gap(&supervisor, b.id), frozen);
+            assert_eq!(supervisor.retention_report().ownership.work_used, 6);
+            assert_eq!(
+                supervisor
+                    .session_status()
+                    .archive_observation
+                    .expect("first archive descriptor")
+                    .context
+                    .monotonic_ns
+                    .get(),
+                25
+            );
+            assert_eq!(
+                supervisor
+                    .session_status()
+                    .archive_observation
+                    .expect("first archive reason")
+                    .reason,
+                Reason::Unknown
+            );
+            while let Some(result) =
+                drain_boundary(&mut supervisor, &mut owner, &mut turn, &mut sink)
+            {
+                drop(result);
+            }
+            assert_eq!(
+                supervisor
+                    .snapshot(b.id)
+                    .expect("accounted B")
+                    .accounted_attempt_frontier,
+                if free_work { 4 } else { 3 }
+            );
+            drop(sink);
+            drop(owner);
+            let mut reader = recording::WalReader::open(&path).expect("reader");
+            let mut evidence = Vec::new();
+            let mut marker_no = None;
+            let mut gaps = Vec::new();
+            while let Some(frame) = reader.next_record().expect("valid bounded prefix") {
+                match frame.value {
+                    Record::Control(ControlRecord {
+                        context,
+                        value: Control::Recording(recording),
+                    }) => {
+                        marker_no = Some(frame.record_no);
+                        evidence.push((context.monotonic_ns.get(), recording));
+                    }
+                    Record::Gap(gap) if gap.reason == Reason::QueueOverflow => {
+                        if let GapScope::ExplicitTargets(targets) = gap.scope
+                            && let Some(target) = targets.first()
+                            && target.stream == b.id
+                        {
+                            gaps.push((
+                                frame.record_no,
+                                target.range.expect("range"),
+                                target.loss_count,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(evidence.len(), 1);
+            assert_eq!(evidence[0].0, 25);
+            assert_eq!(evidence[0].1.reason, Reason::Unknown);
+            let marker_no = marker_no.expect("reserved archive marker");
+            assert!(
+                evidence[0]
+                    .1
+                    .through
+                    .is_some_and(|through| through < marker_no)
+            );
+            assert_eq!(gaps.len(), if free_work { 2 } else { 1 });
+            assert!(gaps[0].0 < marker_no);
+            assert_eq!(
+                (gaps[0].1.0.get(), gaps[0].1.1.get(), gaps[0].2),
+                (2, 3, Some(2))
+            );
+            if free_work {
+                assert!(gaps[1].0 > marker_no);
+                assert_eq!(
+                    (gaps[1].1.0.get(), gaps[1].1.1.get(), gaps[1].2),
+                    (4, 4, Some(1))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn successful_external_marker_is_authoritative_without_acknowledgement_or_duplicate() {
+        let (mut supervisor, mut owner, mut turn, mut sink, bindings, path) =
+            bound_boundary_fixture();
+        let a = &bindings[0];
+        let started = supervisor.start_commands(&mut turn);
+        started.outcome.expect("start");
+        let marker = external_failed_marker(&supervisor, 100, Reason::Unknown);
+        let receipt = sink
+            .persist_marker(&mut turn, &marker, RecordingGate::Durable)
+            .expect("gated external marker");
+        assert_eq!(
+            supervisor.session_status().marker,
+            session::MarkerState::Confirmed(receipt.through)
+        );
+        assert_eq!(supervisor.retention_report().cut_remaining, Some(0));
+        assert_eq!(
+            supervisor.retention_report().ownership.work_used,
+            2,
+            "held Connect leases stay counted"
+        );
+        dispatch_boundary(&mut owner, &mut turn, started.commands);
+        let queued =
+            supervisor.queue_connected(&mut turn, a.connection_id, a.tag.connection, stamp(101));
+        assert!(matches!(
+            queued.session_disposition,
+            session::SessionDisposition::DiagnosticOnly { .. }
+        ));
+        queued.outcome.expect("post-cut neighbor transport");
+        let result = drain_boundary(&mut supervisor, &mut owner, &mut turn, &mut sink)
+            .expect("post-cut record");
+        assert_eq!(
+            result.records[0],
+            receipt
+                .through
+                .checked_next()
+                .expect("authenticated successor")
+        );
+        drop(result);
+        assert!(
+            supervisor
+                .drain_one(&mut turn, &mut sink)
+                .outcome
+                .expect("empty")
+                .is_none()
+        );
+        assert_eq!(
+            supervisor
+                .snapshot(a.id)
+                .expect("attempt unchanged")
+                .capture_attempt_frontier,
+            0
+        );
+        drop(sink);
+        drop(owner);
+        let mut reader = recording::WalReader::open(&path).expect("reader");
+        let mut failed = 0;
+        while let Some(frame) = reader.next_record().expect("valid prefix") {
+            if matches!(
+                frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Recording(domain::record::RecordingEvidence {
+                        health: domain::record::RecordingHealth::Failed,
+                        ..
+                    }),
+                    ..
+                })
+            ) {
+                failed += 1;
+            }
+        }
+        assert_eq!(
+            failed, 1,
+            "actual external receipt prevents a duplicate marker"
+        );
+    }
+
+    #[test]
+    fn constructor_rejects_unused_handles_after_closing_failure_and_finalization() {
+        for state in 0..3 {
+            let (supervisor, mut owner, mut turn, mut sink, bindings, _) = bound_boundary_fixture();
+            let config = WsSupervisorConfig {
+                active_context: supervisor.core.active_context,
+                recording_gate: supervisor.core.recording_gate,
+                segment_no: supervisor.core.segment_no,
+                next_record_no: supervisor.handle.prefix().next_record,
+                queue_policy: supervisor.core.queue_policy,
+                streams: bindings,
+            };
+            let marker = external_failed_marker(&supervisor, 100, Reason::Unknown);
+            let handle = supervisor.handle;
+            let expected = match state {
+                0 => {
+                    let _ticket = owner.begin_finalization(&mut turn).expect("Closing");
+                    session::AuthorityError::SessionClosing
+                }
+                1 => {
+                    sink.persist_marker(&mut turn, &marker, RecordingGate::Durable)
+                        .expect("archive failed");
+                    session::AuthorityError::ArchiveFailed
+                }
+                _ => {
+                    let ticket = owner.begin_finalization(&mut turn).expect("Closing");
+                    let session::QuiescenceReport::Ready(proof) =
+                        handle.quiesce(&mut turn, &ticket)
+                    else {
+                        panic!("empty registered ownership");
+                    };
+                    owner
+                        .finalize(&mut turn, proof)
+                        .expect("explicit healthy finalization");
+                    session::AuthorityError::SessionClosed
+                }
+            };
+            assert!(
+                matches!(PublicWsSupervisor::new(config, handle), Err(SupervisorError::Authority(error)) if error == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn external_scope_termination_suppresses_revival_but_keeps_admitted_historical_up() {
+        let (mut supervisor, mut owner, mut turn, mut sink, bindings, _) = bound_boundary_fixture();
+        let a = &bindings[0];
+        let started = supervisor.start_commands(&mut turn);
+        started.outcome.expect("start");
+        dispatch_boundary(&mut owner, &mut turn, started.commands);
+        supervisor
+            .queue_connected(&mut turn, a.connection_id, a.tag.connection, stamp(10))
+            .outcome
+            .expect("admitted Connected");
+        let failure = session::TerminalFailure {
+            stream: a.id,
+            connection: a.connection_id,
+            observed_tag: a.tag,
+            current_epoch: a.tag.connection,
+            context: supervisor.core.active_context,
+            stamp: session::ReceiveStamp {
+                unix_ns: stamp(11).unix_ns,
+                monotonic_ns: 11,
+            },
+            input_class: session::InputClass::Raw,
+            attempt: session::AttemptIdentity::Candidate(
+                CaptureAttemptNo::new(1).expect("candidate"),
+            ),
+            cause: session::FailureCause::QueueOverflow,
+        };
+        let terminated = sink
+            .authority()
+            .terminate(&mut turn, failure)
+            .expect("same-owner terminal decision");
+        // Read-only reporting must expose the reserved slot before any
+        // mutable supervisor entry has synchronized the core runtime.
+        assert_eq!(supervisor.retention_report().filled_terminal_slots, 1);
+        let external_snapshot = supervisor.snapshot(a.id).expect("configured stream");
+        assert!(external_snapshot.capture_terminated);
+        assert_eq!(external_snapshot.capture_attempt_frontier, 1);
+        dispatch_boundary(
+            &mut owner,
+            &mut turn,
+            terminated.close.map(session::CloseLease::into_command),
+        );
+        let report = supervisor.drain_one(&mut turn, &mut sink);
+        assert!(matches!(
+            report.session_disposition,
+            session::SessionDisposition::DiagnosticOnly { .. }
+        ));
+        let result = report
+            .outcome
+            .expect("admitted Connected drain")
+            .expect("historical Up");
+        assert_eq!(result.records.len(), 1);
+        assert!(result.commands.is_empty());
+        drop(result);
+        let snapshot = supervisor.snapshot(a.id).expect("terminal");
+        assert!(snapshot.capture_terminated);
+        assert_eq!(snapshot.transport, Transport::Unknown);
+        assert_eq!(snapshot.subscription, SubscriptionState::Degraded);
+        assert_eq!(snapshot.capture_attempt_frontier, 1);
+        assert_eq!(snapshot.accounted_attempt_frontier, 0);
+        assert_eq!(
+            supervisor
+                .queue_text(
+                    &mut turn,
+                    a.connection_id,
+                    a.tag.connection,
+                    stamp(12),
+                    b"ignored"
+                )
+                .outcome,
+            Ok(AdmissionOutcome::AlreadyTerminated)
+        );
+        drop(drain_boundary(
+            &mut supervisor,
+            &mut owner,
+            &mut turn,
+            &mut sink,
+        ));
+    }
+    #[test]
+    fn start_capacity_rejection_preserves_admission_order_and_start_state() {
+        let policy = QueuePolicy {
+            max_total_items: 9,
+            ..QueuePolicy::default()
+        };
+        let (mut supervisor, _owner, mut turn, _sink, bindings, _) =
+            bound_boundary_fixture_with_policy(policy);
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            held.push(
+                supervisor
+                    .handle
+                    .reserve_work(&mut turn, session::WorkKind::Command)
+                    .expect("held counted jobs"),
+            );
+        }
+        let last = held.last().expect("last held admission").id();
+        let snapshots: Vec<_> = bindings
+            .iter()
+            .map(|binding| supervisor.snapshot(binding.id).expect("scope"))
+            .collect();
+        let rejected = supervisor.start_commands(&mut turn);
+        assert_eq!(
+            rejected.outcome,
+            Err(SupervisorError::Authority(
+                session::AuthorityError::WorkExhausted
+            ))
+        );
+        assert!(rejected.commands.is_empty());
+        assert!(!supervisor.core.started);
+        assert_eq!(supervisor.retention_report().ownership.work_used, 5);
+        for (binding, snapshot) in bindings.iter().zip(snapshots) {
+            assert_eq!(
+                supervisor.snapshot(binding.id).expect("unchanged"),
+                snapshot
+            );
+        }
+        drop(held.pop());
+        let next = supervisor
+            .handle
+            .reserve_work(&mut turn, session::WorkKind::Command)
+            .expect("next actual admission");
+        assert_eq!(
+            next.id(),
+            last + 1,
+            "capacity rejection creates no partial admission sequence"
+        );
+    }
+
+    #[test]
+    fn received_admission_order_exhaustion_uses_reserved_exact_failure_and_keeps_prefix_drainable()
+    {
+        // Domain's private MAX-sequence test establishes the real checked
+        // reservation error. This private seam supplies that negative result
+        // only; all ownership, Close dispatch and receipts use a genuine owner.
+        for class in 0..5 {
+            let (mut supervisor, mut owner, mut turn, mut sink, bindings, path) =
+                bound_boundary_fixture();
+            let a = &bindings[0];
+            let b = &bindings[1];
+            let started = supervisor.start_commands(&mut turn);
+            started.outcome.expect("start");
+            dispatch_boundary(&mut owner, &mut turn, started.commands);
+            if class == 4 {
+                let counted = supervisor
+                    .handle
+                    .reserve_work(&mut turn, session::WorkKind::InFlightObservation)
+                    .expect("counted synthetic counter-boundary prefix");
+                let gap = RecordFrame {
+                    record_no: supervisor.handle.prefix().next_record,
+                    segment_no: SegmentNo::new(0),
+                    value: Record::Gap(Gap {
+                        context: stamp(1).wire_context(supervisor.core.active_context),
+                        scope: GapScope::ExplicitTargets(vec![GapTarget {
+                            stream: a.id,
+                            tag: a.tag,
+                            range: Some((
+                                CaptureAttemptNo::new(1).expect("first"),
+                                CaptureAttemptNo::new(u64::MAX).expect("last"),
+                            )),
+                            loss_count: Some(u64::MAX),
+                        }]),
+                        reason: Reason::QueueOverflow,
+                    }),
+                };
+                sink.persist_owned(&mut turn, &gap, RecordingGate::Durable, &counted)
+                    .expect("actual counter-boundary prefix receipt");
+                drop(counted);
+                let runtime = supervisor.core.streams.get_mut(&a.id).expect("stream");
+                runtime.capture_attempt_frontier = u64::MAX;
+                runtime.accounted_attempt_frontier = u64::MAX;
+            }
+            for binding in &bindings {
+                supervisor
+                    .queue_connected(
+                        &mut turn,
+                        binding.connection_id,
+                        binding.tag.connection,
+                        stamp(10 + binding.id.get() as u64),
+                    )
+                    .outcome
+                    .expect("admitted before failure");
+            }
+            let (call, expected_class, expected_attempt) = match class {
+                0 => (
+                    ReceivedCall::Text(b"unrepresented"),
+                    session::InputClass::Raw,
+                    session::AttemptIdentity::Candidate(
+                        CaptureAttemptNo::new(1).expect("candidate"),
+                    ),
+                ),
+                1 => (
+                    ReceivedCall::Text(b"pong"),
+                    session::InputClass::Pong,
+                    session::AttemptIdentity::NotRaw,
+                ),
+                2 => (
+                    ReceivedCall::Connected,
+                    session::InputClass::Connected,
+                    session::AttemptIdentity::NotRaw,
+                ),
+                3 => (
+                    ReceivedCall::Disconnected,
+                    session::InputClass::Disconnected,
+                    session::AttemptIdentity::NotRaw,
+                ),
+                _ => (
+                    ReceivedCall::Text(b"unrepresented"),
+                    session::InputClass::Raw,
+                    session::AttemptIdentity::NoRepresentableSuccessor { frontier: u64::MAX },
+                ),
+            };
+            let mut reserve_calls = 0;
+            let failed = supervisor.admit_with_reserver(
+                &mut turn,
+                Some(a.connection_id),
+                Some(a.tag.connection),
+                stamp(100),
+                call,
+                |_, _| {
+                    reserve_calls += 1;
+                    Err(session::AuthorityError::CounterExhausted("AdmissionOrder"))
+                },
+            );
+            assert_eq!(reserve_calls, 1);
+            assert_eq!(
+                failed.outcome,
+                Err(SupervisorError::Authority(
+                    session::AuthorityError::CounterExhausted("AdmissionOrder")
+                ))
+            );
+            let exact = failed.failure.expect("reserved exact failure");
+            assert_eq!(exact.stream, a.id);
+            assert_eq!(exact.observed_tag, a.tag);
+            assert_eq!(exact.stamp.monotonic_ns, 100);
+            assert_eq!(exact.stamp.unix_ns, stamp(100).unix_ns);
+            assert_eq!(exact.input_class, expected_class);
+            assert_eq!(exact.attempt, expected_attempt);
+            assert_eq!(
+                exact.cause,
+                session::FailureCause::CounterExhausted("AdmissionOrder")
+            );
+            assert!(supervisor.session_status().failed);
+            assert!(supervisor.session_status().storage_stopped.is_none());
+            assert!(!supervisor.is_halted());
+            let retained = supervisor.retention_report();
+            assert_eq!(retained.ownership.work_used, 2);
+            assert_eq!(retained.filled_terminal_slots, 1);
+            assert_eq!(retained.cut_remaining, Some(2));
+            dispatch_boundary(&mut owner, &mut turn, failed.commands);
+            for _ in 0..3 {
+                assert_eq!(
+                    supervisor
+                        .queue_text(
+                            &mut turn,
+                            a.connection_id,
+                            a.tag.connection,
+                            stamp(200),
+                            b"retry"
+                        )
+                        .outcome,
+                    Ok(AdmissionOutcome::AlreadyTerminated)
+                );
+                assert_eq!(supervisor.terminal_failure(a.id), Some(exact));
+                assert_eq!(supervisor.retention_report().ownership.work_used, 2);
+            }
+            let a_up = supervisor
+                .drain_one(&mut turn, &mut sink)
+                .outcome
+                .expect("diagnostic admitted Up")
+                .expect("first admitted owner");
+            assert!(a_up.commands.is_empty());
+            drop(a_up);
+            let b_up = supervisor
+                .drain_one(&mut turn, &mut sink)
+                .outcome
+                .expect("neighbor admitted Up")
+                .expect("second admitted owner");
+            assert_eq!(b_up.commands.len(), 1);
+            dispatch_boundary(&mut owner, &mut turn, b_up.commands);
+            drop(drain_boundary(
+                &mut supervisor,
+                &mut owner,
+                &mut turn,
+                &mut sink,
+            ));
+            assert!(matches!(
+                owner.begin_finalization(&mut turn),
+                Err(recording::OwnerError::Authority(
+                    session::AuthorityError::ArchiveFailed
+                ))
+            ));
+            assert_eq!(
+                supervisor.snapshot(b.id).expect("neighbor").transport,
+                Transport::Up
+            );
+            let mut reader = recording::WalReader::open(&path).expect("actual prefix");
+            let mut observed_marker = 0;
+            while let Some(frame) = reader.next_record().expect("valid prefix") {
+                assert!(!matches!(frame.value, Record::RawInput(_)));
+                if let Record::Control(ControlRecord {
+                    context,
+                    value: Control::Recording(evidence),
+                }) = frame.value
+                {
+                    observed_marker += 1;
+                    assert_eq!(context.monotonic_ns.get(), 100);
+                    assert_eq!(evidence.reason, Reason::Unknown);
+                    assert!(
+                        evidence
+                            .through
+                            .is_some_and(|earlier| earlier < frame.record_no)
+                    );
+                }
+            }
+            assert_eq!(observed_marker, 1);
+        }
+    }
+
+    #[test]
+    fn same_side_f2_loss_coalescing_does_not_reserve_new_admission_order() {
+        for post_cut in [false, true] {
+            let policy = QueuePolicy {
+                max_total_items: 9,
+                ..QueuePolicy::default()
+            };
+            let (mut supervisor, mut owner, mut turn, mut sink, bindings, _) =
+                bound_boundary_fixture_with_policy(policy);
+            let b = &bindings[1];
+            let started = supervisor.start_commands(&mut turn);
+            started.outcome.expect("start");
+            dispatch_boundary(&mut owner, &mut turn, started.commands);
+            if post_cut {
+                let marker = external_failed_marker(&supervisor, 50, Reason::Unknown);
+                sink.persist_marker(&mut turn, &marker, RecordingGate::Durable)
+                    .expect("confirmed archive cut with no queued observations");
+            }
+            let bytes = vec![b'x'; policy.max_raw_message_bytes + 1];
+            supervisor
+                .queue_text(
+                    &mut turn,
+                    b.connection_id,
+                    b.tag.connection,
+                    stamp(60),
+                    &bytes,
+                )
+                .outcome
+                .expect("counted loss owner");
+            let before = supervisor.retention_report().ownership.work_used;
+            let coalesced = supervisor.admit_with_reserver(
+                &mut turn,
+                Some(b.connection_id),
+                Some(b.tag.connection),
+                stamp(61),
+                ReceivedCall::Text(&bytes),
+                |_, _| panic!("same-side F2 must not reserve even at AdmissionOrder::MAX"),
+            );
+            assert_eq!(coalesced.outcome, Ok(AdmissionOutcome::CoalescedLoss));
+            assert!(coalesced.failure.is_none());
+            assert_eq!(supervisor.retention_report().ownership.work_used, before);
+            assert_eq!(
+                supervisor
+                    .snapshot(b.id)
+                    .expect("neighbor")
+                    .capture_attempt_frontier,
+                2
+            );
+            assert!(
+                matches!(supervisor.core.queue.back(), Some(Ingress::QueueGap {
+                first_attempt, last_attempt, loss_count: 2, stamp: original, ..
+            }) if first_attempt.get() == 1 && last_attempt.get() == 2 && original.monotonic_ns == 60)
+            );
+            if !post_cut {
+                let marker = external_failed_marker(&supervisor, 62, Reason::Unknown);
+                assert!(matches!(
+                    sink.persist_marker(&mut turn, &marker, RecordingGate::Durable),
+                    Err(session::PersistBoundaryError::Authority(
+                        session::AuthorityError::NotQuiescent
+                    ))
+                ));
+                let mut reserve_calls = 0;
+                let terminal = supervisor.admit_with_reserver(
+                    &mut turn,
+                    Some(b.connection_id),
+                    Some(b.tag.connection),
+                    stamp(63),
+                    ReceivedCall::Text(&bytes),
+                    |_, _| {
+                        reserve_calls += 1;
+                        Err(session::AuthorityError::CounterExhausted("AdmissionOrder"))
+                    },
+                );
+                assert_eq!(reserve_calls, 1, "PreCut GAP cannot serve post-cut loss");
+                assert_eq!(
+                    terminal.failure.expect("exact terminal").attempt,
+                    session::AttemptIdentity::Candidate(
+                        CaptureAttemptNo::new(3).expect("candidate")
+                    )
+                );
+                assert!(
+                    matches!(supervisor.core.queue.back(), Some(Ingress::QueueGap {
+                    last_attempt, loss_count: 2, stamp: original, ..
+                }) if last_attempt.get() == 2 && original.monotonic_ns == 60)
+                );
+                dispatch_boundary(&mut owner, &mut turn, terminal.commands);
+            }
+        }
     }
 }

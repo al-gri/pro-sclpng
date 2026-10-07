@@ -337,13 +337,8 @@ impl HealthModel {
             Control::Warmup(value) => self.warmup(at, value, env, out)?,
             Control::Freshness(value) => self.freshness_evidence(at, value, env, out)?,
             Control::Recording(evidence) => {
-                self.recording
-                    .watermarks
-                    .observe(at, self.last_record, evidence)?;
-                self.recording.health = evidence.health;
-                self.recording.reason = evidence.reason;
-                self.recording.last_receipt = Some(at);
-                if evidence.health != RecordingHealth::Healthy {
+                self.recording.observe(at, self.last_record, evidence)?;
+                if self.recording.effective_health() != RecordingHealth::Healthy {
                     for stream in self.streams.values_mut() {
                         stream.revoke();
                     }

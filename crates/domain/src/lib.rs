@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod capture_session;
 pub mod event;
 pub mod identity;
 pub mod numeric;

@@ -233,6 +233,138 @@ fn v_r2_revoked_candidates_cannot_be_resurrected_by_late_fence() {
 }
 
 #[test]
+fn rec_001d_all_valid_failed_reasons_latch_before_late_success_and_fence() {
+    // Failed/NoFault is rejected by the accepted record shape. Every other
+    // valid reason, including the saturation and counter-boundary markers,
+    // means terminal failure of this archive/capture session.
+    for reason in [
+        Reason::UserReset,
+        Reason::Reconnect,
+        Reason::SourceGap,
+        Reason::QueueOverflow,
+        Reason::DecodeRejected,
+        Reason::WriteFailure,
+        Reason::Unknown,
+    ] {
+        let mut s = at_candidate21();
+        let candidate = s.stream().candidate.clone().unwrap();
+        assert_eq!(s.model.permit(&candidate, Some(&completion())), Ok(()));
+        let out = s
+            .submit(Record::Control(ControlRecord {
+                context: s.context(22),
+                value: Control::Recording(RecordingEvidence {
+                    health: RecordingHealth::Failed,
+                    kind: WatermarkKind::Durable,
+                    through: None,
+                    reason,
+                }),
+            }))
+            .unwrap();
+        assert!(out.candidates_created.is_empty());
+        assert_eq!(s.model.recording.watermarks.durable, Some(record(20)));
+        let failure = s.model.recording.terminal_failure.clone().unwrap();
+        assert_eq!(failure.record, record(22));
+        assert_eq!(failure.reason, reason);
+
+        let out = s
+            .receipt(
+                RecordingHealth::Healthy,
+                WatermarkKind::Durable,
+                Some(22),
+                23,
+            )
+            .unwrap();
+        assert!(out.candidates_created.is_empty());
+        assert_eq!(s.model.recording.health, RecordingHealth::Healthy);
+        assert_eq!(
+            s.model.recording.effective_health(),
+            RecordingHealth::Failed
+        );
+        assert_eq!(s.model.recording.watermarks.durable, Some(record(22)));
+        assert_eq!(s.model.recording.terminal_failure, Some(failure.clone()));
+        assert!(
+            s.transport(Transport::Up, 24)
+                .unwrap()
+                .candidates_created
+                .is_empty()
+        );
+        assert!(s.timer(25).unwrap().candidates_created.is_empty());
+        assert!(s.model.usable_data(s.stream().binding.id));
+        assert_eq!(s.stream().candidate.as_ref().unwrap().id, candidate.id);
+        assert!(s.stream().candidate.as_ref().unwrap().revoked);
+
+        let mut late = completion();
+        late.through = Some(record(25));
+        late.known_achieved_prefix = Some(record(25));
+        late.known_accepted_prefix = Some(record(25));
+        assert_eq!(
+            s.model.permit(&candidate, Some(&late)),
+            Err(PermitError::CandidateRevoked)
+        );
+        // Even independently of candidate revocation, the current-state guard
+        // must use effective recording health, not the last Healthy receipt.
+        assert_eq!(
+            publication_permit(
+                &candidate,
+                &PermitState {
+                    canonical_running: true,
+                    usable_data: true,
+                    recording: &s.model.recording,
+                    mode: s.model.start.mode,
+                    scope: &candidate.projection.scope,
+                    current_candidate: Some(&candidate),
+                },
+                Some(&late),
+            ),
+            Err(PermitError::RecordingNotHealthy)
+        );
+        assert_eq!(s.model.recording.terminal_failure, Some(failure));
+    }
+}
+
+#[test]
+fn rec_001d_nonterminal_recording_health_can_recover_with_a_new_candidate() {
+    let mut s = at_candidate21();
+    for (health, at) in [
+        (RecordingHealth::Degraded, 22),
+        (RecordingHealth::Unknown, 24),
+    ] {
+        let old = s.stream().candidate.clone().unwrap();
+        assert!(
+            s.receipt(health, WatermarkKind::Durable, None, at)
+                .unwrap()
+                .candidates_created
+                .is_empty()
+        );
+        assert_eq!(s.model.recording.effective_health(), health);
+        assert!(s.model.recording.terminal_failure.is_none());
+        assert!(s.stream().candidate.as_ref().unwrap().revoked);
+        let out = s
+            .receipt(
+                RecordingHealth::Healthy,
+                WatermarkKind::Durable,
+                Some(at),
+                at + 1,
+            )
+            .unwrap();
+        assert_eq!(out.candidates_created.len(), 1);
+        let current = s.stream().candidate.as_ref().unwrap();
+        assert_ne!(current.id, old.id);
+        assert_eq!(current.causal_frontier, record(at + 1));
+        assert!(s.model.recording.terminal_failure.is_none());
+        let mut fence = completion();
+        fence.through = Some(record(at + 1));
+        fence.known_achieved_prefix = Some(record(at + 1));
+        fence.known_accepted_prefix = Some(record(at + 1));
+        assert_eq!(s.model.permit(current, Some(&fence)), Ok(()));
+        assert_eq!(
+            s.model.permit(&old, Some(&fence)),
+            Err(PermitError::CandidateRevoked)
+        );
+    }
+}
+
+#[test]
 fn v_r2_superseded_candidate_requires_new_causal_frontier() {
     let mut s = at_candidate21();
     let old = s.stream().candidate.clone().unwrap();

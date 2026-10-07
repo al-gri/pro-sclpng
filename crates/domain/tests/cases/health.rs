@@ -886,6 +886,7 @@ fn h16_recording_health_recovery_does_not_resync_invalid_book() {
     s.raw(vec![snapshot()], 10).unwrap();
     s.gap(Reason::QueueOverflow, None, None, 11).unwrap();
     assert_eq!(s.model.recording.health, RecordingHealth::Degraded);
+    assert!(s.model.recording.terminal_failure.is_none());
     assert_eq!(
         s.stream().book,
         Some(BookValidity::Invalid(Fault::Gap(Reason::QueueOverflow)))
@@ -900,11 +901,102 @@ fn h16_recording_health_recovery_does_not_resync_invalid_book() {
     .unwrap();
     assert_eq!(s.model.recording.health, RecordingHealth::Healthy);
     assert_eq!(
+        s.model.recording.effective_health(),
+        RecordingHealth::Healthy
+    );
+    assert_eq!(
         s.stream().book,
         Some(BookValidity::Invalid(Fault::Gap(Reason::QueueOverflow)))
     );
     assert_eq!(s.stream().anchor, None);
     assert!(!s.model.usable_data(s.stream().binding.id));
+}
+
+#[test]
+fn h17_terminal_recording_failure_preserves_observations_and_first_identity() {
+    let mut s = Scenario::recovered();
+    let candidate = s.stream().candidate.clone().unwrap();
+    let stream_before = s.stream().clone();
+    let failure_record = s.next_record();
+    let out = s
+        .submit(Record::Control(ControlRecord {
+            context: s.context(15),
+            value: Control::Recording(RecordingEvidence {
+                health: RecordingHealth::Failed,
+                kind: WatermarkKind::Durable,
+                through: None,
+                reason: Reason::Unknown,
+            }),
+        }))
+        .unwrap();
+    assert!(out.effects.is_empty());
+    assert!(out.candidates_created.is_empty());
+    assert_eq!(s.stream().binding, stream_before.binding);
+    assert_eq!(s.stream().loss, stream_before.loss);
+    assert_eq!(s.stream().book, stream_before.book);
+    assert_eq!(s.stream().anchor, stream_before.anchor);
+    let first_failure = s.model.recording.terminal_failure.clone().unwrap();
+    assert_eq!(first_failure.record, failure_record);
+    assert_eq!(first_failure.reason, Reason::Unknown);
+    assert_eq!(s.stream().candidate.as_ref().unwrap().id, candidate.id);
+    assert!(s.stream().candidate.as_ref().unwrap().revoked);
+
+    // Physical receipt progress is still observed, but its health value never
+    // restores this archive/session's effective recording health.
+    let out = s
+        .receipt(
+            RecordingHealth::Healthy,
+            WatermarkKind::Durable,
+            Some(15),
+            16,
+        )
+        .unwrap();
+    assert!(out.candidates_created.is_empty());
+    assert_eq!(s.model.recording.health, RecordingHealth::Healthy);
+    assert_eq!(s.model.recording.reason, Reason::NoFault);
+    assert_eq!(s.model.recording.last_receipt.unwrap().get(), 16);
+    assert_eq!(s.model.recording.watermarks.durable.unwrap().get(), 15);
+    assert_eq!(
+        s.model.recording.effective_health(),
+        RecordingHealth::Failed
+    );
+
+    let out = s.gap(Reason::QueueOverflow, None, None, 17).unwrap();
+    assert!(out.candidates_created.is_empty());
+    assert_eq!(s.model.recording.health, RecordingHealth::Degraded);
+    assert_eq!(
+        s.model.recording.effective_health(),
+        RecordingHealth::Failed
+    );
+    s.receipt(RecordingHealth::Failed, WatermarkKind::Durable, None, 18)
+        .unwrap();
+    assert_eq!(s.model.recording.terminal_failure, Some(first_failure));
+    assert_eq!(s.model.recording.watermarks.durable.unwrap().get(), 15);
+}
+
+#[test]
+fn h17_invalid_failed_observation_does_not_enter_the_recorded_prefix() {
+    for (reason, through) in [(Reason::QueueOverflow, Some(15)), (Reason::NoFault, None)] {
+        let mut s = Scenario::recovered();
+        let before = s.model.clone();
+        assert!(
+            s.submit(Record::Control(ControlRecord {
+                context: s.context(15),
+                value: Control::Recording(RecordingEvidence {
+                    health: RecordingHealth::Failed,
+                    kind: WatermarkKind::Durable,
+                    through: through.map(|n| RecordNo::new(n).unwrap()),
+                    reason,
+                }),
+            }))
+            .is_err()
+        );
+        assert_eq!(s.model.last_record, before.last_record);
+        assert_eq!(s.model.recording, before.recording);
+        assert_eq!(s.model.streams, before.streams);
+        assert!(s.model.recording.terminal_failure.is_none());
+        assert!(s.model.blocked.is_some());
+    }
 }
 
 #[test]
@@ -931,7 +1023,12 @@ fn h18_restart_has_new_archive_clock_and_no_inherited_ready_state() {
     assert!(restarted.streams.is_empty());
     assert!(restarted.transport.is_empty());
     assert_eq!(restarted.recording.health, RecordingHealth::Unknown);
+    assert_eq!(
+        restarted.recording.effective_health(),
+        RecordingHealth::Unknown
+    );
     assert_eq!(restarted.recording.last_receipt, None);
+    assert!(restarted.recording.terminal_failure.is_none());
     assert!(restarted.blocked.is_none());
 }
 
