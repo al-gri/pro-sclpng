@@ -718,6 +718,7 @@ Target worker stop state after the containing-head CI succeeds:
 **READY_FOR_INDEPENDENT_QA**. The worker does not declare
 READY_FOR_OWNER_REVIEW.
 
+
 ## Third independent-QA CHANGES_REQUIRED remediation
 
 The third full independent QA reviewed exact immutable head
@@ -791,6 +792,12 @@ completion, the existing persistence failure path halts fail-closed; in-memory
 runtime is not partially advanced. Any already persisted WAL prefix remains an
 honest incomplete prefix rather than being hidden or retried as if unrecorded.
 
+Fourth-QA correction to this historical statement: halting and atomic runtime
+tags did not prove delivery of the required Close. On `32820de...`, a completion
+error could discard the same call's Down/Close result. The fourth remediation
+below separates those outcomes and defines the remaining partial-prefix limits;
+the third-remediation statement must not be read as full storage-error/API closure.
+
 Timer admission was also tightened: TimerId is checked before queue mutation,
 and timer frontier/queued flags are committed only after bounded ingress
 admission succeeds.
@@ -810,6 +817,9 @@ pong and ping-timer deadline overflow. Each requires either no irreversible
 transition record/state at all or explicit fail-closed halt; none leaves a
 non-halted stranded generation or loses a required command after a late
 deterministic calculation.
+
+This claim covered the tested deterministic calculations only. Fourth QA found
+required-command loss after a later storage error, addressed separately below.
 
 ### N2 — terminal-generation control rule
 
@@ -1030,3 +1040,198 @@ Target worker stop state after containing-head CI succeeds:
 **READY_FOR_INDEPENDENT_QA**. The worker does not declare
 READY_FOR_OWNER_REVIEW.
 
+## Fourth independent-QA CHANGES_REQUIRED remediation
+
+Fourth independent QA rejected immutable head
+`32820de289ccc4c8f1966cbb9a5726d4594f14da` with H1 HIGH and H2 MEDIUM.
+Run `37583133012` is historical PASS only for that rejected head; it is
+not acceptance evidence for this repair.
+
+Preflight verified actual main
+`39ff0dba797eb010586238ef06fb80e996340401`, PR #34 head and branch ref
+`32820de289ccc4c8f1966cbb9a5726d4594f14da`; comparison found zero later
+commits. Existing claim `6024304772`, recovery `6025249885` and
+third-remediation completion `6032549018` remain the same lineage.
+No replacement claim, Issue, branch or PR, force-push, merge or auto-merge.
+
+### H1 — required Close lost on completion persistence error
+
+Disposition: **FIXED**, subject to fresh containing-head CI and independent QA.
+
+The public signature remains
+`drain_one(&mut self, &mut impl RecordSink) -> Result<Option<DrainResult>, SupervisorError>`.
+No new supervisor DTO, setter, effect queue, Record, WAL or domain contract is
+introduced. The observable call boundary is deliberately corrected:
+
+1. First terminal Down must receive an exact receipt covering the configured gate.
+2. That ingress call returns `Ok(Some(...))` with Down and its one required
+   `TransportCommand::Close`. No completion persistence follows that result
+   construction inside the call.
+3. Already-admitted same-generation raw/loss/control barriers drain separately.
+   Their results also return without a subsequent completion attempt.
+4. The next drain checks pending transitions before popping ingress, even when
+   ingress is empty. It completes at most one ready stream per call.
+5. Completion persists connection, subscription and book EpochAdvance records.
+   Only three validated gate receipts allow the runtime tag to change, pending
+   ownership to clear, and one ReconnectAfter to return.
+6. A completion error returns the original typed persistence/receipt/gate error
+   and sets halt. Previously returned Close and neighbor commands remain owned
+   by the caller; an error cannot retract them. No reconnect/subscribe/ping is
+   returned on failure, and repeated calls return Halted without persistence.
+
+The driver must continue the existing drain loop until None or error, including
+a further call after the last ingress empties the queue. This is documented on
+the production method. An ingress Down result does not imply completed epoch
+advance. Returning a Close command proves caller visibility, not physical socket
+closure or successful external delivery; the external driver remains outside
+this PR. No promise that a driver closes upon arbitrary SupervisorError is used.
+
+Duplicate Down still persists as a separate external observation but owns no
+second Close/transition. Timeout persists Timer then Down and returns its Close
+before completion. Obsolete Connected/Pong and terminal PingTimer cannot revive
+the pending generation. QueueOverflow reaches the old scope before advance;
+accepted GapScopeTransition semantics are unchanged.
+
+### H1 fault-injection matrix and prefix interpretation
+
+A controlled test sink distinguishes every attempted frame from frames whose
+exact receipt reaches Durable. It never labels an error, mismatched receipt or
+weak gate as a confirmed record, including when bytes may have been received.
+
+All nine combinations are covered for immediate Disconnected and independently
+for PongTimeout (18 completion-fault cases):
+
+| EpochAdvance failure point | persist error | receipt mismatch | insufficient gate |
+|---|---|---|---|
+| connection | injected original Persistence error | explicit expected/actual mismatch | required Durable / achieved Written |
+| subscription | same, after confirmed connection prefix | same, after confirmed connection prefix | same, after confirmed connection prefix |
+| book | same, after confirmed connection/subscription prefix | same, after confirmed connection/subscription prefix | same, after confirmed connection/subscription prefix |
+
+Every case checks confirmed terminal Down, caller-visible Close in a prior
+successful production drain, the exact original error, halt, unchanged complete
+runtime tag, no reconnect/live commands, and no retry/persistence on subsequent
+drains. Successful earlier epoch writes remain an honest incomplete prefix.
+The failing attempt is not reported as confirmed.
+
+The API does not return a partial DrainResult with Err and does not promise a
+supervisor-only exact partial-prefix accessor. The caller's RecordSink and
+storage recovery retain evidence of successful writes and possible ambiguous
+physical bytes. Err does not prove the failing frame absent, roll back earlier
+records, or certify a complete archive. No automatic retry, epoch repair, archive
+reset or fabricated loss record fills that incomplete prefix.
+
+Additional coverage exercises Raw/QueueOverflow/control barriers, duplicate
+disconnect ownership, success with one Close/three advances/one reconnect and
+completion on empty ingress. Neighbor tests check both already-returned B
+subscribe/ping commands before A failure and B ingress still queued when ready A
+fails: completion does not pop/persist B and erase a command. A global terminal
+storage failure does prevent subsequent operation; this is distinct from loss of
+a command already returned to the caller.
+
+Integration regressions:
+- `disconnected_close_survives_every_epoch_completion_storage_failure` (9 cases);
+- `pong_timeout_close_survives_every_epoch_completion_storage_failure` (9 cases);
+- `close_survives_epoch_completion_faults_after_terminal_ingress_barriers`
+  (36 cases across Raw, QueueOverflow, Timer and duplicate Down barriers);
+- `empty_queue_deferred_completion_emits_one_reconnect_after_duplicate_and_barriers`;
+- `neighbor_commands_are_returned_before_failing_other_stream_completion` (9 cases).
+
+Together these run 63 fault-injection cases plus the successful mixed-barrier
+transition. They are test-sink boundary evidence, not physical crash/sync tests.
+
+Existing tests that assumed same-call completion now explicitly drain completion
+separately and retain old-tag/Down/barrier/no-revive assertions.
+
+### H2 — CaptureAttemptNo exhaustion
+
+Disposition: **FIXED**, subject to fresh containing-head CI and independent QA.
+
+The archive-long capture frontier uses checked addition. Exhaustion now calls
+`halt_with(CounterExhausted("CaptureAttemptNo"))` before frontier, queue,
+raw-byte/frame/item accounting or loss provenance changes. It does not wrap,
+reset, invent an attempt/GAP, change archive or restart at generation advance.
+
+Private unit setup reaches the impractical max boundary without a production
+setter. Tests cover current and supported previous generation with an admitted
+raw still queued, confirm all accounting/frontiers unchanged, and repeat
+raw/pong/Connected/Disconnected/tick/start/drain calls: Halted, no new records
+or commands, no retry loop. The previously confirmed sink prefix stays unchanged.
+
+Near-max coverage confirms MAX-2, MAX-1 and MAX raw attempts across ordinary
+generation advance, including previous-generation diagnostic raw. The frontier
+is archive-long and MAX remains a valid last attempt; only its successor halts.
+
+Tests:
+- `capture_attempt_exhaustion_halts_current_and_previous_generation_without_mutation`;
+- `near_max_capture_attempt_progression_is_archive_long_across_generation_change`.
+
+### Audit of related error paths
+
+This is a bounded reachability audit, not a claim that all storage/driver error
+boundaries or physical-delivery guarantees are proven.
+
+| Path | Reachable outcome / disposition |
+|---|---|
+| Down/Close followed by tail completion | H1 removed: result returns before completion; next drain owns any completion error. |
+| Connected and PingTimer commands | Checked time precedes persistence; commands follow validated receipt; no subsequent completion can erase them. |
+| Successful epoch completion | Three receipts precede tag commit/ReconnectAfter; one completion per call, no later fallible operation. |
+| start_commands | No fallible operation follows Connect construction. |
+| PongTimeout Timer then Down | A Down error can leave confirmed Timer; no confirmed Down/required Close yet. Original error and halt, no retry. |
+| rejected stale diagnostic Raw then GAP | A GAP error can leave confirmed empty Raw. No mandatory command existed; prefix remains incomplete. |
+| rejected/current/subscription-failed Raw then GAP | A GAP error can leave confirmed Raw. Original error and halt; no mandatory command existed. |
+| continuity Raw then SourceGap | GAP error can leave confirmed Raw and changed internal classifier; halt blocks use. No runtime rollback claim. |
+| EpochAdvance x3 | Zero/one/two validated epoch records may precede error. Complete runtime tag stays old; possible physical failed-frame bytes are ambiguous. |
+| post-persist missing-stream lookups | Unreachable under private fixed registration maps; admitted ingress refers to registered streams, handlers remove no entries, sink cannot reenter mutable supervisor. |
+| CaptureAttemptNo | Reachable exhaustion now terminal before admission/accounting mutation. |
+| TimerId/RecordNo/epochs/reconnect attempt | Existing checked terminal paths retained. |
+| second raw-byte checked addition | Same successful precheck, no intervening mutation; unreachable overflow under hard queue caps. |
+| QueueGap loss_count checked addition | Count cannot exceed allocated archive attempts; allocating a successor at max fails first at CaptureAttemptNo. Not a reachable overflow in valid production state. |
+| queue-reserve arithmetic | Constructor-fixed at <=4 streams and <=256 items; invariant failures rather than reachable external exhaustion. |
+
+No adjacent contract change or blocker was required. This section supersedes
+any broader interpretation of the third-remediation fail-closed storage claim;
+the historical reasoning and rejected SHAs remain preserved above.
+
+### Scope, verification and next gate
+
+Fourth remediation changes only:
+- `crates/market-data/src/ws_supervisor.rs`;
+- `crates/market-data/tests/ws_supervisor.rs`;
+- `docs/handoffs/REC-001D.md`.
+
+F1-F6, repeated-loss liveness, N1-N3 and real WalWriter/WalReader regressions
+remain in the full suite. Architecture tests, domain, recording, accepted
+specs/ADR, workflow, application composition and dependencies are unchanged.
+
+Shell/read-only diff checks are available in this continuation. Rust/Cargo is
+absent: attempted mandatory commands each returned shell exit 127
+(`cargo: command not found`), so:
+- cargo fmt — **NOT_RUN locally**;
+- cargo clippy warnings-as-errors — **NOT_RUN locally**;
+- cargo test/workspace build — **NOT_RUN locally**;
+- live public WebSocket smoke — **NOT_RUN**.
+
+At file authorship, the containing SHA and its CI do not yet exist. After the
+final handoff commit, obtain that immutable SHA and require fresh exact-head
+CI SUCCESS: fmt, clippy -D warnings, Cargo-generated lockfile verification,
+workspace build, workspace tests/real CLI and clean checkout. Exact final SHA
+and run ID are recorded in mutable PR #34 and Issue #20 metadata, following the
+accepted no-self-referential-SHA handoff policy. Historical PASS is not transferred.
+
+Preserved without new assumptions:
+- U-09 = **UNKNOWN / BLOCKED**;
+- U-10 = **UNKNOWN / BLOCKED**;
+- U-20 = **NOT_PROVEN / FORBIDDEN**;
+- C-01 = **BLOCKED**;
+- C-03 = **UNKNOWN**.
+
+No REST healing, RPI normalization, quantity/delete inference, canonical book
+mutation, private API, strategy/execution or REC-001E/F. This PR remains a
+deterministic supervisor with an external socket-driver boundary, not a runnable
+live connector.
+
+After fresh final-head CI: update existing PR #34 metadata, return Draft to
+Ready, post Issue #20 fourth-remediation completion, then stop as
+**READY_FOR_INDEPENDENT_QA**. Full independent QA must review the entire new
+immutable head, with H1/H2 fault injection and every previous fix retested.
+The worker does not declare READY_FOR_OWNER_REVIEW or authorize merge.

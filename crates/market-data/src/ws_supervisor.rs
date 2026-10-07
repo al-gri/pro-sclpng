@@ -417,19 +417,6 @@ enum Ingress {
 }
 
 impl Ingress {
-    fn stream(&self) -> StreamId {
-        match self {
-            Self::Connected { stream, .. }
-            | Self::Disconnected { stream, .. }
-            | Self::Raw { stream, .. }
-            | Self::RejectedStaleRaw { stream, .. }
-            | Self::QueueGap { stream, .. }
-            | Self::Pong { stream, .. }
-            | Self::PingTimer { stream, .. }
-            | Self::PongTimeout { stream, .. } => *stream,
-        }
-    }
-
     fn belongs_to_connection_epoch(&self, stream: StreamId, epoch: ConnectionEpoch) -> bool {
         match self {
             Self::Connected {
@@ -716,10 +703,9 @@ impl PublicWsSupervisor {
             let (tag, current) = runtime
                 .tag_for_observed_connection(epoch)
                 .ok_or(SupervisorError::UnknownConnectionEpoch { connection, epoch })?;
-            let attempt_value = runtime
-                .capture_attempt_frontier
-                .checked_add(1)
-                .ok_or(SupervisorError::CounterExhausted("CaptureAttemptNo"))?;
+            let Some(attempt_value) = runtime.capture_attempt_frontier.checked_add(1) else {
+                return self.halt_with(SupervisorError::CounterExhausted("CaptureAttemptNo"));
+            };
             let attempt = CaptureAttemptNo::new(attempt_value)?;
             let next_bytes = runtime.queued_raw_bytes.checked_add(bytes.len());
             let per_stream_room = runtime.queued_raw_frames
@@ -866,6 +852,10 @@ impl PublicWsSupervisor {
         Ok(())
     }
 
+    /// Returns one ingress outcome or one ready disconnect completion.
+    /// A durable terminal Down and its Close are returned before any fallible
+    /// epoch completion. Call again, even with empty ingress, to finish pending
+    /// transitions; completion errors halt without retracting earlier commands.
     pub fn drain_one(
         &mut self,
         sink: &mut impl RecordSink,
@@ -881,9 +871,7 @@ impl PublicWsSupervisor {
         let Some(ingress) = self.queue.pop_front() else {
             return Ok(None);
         };
-        let ingress_stream = ingress.stream();
-
-        let mut result = match ingress {
+        let result = match ingress {
             Ingress::Connected {
                 stream,
                 epoch,
@@ -953,7 +941,6 @@ impl PublicWsSupervisor {
                 deadline_ns,
             } => self.handle_pong_timeout(stream, epoch, stamp, timer_id, deadline_ns, sink)?,
         };
-        self.finish_ready_disconnect_for(ingress_stream, sink, &mut result)?;
         Ok(Some(result))
     }
 
@@ -2164,5 +2151,259 @@ fn json_scalar_text(value: Option<&JsonValue>) -> Option<&str> {
     match value {
         Some(JsonValue::String(text) | JsonValue::Number(text)) => Some(text),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::identity::{
+        ConfigVersion, FeedProfileVersion, InstrumentRef, InstrumentSlot, NormalizerVersion,
+        SpecRef, SpecVersion, Token,
+    };
+
+    #[derive(Default)]
+    struct MemorySink {
+        frames: Vec<RecordFrame>,
+    }
+
+    impl RecordSink for MemorySink {
+        fn persist(
+            &mut self,
+            frame: &RecordFrame,
+            required_gate: RecordingGate,
+        ) -> Result<PersistenceReceipt, PersistError> {
+            self.frames.push(frame.clone());
+            Ok(PersistenceReceipt {
+                through: frame.record_no,
+                achieved: required_gate,
+            })
+        }
+    }
+
+    fn fixture() -> (PublicWsSupervisor, StreamBinding, MemorySink) {
+        let spec = SpecVersion::new(1).expect("spec");
+        let binding = StreamBinding {
+            id: StreamId::new(1).expect("stream"),
+            instrument_slot: InstrumentSlot::new(1).expect("slot"),
+            spec: SpecRef {
+                instrument: InstrumentRef {
+                    venue: Token::new("bitget").expect("venue"),
+                    market: MarketKind::Perpetual,
+                    product_namespace: Token::new("usdt-futures").expect("namespace"),
+                    native_symbol: Token::new("BTCUSDT").expect("symbol"),
+                },
+                version: spec,
+            },
+            connection_id: ConnectionId::new(1).expect("connection"),
+            channel: Channel::BookNormal,
+            book_id: Some(BookId::new(1).expect("book")),
+            tag: EpochTag {
+                spec,
+                connection: ConnectionEpoch::new(1).expect("connection epoch"),
+                subscription: SubscriptionEpoch::new(1).expect("subscription epoch"),
+                book: Some(BookEpoch::new(1).expect("book epoch")),
+            },
+            feed_profile: FeedProfileVersion::new(1).expect("profile"),
+        };
+        let mut supervisor = PublicWsSupervisor::new(WsSupervisorConfig {
+            active_context: ActiveContext {
+                config: ConfigVersion::new(1).expect("config"),
+                normalizer: NormalizerVersion::new(1).expect("normalizer"),
+            },
+            recording_gate: RecordingGate::Durable,
+            segment_no: SegmentNo::new(0),
+            next_record_no: RecordNo::new(5).expect("record"),
+            queue_policy: QueuePolicy::default(),
+            streams: vec![binding.clone()],
+        })
+        .expect("supervisor");
+        supervisor.start_commands().expect("start");
+        supervisor
+            .queue_connected(binding.connection_id, binding.tag.connection, stamp(0))
+            .expect("connected ingress");
+        let mut sink = MemorySink::default();
+        drain_all(&mut supervisor, &mut sink);
+        (supervisor, binding, sink)
+    }
+
+    fn stamp(monotonic_ns: u64) -> ReceiveStamp {
+        ReceiveStamp {
+            unix_ns: 1_800_000_000_000_000_000,
+            monotonic_ns,
+        }
+    }
+
+    fn ack() -> Vec<u8> {
+        concat!(
+            r#"{"event":"subscribe","arg":{"instType":"usdt-futures","#,
+            r#""topic":"books50","symbol":"BTCUSDT"}}"#,
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    fn drain_all(supervisor: &mut PublicWsSupervisor, sink: &mut MemorySink) {
+        while supervisor.drain_one(sink).expect("drain").is_some() {}
+    }
+
+    fn advance(
+        supervisor: &mut PublicWsSupervisor,
+        binding: &StreamBinding,
+        sink: &mut MemorySink,
+    ) {
+        supervisor
+            .queue_disconnected(binding.connection_id, binding.tag.connection, stamp(10))
+            .expect("disconnect ingress");
+        drain_all(supervisor, sink);
+        let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+        assert_eq!(snapshot.tag.connection.get(), 2);
+    }
+
+    fn set_frontier(supervisor: &mut PublicWsSupervisor, stream: StreamId, frontier: u64) {
+        let runtime = supervisor.streams.get_mut(&stream).expect("runtime");
+        runtime.capture_attempt_frontier = frontier;
+    }
+
+    #[test]
+    fn capture_attempt_exhaustion_halts_current_and_previous_generation_without_mutation() {
+        for previous_generation in [false, true] {
+            let (mut supervisor, binding, mut sink) = fixture();
+            if previous_generation {
+                advance(&mut supervisor, &binding, &mut sink);
+            }
+            let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+            let current_epoch = snapshot.tag.connection;
+            let observed_epoch = if previous_generation {
+                binding.tag.connection
+            } else {
+                current_epoch
+            };
+            // Private boundary setup represents an archive whose earlier attempts are exhausted.
+            set_frontier(&mut supervisor, binding.id, u64::MAX - 1);
+            supervisor
+                .queue_text(binding.connection_id, current_epoch, stamp(20), ack())
+                .expect("last representable raw ingress");
+            let before = supervisor.snapshot(binding.id).expect("snapshot");
+            let queued_items = supervisor.queued_items();
+            let queued_raw_items = supervisor.queued_raw_items;
+            let next_record_no = supervisor.next_record_no;
+            let durable_prefix = sink.frames.clone();
+            assert_eq!(before.capture_attempt_frontier, u64::MAX);
+            assert_eq!(before.queued_raw_frames, 1);
+
+            assert_eq!(
+                supervisor.queue_text(binding.connection_id, observed_epoch, stamp(21), ack()),
+                Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
+            );
+            assert!(supervisor.is_halted());
+            assert_eq!(supervisor.snapshot(binding.id).expect("snapshot"), before);
+            assert_eq!(supervisor.queued_items(), queued_items);
+            assert_eq!(supervisor.queued_raw_items, queued_raw_items);
+            assert_eq!(supervisor.next_record_no, next_record_no);
+            assert!(matches!(
+                supervisor.queue.front(),
+                Some(Ingress::Raw { attempt, .. }) if attempt.get() == u64::MAX
+            ));
+
+            for _ in 0..3 {
+                assert_eq!(
+                    supervisor.queue_text(binding.connection_id, observed_epoch, stamp(22), ack()),
+                    Err(SupervisorError::Halted)
+                );
+                assert_eq!(
+                    supervisor.queue_text(
+                        binding.connection_id,
+                        current_epoch,
+                        stamp(22),
+                        b"pong".to_vec(),
+                    ),
+                    Err(SupervisorError::Halted)
+                );
+                assert_eq!(
+                    supervisor.queue_connected(binding.connection_id, current_epoch, stamp(22)),
+                    Err(SupervisorError::Halted)
+                );
+                assert_eq!(
+                    supervisor.queue_disconnected(binding.connection_id, current_epoch, stamp(22)),
+                    Err(SupervisorError::Halted)
+                );
+                assert_eq!(
+                    supervisor.queue_tick(stamp(u64::MAX)),
+                    Err(SupervisorError::Halted)
+                );
+                assert_eq!(supervisor.start_commands(), Err(SupervisorError::Halted));
+                assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+            }
+            assert_eq!(sink.frames, durable_prefix);
+            assert_eq!(supervisor.snapshot(binding.id).expect("snapshot"), before);
+            assert_eq!(supervisor.queued_items(), 1);
+            assert_eq!(supervisor.queued_raw_items, 1);
+            assert_eq!(supervisor.next_record_no, next_record_no);
+        }
+    }
+
+    #[test]
+    fn near_max_capture_attempt_progression_is_archive_long_across_generation_change() {
+        let (mut supervisor, binding, mut sink) = fixture();
+        set_frontier(&mut supervisor, binding.id, u64::MAX - 3);
+        supervisor
+            .queue_text(binding.connection_id, binding.tag.connection, stamp(1), ack())
+            .expect("near-max current raw");
+        drain_all(&mut supervisor, &mut sink);
+        advance(&mut supervisor, &binding, &mut sink);
+        let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+        assert_eq!(snapshot.capture_attempt_frontier, u64::MAX - 2);
+        supervisor
+            .queue_text(binding.connection_id, binding.tag.connection, stamp(11), ack())
+            .expect("near-max previous-generation raw");
+        drain_all(&mut supervisor, &mut sink);
+        let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+        let current_epoch = snapshot.tag.connection;
+        supervisor
+            .queue_connected(
+                binding.connection_id,
+                current_epoch,
+                stamp(RECONNECT_MAX_NS_V1 + 20),
+            )
+            .expect("connected after backoff");
+        drain_all(&mut supervisor, &mut sink);
+        supervisor
+            .queue_text(
+                binding.connection_id,
+                current_epoch,
+                stamp(RECONNECT_MAX_NS_V1 + 21),
+                ack(),
+            )
+            .expect("last representable current raw");
+        drain_all(&mut supervisor, &mut sink);
+        let attempts: Vec<_> = sink
+            .frames
+            .iter()
+            .filter_map(|frame| match &frame.value {
+                Record::RawInput(raw) => Some((raw.attempt.get(), raw.tag.connection.get())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(attempts, [(u64::MAX - 2, 1), (u64::MAX - 1, 1), (u64::MAX, 2)]);
+        assert!(!supervisor.is_halted());
+        let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+        assert_eq!(snapshot.capture_attempt_frontier, u64::MAX);
+        assert_eq!(supervisor.queued_items(), 0);
+        let durable_prefix = sink.frames.clone();
+        assert_eq!(
+            supervisor.queue_text(
+                binding.connection_id,
+                current_epoch,
+                stamp(RECONNECT_MAX_NS_V1 + 22),
+                ack(),
+            ),
+            Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
+        );
+        assert!(supervisor.is_halted());
+        assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+        assert_eq!(sink.frames, durable_prefix);
+        let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
+        assert_eq!(snapshot.capture_attempt_frontier, u64::MAX);
     }
 }
