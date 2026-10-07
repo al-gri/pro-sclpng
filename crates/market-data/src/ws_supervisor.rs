@@ -2333,7 +2333,10 @@ mod tests {
                     Err(SupervisorError::Halted)
                 );
                 assert_eq!(supervisor.start_commands(), Err(SupervisorError::Halted));
-                assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+                assert_eq!(
+                    supervisor.drain_one(&mut sink),
+                    Err(SupervisorError::Halted)
+                );
             }
             assert_eq!(sink.frames, durable_prefix);
             assert_eq!(supervisor.snapshot(binding.id).expect("snapshot"), before);
@@ -2348,14 +2351,24 @@ mod tests {
         let (mut supervisor, binding, mut sink) = fixture();
         set_frontier(&mut supervisor, binding.id, u64::MAX - 3);
         supervisor
-            .queue_text(binding.connection_id, binding.tag.connection, stamp(1), ack())
+            .queue_text(
+                binding.connection_id,
+                binding.tag.connection,
+                stamp(1),
+                ack(),
+            )
             .expect("near-max current raw");
         drain_all(&mut supervisor, &mut sink);
         advance(&mut supervisor, &binding, &mut sink);
         let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
         assert_eq!(snapshot.capture_attempt_frontier, u64::MAX - 2);
         supervisor
-            .queue_text(binding.connection_id, binding.tag.connection, stamp(11), ack())
+            .queue_text(
+                binding.connection_id,
+                binding.tag.connection,
+                stamp(11),
+                ack(),
+            )
             .expect("near-max previous-generation raw");
         drain_all(&mut supervisor, &mut sink);
         let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
@@ -2385,7 +2398,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(attempts, [(u64::MAX - 2, 1), (u64::MAX - 1, 1), (u64::MAX, 2)]);
+        assert_eq!(
+            attempts,
+            [(u64::MAX - 2, 1), (u64::MAX - 1, 1), (u64::MAX, 2)]
+        );
         assert!(!supervisor.is_halted());
         let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
         assert_eq!(snapshot.capture_attempt_frontier, u64::MAX);
@@ -2401,7 +2417,10 @@ mod tests {
             Err(SupervisorError::CounterExhausted("CaptureAttemptNo"))
         );
         assert!(supervisor.is_halted());
-        assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+        assert_eq!(
+            supervisor.drain_one(&mut sink),
+            Err(SupervisorError::Halted)
+        );
         assert_eq!(sink.frames, durable_prefix);
         let snapshot = supervisor.snapshot(binding.id).expect("snapshot");
         assert_eq!(snapshot.capture_attempt_frontier, u64::MAX);

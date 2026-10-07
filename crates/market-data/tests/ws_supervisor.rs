@@ -2072,7 +2072,8 @@ fn terminal_timeout_suppresses_queued_pong_without_up_or_heartbeat_revival() {
         .expect("complete timeout after pong")
         .expect("completion result");
     assert_eq!(
-        completed.commands
+        completed
+            .commands
             .iter()
             .filter(|command| matches!(command, TransportCommand::ReconnectAfter { .. }))
             .count(),
@@ -2710,9 +2711,8 @@ fn assert_epoch_fault(error: SupervisorError, sink: &EpochFaultSink) {
     assert_eq!(
         error,
         match sink.fault {
-            EpochPersistenceFault::Persist => SupervisorError::Persistence(PersistError::new(
-                "injected epoch persistence error",
-            )),
+            EpochPersistenceFault::Persist =>
+                SupervisorError::Persistence(PersistError::new("injected epoch persistence error",)),
             EpochPersistenceFault::ReceiptMismatch => SupervisorError::PersistenceReceiptMismatch {
                 expected: failed.record_no,
                 actual: failed.record_no.checked_next().expect("mismatched receipt"),
@@ -2826,12 +2826,14 @@ fn exercise_deferred_epoch_fault(
     let down_record = sink
         .confirmed
         .iter()
-        .find(|frame| matches!(&frame.value,
-            Record::Control(ControlRecord {
-                value: Control::Transport { connection, epoch, value: Transport::Down },
-                ..
-            }) if *connection == binding.connection_id && *epoch == old_tag.connection
-        ))
+        .find(|frame| {
+            matches!(&frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Transport { connection, epoch, value: Transport::Down },
+                    ..
+                }) if *connection == binding.connection_id && *epoch == old_tag.connection
+            )
+        })
         .expect("terminal Down confirmed at Durable gate");
     assert!(down.records.contains(&down_record.record_no));
     assert!(
@@ -2847,7 +2849,9 @@ fn exercise_deferred_epoch_fault(
                 .any(|event| matches!(event, SupervisorEvent::HeartbeatTimerRecorded { .. }))
         );
     }
-    let terminal = supervisor.snapshot(binding.id).expect("terminal generation");
+    let terminal = supervisor
+        .snapshot(binding.id)
+        .expect("terminal generation");
     assert_eq!(terminal.tag, old_tag);
     assert_eq!(terminal.transport, Transport::Down);
     assert_eq!(terminal.subscription, SubscriptionState::Degraded);
@@ -2875,24 +2879,33 @@ fn exercise_deferred_epoch_fault(
             assert!(sink.confirmed.iter().any(|frame| matches!(&frame.value, Record::RawInput(raw)
                 if raw.tag == old_tag && raw.bytes == snapshot("BTCUSDT", "7") && raw.attempt.get() == 1)));
             if matches!(input, DeferredDisconnectInput::QueueOverflowBarrier) {
-                assert!(sink.confirmed.iter().any(|frame| matches!(&frame.value, Record::Gap(gap)
-                    if gap.reason == Reason::QueueOverflow)));
+                assert!(
+                    sink.confirmed
+                        .iter()
+                        .any(|frame| matches!(&frame.value, Record::Gap(gap)
+                    if gap.reason == Reason::QueueOverflow))
+                );
             }
         }
-        DeferredDisconnectInput::TimerBarrier => assert!(sink.confirmed.iter().any(|frame| matches!(
-            &frame.value,
-            Record::Control(ControlRecord {
-                value: Control::Timer { .. },
-                ..
-            })
-        ))),
+        DeferredDisconnectInput::TimerBarrier => {
+            assert!(sink.confirmed.iter().any(|frame| matches!(
+                &frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::Timer { .. },
+                    ..
+                })
+            )))
+        }
         DeferredDisconnectInput::DuplicateBarrier => assert_eq!(
             sink.confirmed
                 .iter()
                 .filter(|frame| matches!(
                     &frame.value,
                     Record::Control(ControlRecord {
-                        value: Control::Transport { value: Transport::Down, .. },
+                        value: Control::Transport {
+                            value: Transport::Down,
+                            ..
+                        },
                         ..
                     })
                 ))
@@ -2924,9 +2937,15 @@ fn exercise_deferred_epoch_fault(
             _ => None,
         })
         .collect();
-    assert!(matches!(expected_changes[0], EpochChange::Connection { .. }));
+    assert!(matches!(
+        expected_changes[0],
+        EpochChange::Connection { .. }
+    ));
     if fault_at >= 2 {
-        assert!(matches!(expected_changes[1], EpochChange::Subscription { .. }));
+        assert!(matches!(
+            expected_changes[1],
+            EpochChange::Subscription { .. }
+        ));
     }
     if fault_at == 3 {
         assert!(matches!(expected_changes[2], EpochChange::Book { .. }));
@@ -2935,12 +2954,17 @@ fn exercise_deferred_epoch_fault(
         pair[0].record_no.checked_next().expect("prefix number") == pair[1].record_no
     }));
     assert_eq!(
-        supervisor.snapshot(binding.id).expect("runtime remains atomic"),
+        supervisor
+            .snapshot(binding.id)
+            .expect("runtime remains atomic"),
         terminal
     );
     let attempts_after_failure = sink.attempts.len();
     for _ in 0..2 {
-        assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+        assert_eq!(
+            supervisor.drain_one(&mut sink),
+            Err(SupervisorError::Halted)
+        );
         assert_eq!(
             supervisor.queue_connected(binding.connection_id, old_tag.connection, stamp(300)),
             Err(SupervisorError::Halted)
@@ -2964,11 +2988,14 @@ fn exercise_deferred_epoch_fault(
         );
     }
     assert_eq!(
-        sink.attempts.len(), attempts_after_failure,
+        sink.attempts.len(),
+        attempts_after_failure,
         "no persistence retry after terminal failure"
     );
     assert_eq!(
-        supervisor.snapshot(binding.id).expect("no old-generation revival"),
+        supervisor
+            .snapshot(binding.id)
+            .expect("no old-generation revival"),
         terminal
     );
 }
@@ -2976,7 +3003,11 @@ fn exercise_deferred_epoch_fault(
 #[test]
 fn disconnected_close_survives_every_epoch_completion_storage_failure() {
     for fault_at in 1..=3 {
-        for fault in [EpochPersistenceFault::Persist, EpochPersistenceFault::ReceiptMismatch, EpochPersistenceFault::InsufficientGate] {
+        for fault in [
+            EpochPersistenceFault::Persist,
+            EpochPersistenceFault::ReceiptMismatch,
+            EpochPersistenceFault::InsufficientGate,
+        ] {
             exercise_deferred_epoch_fault(DeferredDisconnectInput::Immediate, fault_at, fault);
         }
     }
@@ -2985,7 +3016,11 @@ fn disconnected_close_survives_every_epoch_completion_storage_failure() {
 #[test]
 fn pong_timeout_close_survives_every_epoch_completion_storage_failure() {
     for fault_at in 1..=3 {
-        for fault in [EpochPersistenceFault::Persist, EpochPersistenceFault::ReceiptMismatch, EpochPersistenceFault::InsufficientGate] {
+        for fault in [
+            EpochPersistenceFault::Persist,
+            EpochPersistenceFault::ReceiptMismatch,
+            EpochPersistenceFault::InsufficientGate,
+        ] {
             exercise_deferred_epoch_fault(DeferredDisconnectInput::PongTimeout, fault_at, fault);
         }
     }
@@ -2993,9 +3028,18 @@ fn pong_timeout_close_survives_every_epoch_completion_storage_failure() {
 
 #[test]
 fn close_survives_epoch_completion_faults_after_terminal_ingress_barriers() {
-    for input in [DeferredDisconnectInput::RawBarrier, DeferredDisconnectInput::QueueOverflowBarrier, DeferredDisconnectInput::TimerBarrier, DeferredDisconnectInput::DuplicateBarrier] {
+    for input in [
+        DeferredDisconnectInput::RawBarrier,
+        DeferredDisconnectInput::QueueOverflowBarrier,
+        DeferredDisconnectInput::TimerBarrier,
+        DeferredDisconnectInput::DuplicateBarrier,
+    ] {
         for fault_at in 1..=3 {
-            for fault in [EpochPersistenceFault::Persist, EpochPersistenceFault::ReceiptMismatch, EpochPersistenceFault::InsufficientGate] {
+            for fault in [
+                EpochPersistenceFault::Persist,
+                EpochPersistenceFault::ReceiptMismatch,
+                EpochPersistenceFault::InsufficientGate,
+            ] {
                 exercise_deferred_epoch_fault(input, fault_at, fault);
             }
         }
@@ -3016,26 +3060,81 @@ fn empty_queue_deferred_completion_emits_one_reconnect_after_duplicate_and_barri
     let mut sink = EpochFaultSink::new(usize::MAX, EpochPersistenceFault::Persist);
     supervisor.start_commands().expect("start");
     connect_one(&mut supervisor, &mut sink, &binding, 100);
-    supervisor.queue_disconnected(binding.connection_id, old_tag.connection, stamp(200)).expect("disconnect");
-    supervisor.queue_text(binding.connection_id, old_tag.connection, stamp(201), snapshot("BTCUSDT", "7")).expect("raw barrier");
-    supervisor.queue_text(binding.connection_id, old_tag.connection, stamp(202), update("BTCUSDT", 10, 11)).expect("loss barrier");
-    supervisor.queue_connected(binding.connection_id, old_tag.connection, stamp(203)).expect("obsolete control barrier");
-    supervisor.queue_disconnected(binding.connection_id, old_tag.connection, stamp(204)).expect("duplicate barrier");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(200))
+        .expect("disconnect");
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(201),
+            snapshot("BTCUSDT", "7"),
+        )
+        .expect("raw barrier");
+    supervisor
+        .queue_text(
+            binding.connection_id,
+            old_tag.connection,
+            stamp(202),
+            update("BTCUSDT", 10, 11),
+        )
+        .expect("loss barrier");
+    supervisor
+        .queue_connected(binding.connection_id, old_tag.connection, stamp(203))
+        .expect("obsolete control barrier");
+    supervisor
+        .queue_disconnected(binding.connection_id, old_tag.connection, stamp(204))
+        .expect("duplicate barrier");
     let mut returned = Vec::new();
     while supervisor.queued_items() != 0 {
-        returned.push(supervisor.drain_one(&mut sink).expect("persist ingress").expect("ingress result"));
-        assert_eq!(supervisor.snapshot(binding.id).expect("pending old scope").tag, old_tag);
+        returned.push(
+            supervisor
+                .drain_one(&mut sink)
+                .expect("persist ingress")
+                .expect("ingress result"),
+        );
+        assert_eq!(
+            supervisor
+                .snapshot(binding.id)
+                .expect("pending old scope")
+                .tag,
+            old_tag
+        );
         assert_eq!(sink.epoch_attempts, 0);
     }
-    assert_eq!(returned.iter().flat_map(|result| &result.commands).filter(|command| matches!(command, TransportCommand::Close { .. })).count(), 1);
-    assert!(returned.iter().flat_map(|result| &result.commands).all(|command| matches!(command, TransportCommand::Close { .. })));
-    assert!(returned.iter().flat_map(|result| &result.events).any(|event| matches!(event, SupervisorEvent::ObsoleteControl { .. })));
-    let completion = supervisor.drain_one(&mut sink).expect("empty queue completion").expect("completion result");
+    assert_eq!(
+        returned
+            .iter()
+            .flat_map(|result| &result.commands)
+            .filter(|command| matches!(command, TransportCommand::Close { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        returned
+            .iter()
+            .flat_map(|result| &result.commands)
+            .all(|command| matches!(command, TransportCommand::Close { .. }))
+    );
+    assert!(
+        returned
+            .iter()
+            .flat_map(|result| &result.events)
+            .any(|event| matches!(event, SupervisorEvent::ObsoleteControl { .. }))
+    );
+    let completion = supervisor
+        .drain_one(&mut sink)
+        .expect("empty queue completion")
+        .expect("completion result");
     assert_eq!(completion.records.len(), 3);
-    assert!(matches!(completion.commands.as_slice(), [TransportCommand::ReconnectAfter { connection, epoch, .. }]
-        if *connection == binding.connection_id && epoch.get() == 2));
-    assert!(matches!(completion.events.as_slice(), [SupervisorEvent::EpochAdvanced { tag, .. }]
-        if tag.connection.get() == 2 && tag.subscription.get() == 2 && tag.book.expect("book").get() == 2));
+    assert!(
+        matches!(completion.commands.as_slice(), [TransportCommand::ReconnectAfter { connection, epoch, .. }]
+        if *connection == binding.connection_id && epoch.get() == 2)
+    );
+    assert!(
+        matches!(completion.events.as_slice(), [SupervisorEvent::EpochAdvanced { tag, .. }]
+        if tag.connection.get() == 2 && tag.subscription.get() == 2 && tag.book.expect("book").get() == 2)
+    );
     assert_eq!(sink.epoch_attempts, 3);
     let current = supervisor.snapshot(binding.id).expect("new scope");
     assert_eq!(current.transport, Transport::Unknown);
@@ -3044,49 +3143,134 @@ fn empty_queue_deferred_completion_emits_one_reconnect_after_duplicate_and_barri
     let attempts = sink.attempts.len();
     assert_eq!(supervisor.drain_one(&mut sink), Ok(None));
     assert_eq!(sink.attempts.len(), attempts);
-    assert_eq!(supervisor.queue_disconnected(binding.connection_id, old_tag.connection, stamp(205)), Err(SupervisorError::UnknownConnectionEpoch { connection: binding.connection_id, epoch: old_tag.connection }));
-    assert_eq!(supervisor.snapshot(binding.id).expect("stale does not advance").tag, current.tag);
+    assert_eq!(
+        supervisor.queue_disconnected(binding.connection_id, old_tag.connection, stamp(205)),
+        Err(SupervisorError::UnknownConnectionEpoch {
+            connection: binding.connection_id,
+            epoch: old_tag.connection
+        })
+    );
+    assert_eq!(
+        supervisor
+            .snapshot(binding.id)
+            .expect("stale does not advance")
+            .tag,
+        current.tag
+    );
 }
 
 #[test]
 fn neighbor_commands_are_returned_before_failing_other_stream_completion() {
     for fault_at in 1..=3 {
-        for fault in [EpochPersistenceFault::Persist, EpochPersistenceFault::ReceiptMismatch, EpochPersistenceFault::InsufficientGate] {
+        for fault in [
+            EpochPersistenceFault::Persist,
+            EpochPersistenceFault::ReceiptMismatch,
+            EpochPersistenceFault::InsufficientGate,
+        ] {
             let a = stream_binding(1, 1, 1, "BTCUSDT");
             let b = stream_binding(2, 2, 2, "ETHUSDT");
-            let mut supervisor = supervisor(vec![a.clone(), b.clone()], QueuePolicy::default(), RecordingGate::Durable);
+            let mut supervisor = supervisor(
+                vec![a.clone(), b.clone()],
+                QueuePolicy::default(),
+                RecordingGate::Durable,
+            );
             let mut sink = EpochFaultSink::new(fault_at, fault);
             supervisor.start_commands().expect("start");
-            supervisor.queue_disconnected(a.connection_id, a.tag.connection, stamp(1)).expect("A Down");
-            supervisor.queue_connected(b.connection_id, b.tag.connection, stamp(2)).expect("B connected");
-            supervisor.queue_connected(a.connection_id, a.tag.connection, stamp(3)).expect("first A barrier");
-            let a_down = supervisor.drain_one(&mut sink).expect("A Down drain").expect("A Down result");
-            assert_eq!(a_down.commands, vec![TransportCommand::Close { connection: a.connection_id, epoch: a.tag.connection }]);
-            let b_subscribe = supervisor.drain_one(&mut sink).expect("B connected drain").expect("B subscription command");
-            assert!(matches!(b_subscribe.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }]
-                if *connection == b.connection_id && text.contains("subscribe")));
+            supervisor
+                .queue_disconnected(a.connection_id, a.tag.connection, stamp(1))
+                .expect("A Down");
+            supervisor
+                .queue_connected(b.connection_id, b.tag.connection, stamp(2))
+                .expect("B connected");
+            supervisor
+                .queue_connected(a.connection_id, a.tag.connection, stamp(3))
+                .expect("first A barrier");
+            let a_down = supervisor
+                .drain_one(&mut sink)
+                .expect("A Down drain")
+                .expect("A Down result");
+            assert_eq!(
+                a_down.commands,
+                vec![TransportCommand::Close {
+                    connection: a.connection_id,
+                    epoch: a.tag.connection
+                }]
+            );
+            let b_subscribe = supervisor
+                .drain_one(&mut sink)
+                .expect("B connected drain")
+                .expect("B subscription command");
+            assert!(
+                matches!(b_subscribe.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }]
+                if *connection == b.connection_id && text.contains("subscribe"))
+            );
             let ping_due = 2 + HEARTBEAT_INTERVAL_NS;
-            supervisor.queue_tick(stamp(ping_due)).expect("queue B ping");
-            supervisor.queue_connected(a.connection_id, a.tag.connection, stamp(ping_due + 1)).expect("last A barrier");
-            let first_barrier = supervisor.drain_one(&mut sink).expect("first A barrier drain").expect("first A barrier");
+            supervisor
+                .queue_tick(stamp(ping_due))
+                .expect("queue B ping");
+            supervisor
+                .queue_connected(a.connection_id, a.tag.connection, stamp(ping_due + 1))
+                .expect("last A barrier");
+            let first_barrier = supervisor
+                .drain_one(&mut sink)
+                .expect("first A barrier drain")
+                .expect("first A barrier");
             assert!(first_barrier.commands.is_empty());
-            let b_ping = supervisor.drain_one(&mut sink).expect("B timer drain").expect("B ping result");
-            assert!(matches!(b_ping.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }]
-                if *connection == b.connection_id && text == "ping"));
-            supervisor.queue_text(b.connection_id, b.tag.connection, stamp(ping_due + 2), b"pong".to_vec()).expect("future B ingress");
-            supervisor.drain_one(&mut sink).expect("last A barrier drain").expect("last A barrier");
+            let b_ping = supervisor
+                .drain_one(&mut sink)
+                .expect("B timer drain")
+                .expect("B ping result");
+            assert!(
+                matches!(b_ping.commands.as_slice(), [TransportCommand::SendText { connection, text, .. }]
+                if *connection == b.connection_id && text == "ping")
+            );
+            supervisor
+                .queue_text(
+                    b.connection_id,
+                    b.tag.connection,
+                    stamp(ping_due + 2),
+                    b"pong".to_vec(),
+                )
+                .expect("future B ingress");
+            supervisor
+                .drain_one(&mut sink)
+                .expect("last A barrier drain")
+                .expect("last A barrier");
             assert_eq!(supervisor.queued_items(), 1);
             let b_before_failure = supervisor.snapshot(b.id).expect("B before failure");
-            let error = supervisor.drain_one(&mut sink).expect_err("A completion must fail before consuming B ingress");
+            let error = supervisor
+                .drain_one(&mut sink)
+                .expect_err("A completion must fail before consuming B ingress");
             assert_epoch_fault(error, &sink);
             assert!(supervisor.is_halted());
-            assert_eq!(supervisor.queued_items(), 1, "B ingress remains unconsumed after terminal A failure");
-            assert_eq!(supervisor.snapshot(b.id).expect("B after failure"), b_before_failure);
-            assert_eq!(b_subscribe.commands.len(), 1, "already returned B subscription remains available");
-            assert_eq!(b_ping.commands.len(), 1, "already returned B ping remains available");
-            assert_eq!(supervisor.snapshot(a.id).expect("atomic A scope").tag, a.tag);
+            assert_eq!(
+                supervisor.queued_items(),
+                1,
+                "B ingress remains unconsumed after terminal A failure"
+            );
+            assert_eq!(
+                supervisor.snapshot(b.id).expect("B after failure"),
+                b_before_failure
+            );
+            assert_eq!(
+                b_subscribe.commands.len(),
+                1,
+                "already returned B subscription remains available"
+            );
+            assert_eq!(
+                b_ping.commands.len(),
+                1,
+                "already returned B ping remains available"
+            );
+            assert_eq!(
+                supervisor.snapshot(a.id).expect("atomic A scope").tag,
+                a.tag
+            );
             let attempts = sink.attempts.len();
-            assert_eq!(supervisor.drain_one(&mut sink), Err(SupervisorError::Halted));
+            assert_eq!(
+                supervisor.drain_one(&mut sink),
+                Err(SupervisorError::Halted)
+            );
             assert_eq!(sink.attempts.len(), attempts);
         }
     }

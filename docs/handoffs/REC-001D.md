@@ -1218,6 +1218,13 @@ workspace build, workspace tests/real CLI and clean checkout. Exact final SHA
 and run ID are recorded in mutable PR #34 and Issue #20 metadata, following the
 accepted no-self-referential-SHA handoff policy. Historical PASS is not transferred.
 
+Intermediate fourth-remediation run `37586813003` on
+`6d5d06e68ce3d557b2acc64d4af151de5dce55d6` was **FAIL** only in rust-fmt.
+On that head, rust-clippy and workspace tests/real CLI, Cargo.lock verification,
+workspace build and clean checkout were **PASS**. The exact rustfmt differences
+were applied before this containing commit; that intermediate evidence is not
+transferred to the final head.
+
 Preserved without new assumptions:
 - U-09 = **UNKNOWN / BLOCKED**;
 - U-10 = **UNKNOWN / BLOCKED**;
