@@ -331,8 +331,8 @@ struct StreamRuntime {
     reconnect_not_before_ns: Option<u64>,
     next_ping_due_ns: Option<u64>,
     pong_deadline_ns: Option<u64>,
-    ping_timer_queued: bool,
-    pong_timeout_queued: bool,
+    ping_timer_owner: Option<u64>,
+    pong_timeout_owner: Option<u64>,
     timer_frontier: u64,
     last_market_record: Option<RecordNo>,
     pending_disconnect: Option<PendingDisconnect>,
@@ -550,8 +550,8 @@ impl PublicWsSupervisor {
                     reconnect_not_before_ns: None,
                     next_ping_due_ns: None,
                     pong_deadline_ns: None,
-                    ping_timer_queued: false,
-                    pong_timeout_queued: false,
+                    ping_timer_owner: None,
+                    pong_timeout_owner: None,
                     timer_frontier: 0,
                     last_market_record: None,
                     pending_disconnect: None,
@@ -787,7 +787,7 @@ impl PublicWsSupervisor {
                 } else if runtime
                     .pong_deadline_ns
                     .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                    && !runtime.pong_timeout_queued
+                    && runtime.pong_timeout_owner.is_none()
                 {
                     Some((
                         true,
@@ -799,7 +799,7 @@ impl PublicWsSupervisor {
                     && runtime
                         .next_ping_due_ns
                         .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                    && !runtime.ping_timer_queued
+                    && runtime.ping_timer_owner.is_none()
                 {
                     Some((
                         false,
@@ -844,9 +844,9 @@ impl PublicWsSupervisor {
                 .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
             runtime.timer_frontier = timer_id;
             if is_timeout {
-                runtime.pong_timeout_queued = true;
+                runtime.pong_timeout_owner = Some(timer_id);
             } else {
-                runtime.ping_timer_queued = true;
+                runtime.ping_timer_owner = Some(timer_id);
             }
         }
         Ok(())
@@ -1012,8 +1012,8 @@ impl PublicWsSupervisor {
         runtime.reconnect_not_before_ns = None;
         runtime.next_ping_due_ns = Some(next_ping_due_ns);
         runtime.pong_deadline_ns = None;
-        runtime.ping_timer_queued = false;
-        runtime.pong_timeout_queued = false;
+        runtime.ping_timer_owner = None;
+        runtime.pong_timeout_owner = None;
 
         Ok(DrainResult {
             records: vec![record],
@@ -1093,8 +1093,11 @@ impl PublicWsSupervisor {
         runtime.transport = Transport::Up;
         runtime.pong_deadline_ns = None;
         runtime.next_ping_due_ns = Some(next_ping_due_ns);
-        runtime.ping_timer_queued = false;
-        runtime.pong_timeout_queued = false;
+        // FIFO observation order is the local policy: an accepted Pong before
+        // a queued timeout replaces the schedule, even at/after its deadline.
+        // Once terminal Down was accepted, the earlier guard suppresses Pong.
+        runtime.ping_timer_owner = None;
+        runtime.pong_timeout_owner = None;
 
         Ok(DrainResult {
             records: vec![record],
@@ -1119,7 +1122,7 @@ impl PublicWsSupervisor {
         deadline_ns: u64,
         sink: &mut impl RecordSink,
     ) -> Result<DrainResult, SupervisorError> {
-        let (connection, current_epoch, terminal) = {
+        let (connection, current_epoch, active) = {
             let runtime =
                 self.streams
                     .get(&stream)
@@ -1129,42 +1132,94 @@ impl PublicWsSupervisor {
             (
                 runtime.binding.connection_id,
                 runtime.binding.tag.connection,
-                runtime
-                    .pending_disconnect
-                    .is_some_and(|pending| pending.epoch == epoch),
+                runtime.transport == Transport::Up
+                    && runtime.pending_disconnect.is_none()
+                    && runtime.pong_deadline_ns.is_none()
+                    && runtime.next_ping_due_ns == Some(deadline_ns)
+                    && runtime.ping_timer_owner == Some(timer_id),
             )
         };
         if epoch != current_epoch {
             return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
         }
 
-        if terminal {
-            let record = self.persist_record(
-                stamp,
-                Record::Control(ControlRecord {
-                    context: stamp.wire_context(self.active_context),
-                    value: Control::Timer {
-                        stream,
-                        timer_id,
-                        deadline_ns,
-                    },
-                }),
-                sink,
-            )?;
-            return Ok(DrainResult {
-                records: vec![record],
-                commands: Vec::new(),
-                events: vec![SupervisorEvent::HeartbeatTimerRecorded {
-                    stream,
-                    record,
-                    timer_id,
-                }],
-            });
+        if !active {
+            return self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink);
         }
 
         let pong_deadline_ns =
             self.checked_time_add_or_halt(stamp.monotonic_ns, PONG_TIMEOUT_NS_V1)?;
 
+        let mut result =
+            self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink)?;
+        let runtime =
+            self.streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing timer stream",
+                ))?;
+        runtime.ping_timer_owner = None;
+        runtime.next_ping_due_ns = None;
+        runtime.pong_deadline_ns = Some(pong_deadline_ns);
+
+        result.commands.push(TransportCommand::SendText {
+            connection,
+            epoch,
+            text: "ping".to_owned(),
+        });
+        Ok(result)
+    }
+
+    fn handle_pong_timeout(
+        &mut self,
+        stream: StreamId,
+        epoch: ConnectionEpoch,
+        stamp: ReceiveStamp,
+        timer_id: u64,
+        deadline_ns: u64,
+        sink: &mut impl RecordSink,
+    ) -> Result<DrainResult, SupervisorError> {
+        let (connection, current_epoch, active) = {
+            let runtime = self
+                .streams
+                .get(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration("missing timer stream"))?;
+            (
+                runtime.binding.connection_id,
+                runtime.binding.tag.connection,
+                runtime.transport == Transport::Up
+                    && runtime.pending_disconnect.is_none()
+                    && runtime.pong_deadline_ns == Some(deadline_ns)
+                    && runtime.pong_timeout_owner == Some(timer_id),
+            )
+        };
+        if epoch != current_epoch {
+            return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
+        }
+        if !active {
+            return self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink);
+        }
+        let plan = self.preflight_disconnect(stream, epoch, stamp, 1)?;
+        let mut result =
+            self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink)?;
+        let down = self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)?;
+        result.records.extend(down.records);
+        result.commands.extend(down.commands);
+        result.events.extend(down.events);
+        Ok(result)
+    }
+
+    // A queued timer remains a truthful recorded observation after cancellation.
+    // Only its matching private owner may apply heartbeat effects; obsolete
+    // observations neither preflight effects nor clear a newer schedule's owner.
+    fn persist_timer_observation(
+        &mut self,
+        stream: StreamId,
+        stamp: ReceiveStamp,
+        timer_id: u64,
+        deadline_ns: u64,
+        sink: &mut impl RecordSink,
+    ) -> Result<DrainResult, SupervisorError> {
         let record = self.persist_record(
             stamp,
             Record::Control(ControlRecord {
@@ -1177,68 +1232,15 @@ impl PublicWsSupervisor {
             }),
             sink,
         )?;
-        let runtime =
-            self.streams
-                .get_mut(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration(
-                    "missing timer stream",
-                ))?;
-        runtime.ping_timer_queued = false;
-        runtime.next_ping_due_ns = None;
-        runtime.pong_deadline_ns = Some(pong_deadline_ns);
-
         Ok(DrainResult {
             records: vec![record],
-            commands: vec![TransportCommand::SendText {
-                connection,
-                epoch,
-                text: "ping".to_owned(),
-            }],
+            commands: Vec::new(),
             events: vec![SupervisorEvent::HeartbeatTimerRecorded {
                 stream,
                 record,
                 timer_id,
             }],
         })
-    }
-
-    fn handle_pong_timeout(
-        &mut self,
-        stream: StreamId,
-        epoch: ConnectionEpoch,
-        stamp: ReceiveStamp,
-        timer_id: u64,
-        deadline_ns: u64,
-        sink: &mut impl RecordSink,
-    ) -> Result<DrainResult, SupervisorError> {
-        let plan = self.preflight_disconnect(stream, epoch, stamp, 1)?;
-
-        let timer_record = self.persist_record(
-            stamp,
-            Record::Control(ControlRecord {
-                context: stamp.wire_context(self.active_context),
-                value: Control::Timer {
-                    stream,
-                    timer_id,
-                    deadline_ns,
-                },
-            }),
-            sink,
-        )?;
-        if let Some(runtime) = self.streams.get_mut(&stream) {
-            runtime.pong_timeout_queued = false;
-        }
-        let mut result = self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)?;
-        result.records.insert(0, timer_record);
-        result.events.insert(
-            0,
-            SupervisorEvent::HeartbeatTimerRecorded {
-                stream,
-                record: timer_record,
-                timer_id,
-            },
-        );
-        Ok(result)
     }
 
     fn handle_queue_gap(
@@ -1687,8 +1689,8 @@ impl PublicWsSupervisor {
         runtime.continuity.clear_for_new_generation();
         runtime.next_ping_due_ns = None;
         runtime.pong_deadline_ns = None;
-        runtime.ping_timer_queued = false;
-        runtime.pong_timeout_queued = false;
+        runtime.ping_timer_owner = None;
+        runtime.pong_timeout_owner = None;
         runtime.last_market_record = None;
         runtime.pending_disconnect = Some(plan);
 
@@ -1847,8 +1849,8 @@ impl PublicWsSupervisor {
             runtime.continuity.clear_for_new_generation();
             runtime.next_ping_due_ns = None;
             runtime.pong_deadline_ns = None;
-            runtime.ping_timer_queued = false;
-            runtime.pong_timeout_queued = false;
+            runtime.ping_timer_owner = None;
+            runtime.pong_timeout_owner = None;
             runtime.last_market_record = None;
             runtime.pending_disconnect = None;
             runtime.reconnect_failures = pending.reconnect_attempt;

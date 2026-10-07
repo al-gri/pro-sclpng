@@ -310,6 +310,12 @@ queue and silently prevent the first required loss observation. The global raw
 count is tracked independently from control/loss queue entries, while each
 stream retains its raw-frame/raw-byte bounds.
 
+Fifth-QA correction: the preceding first-loss claim was too broad. The reserve
+constrains Raw and ordinary control admission, but `push_loss_ingress` itself
+can consume every slot with incompatible stale diagnostics. Q1 below remains
+BLOCKED; the historical F2 consecutive-overflow/neighbor regression does not
+prove arbitrary diagnostic saturation safe.
+
 The regression
 `sustained_overflow_coalesces_loss_and_does_not_halt_neighbor_stream` uses
 two streams with one raw frame allowed per stream, drives 32 consecutive rejected
@@ -1242,3 +1248,204 @@ Ready, post Issue #20 fourth-remediation completion, then stop as
 **READY_FOR_INDEPENDENT_QA**. Full independent QA must review the entire new
 immutable head, with H1/H2 fault injection and every previous fix retested.
 The worker does not declare READY_FOR_OWNER_REVIEW or authorize merge.
+
+## Fifth independent-QA remediation — Q2 repair / Q1 contract blocker
+
+This is the existing Issue #20 / parent #5 lineage: claim `6024304772`,
+recovery `6025249885`, branch `feat/REC-001D-ws-supervisor`, PR #34 and
+fourth-remediation completion `6033106016`. The attached fifth-QA task packet
+rejects immutable `82742c2e2cbf960ca16dca7ed6b26921903d3f66` for Q1 HIGH
+and Q2 MEDIUM. No separate fifth-QA report was attached or posted in the
+current PR/Issue threads; the supplied detailed findings/reproduction packet
+is the available fifth-QA evidence. No unseen report content is claimed.
+
+Preflight independently verified actual main
+`39ff0dba797eb010586238ef06fb80e996340401`, PR head and branch ref
+`82742c2e2cbf960ca16dca7ed6b26921903d3f66`, with zero later commits.
+Local policy/source/test/handoff Git blob hashes matched that immutable head.
+The existing PR was returned to Draft. No new claim, branch, Issue or PR,
+force-push, merge, auto-merge or REC-001E/F work was performed.
+
+### Q1 — diagnostics exhaust first current-loss capacity
+
+Disposition: **BLOCKED / NOT_FIXED**. Required behavior remains **FAIL**.
+The production loss/admission paths are unchanged in this cycle. Q1 must not
+be treated as fixed because Q2 or the containing-head CI passes.
+
+`push_loss_ingress` can fill `max_total_items`; a later current raw then loses
+its received payload at `queue_gap_loss` error, leaves the candidate attempt
+uncommitted, and can reuse that attempt in a resumed current suffix without
+a QueueOverflow barrier. Existing typed QueueExhausted alone is insufficient.
+Already admitted work remains drainable, which does not make this loss safe.
+
+The relevant accepted constraints are:
+- WAL v1 section 3/RawInput requires each diagnostic Raw's original receive
+  Context; empty Raw is representable, but invented per-attempt samples are not.
+- WAL v1 section 4.1 accounts current and old-tag attempts for the whole archive;
+  only QueueOverflow covers a local attempt hole, and known ranges must start
+  exactly at the next frontier. Current local loss for a mismatching tag fails
+  GapScopeTransition. Unknown/source gaps cannot cover missing local attempts.
+- Loss cannot be coalesced across incompatible tags/streams, noncontiguous
+  attempts or intervening Raw/control barriers; admitted observations cannot
+  be evicted or reordered.
+- DataHealth's recording owner is ArchiveId/capture session. An impossible
+  GAP write fails recording and blocks publication; accepted contracts do not
+  specify a scope-local permanent capture failure with continued neighbor
+  capture and externally enforced archive Incomplete/Unknown finalization.
+
+A bounded batch preserving every original stamp could handle a finite run of
+same-tag stale rejects. It does not resolve arbitrary incompatible/barrier-
+separated saturation. A protected first-loss reserve likewise prevents one
+failure but does not define disposition when diagnostics need more bounded
+metadata than remains. Moving an item outside the queue while reporting only
+queue length would undercount the advertised total-item cap.
+
+No new scoped-failure API policy, extra uncounted loss lane, WAL kind, fabricated
+GAP or driver retain/retry obligation was silently introduced. A generic global
+halt would freeze admitted drain and unrelated streams, violating this packet.
+
+Concrete policy proposal, requiring Integrator/Architecture acceptance:
+1. Define a separately counted bounded loss lane and ordering/admission barrier,
+   plus terminal disposition when incompatible received inputs exhaust even
+   that lane. State its total metadata/item/byte bounds explicitly.
+2. Alternatively define a permanent affected-capture failure through the
+   supervisor API: retain one exact consumed failure identity, freeze that
+   scope across reconnects, drain its admitted records diagnostically, preserve
+   neighbor service, and require the archive owner to expose Incomplete/Unknown
+   and forbid successful finalization/publication after the unrecordable input.
+   This needs an explicit archive-wide recording-failure/finalization policy;
+   QueueExhausted + temporary Degraded is not enough.
+
+Neither proposal is implemented or presented as an accepted contract.
+The existing invariant forbidding unsafe capture continuation remains the
+required outcome. Q1 depends on choosing/accepting this policy, not on a
+networking dependency or a larger ordinary queue.
+
+Three executable forensic public-API reproductions deliberately assert the
+observed outstanding defect, not Q1 correctness:
+- `q1_blocker_single_stream_legal_five_reproduces_consumed_attempt_reuse`:
+  epoch 1->2, reconnect/ack/snapshot, five separately stamped 1.1 MB previous-
+  generation inputs occupy five zero-payload diagnostics; consumed current
+  candidate 8 gets no GAP/invalidation and continuous current suffix reuses 8.
+- `q1_blocker_two_stream_legal_nine_stale_a_suppresses_first_b_loss`:
+  nine bounded old-A diagnostics block B's first current loss; B's consumed
+  candidate 3 is reused by a continuous suffix with no B loss barrier.
+- `q1_blocker_noncoalescing_saturation_preserves_admitted_raw_control_and_exact_scopes`:
+  Raw/control/stale/current barriers preserve admitted FIFO and B subscribe;
+  exact separate ranges A5/B3/A7/B5 remain unmerged, while repeated rejected
+  A inputs reuse candidate 8 at full capacity. Zero stale payload bytes and
+  exact stamps/tags/frontiers/frame/byte/item counters are checked.
+
+Passing these reproduction tests means the required Q1 behavior is still
+**FAIL**. Their assertions must be replaced by accepted safe-disposition
+regressions when Q1 is repaired. The existing F2 test separately checks
+admitted attempt 1 / rejected 2..=33 / count 32 and neighbor serviceability.
+
+### Q2 — heartbeat timer ownership and cancellation
+
+Disposition: **FIXED in code**, subject to fresh containing-head CI and full
+independent QA. The public supervisor API and accepted domain/WAL are unchanged.
+
+Private per-stream boolean flags are replaced by optional TimerId owners.
+Timer admission checks TimerId and commits its owner only after bounded queue
+admission succeeds. IDs remain checked, archive-long and never reset at epoch
+change. An operational timer must match connection epoch, Up/no terminal
+transition, timer type, exact current deadline and its TimerId owner.
+
+After persisted Pong/Connected replaces the schedule, previously queued timers
+still persist their original existing Control::Timer/receive Context and emit
+HeartbeatTimerRecorded. They send no ping, create no pong deadline, do not
+preflight disconnect, and mutate no schedule/owner. Matching TimerId matters
+even when old and new deadlines have the same numeric value. Terminal Down and
+successful epoch completion clear ownership; a canceled timeout cannot create
+a second Down/Close/epoch transition/reconnect.
+
+This supersedes historical wording that every queued terminal PongTimeout
+necessarily records another Down: a timeout without active ownership now
+records Timer only. Actual duplicate Disconnected observations still retain
+their existing Down recording and single logical transition ownership.
+
+Deadline policy is local FIFO observation order, not an exchange guarantee.
+A persisted Pong dequeued before timeout replaces the heartbeat schedule at
+D-1, D or D+1. A timeout observation becomes eligible at tick >=D and remains
+terminal when dequeued first; subsequent Pong is the existing ObsoleteControl.
+Original sample order may differ from API admission order; samples are never
+rewritten to manufacture an exchange deadline guarantee.
+
+Canceled Timer still legitimately advances recorded evaluation time for the
+accepted downstream reducer. Private heartbeat ownership is a live supervisor
+admission/effect rule, not a new persisted cancellation schema. These tests do
+not prove a complete replay heartbeat-command reducer or physical driver send;
+REC-001F composition and external delivery remain outside this task.
+
+Nine Q2 integration regressions:
+- `pong_before_queued_timeout_preserves_heartbeat_at_deadline_boundaries`;
+- `pong_cancels_old_ping_timer_without_clearing_equal_deadline_new_owner`;
+- `canceled_timeout_does_not_change_new_heartbeat_cycle_or_queued_owner`;
+- `obsolete_timers_skip_impossible_operational_time_and_epoch_preflight`;
+- `timer_cancellation_of_one_stream_preserves_neighbor_timeout`;
+- `timeout_before_queued_pong_remains_terminal_under_fifo_policy`;
+- `connected_schedule_replacement_cancels_already_queued_ping_timer`;
+- `disconnect_cancels_queued_timeout_without_duplicate_down_or_close`;
+- `active_and_canceled_timers_preserve_all_storage_failure_dispositions`.
+
+The last test covers 12 combinations: active/canceled x PingTimer/PongTimeout x
+persist error/mismatched receipt/insufficient gate. Each requires the original
+typed error, halt, no operation commit/command, no confirmed failed record and
+no repeated persistence. Obsolete timers at u64::MAX time/epochs prove they do
+not perform nonexistent operational preflight. Other tests verify matching-owner
+single actions, deadline boundaries, repeated ticks, next cycle and neighbor
+isolation. The original 63 H1 fault cases and H2 private unit tests remain.
+
+### Related-path audit and remaining limits
+
+| Path | Reachable outcome |
+|---|---|
+| Diagnostics consume loss reserve | Q1 remains reachable and BLOCKED; first-loss claim corrected above. |
+| Current rejected raw with available loss slot | Exact known QueueOverflow range reaches the gate before queued current suffix; tail coalescing checks stream/tag/consecutive attempt and never crosses a barrier. This does not prove saturation safe. |
+| Unknown connection/unsupported epoch | Rejected before attempt allocation; only registered current/previous raw is within the supported capture path. |
+| Exact pong bytes | Control observation, intentionally no CaptureAttempt allocation. |
+| Non-halting ordinary control capacity error | QueueExhausted leaves previously admitted work drainable; no unprovided driver retain/retry guarantee or claim that rejected external controls were persisted. |
+| queue_tick partial multi-stream admission | Earlier admitted stream timer retains its owner and can drain; later capacity error constructs no command and commits no rejected owner's counter/flag. |
+| Obsolete timer after Pong/Connected/Down | Truthful Timer persistence only; no preflight or mutation of newer owners/deadlines. |
+| Active timer | Checked operational arithmetic precedes persistence. Timeout may confirm Timer before a failed Down, yielding explicit error/halt and an incomplete prefix. |
+| Mandatory Close/subscribe/ping/reconnect | No reachable fallible operation follows construction before return; H1's separate completion call is retained. Private fixed maps make post-persist missing-stream lookups unreachable. |
+| Raw pop before storage failure | Accounting can decrement before failure; halt forbids retry/publication. No rollback or complete-archive claim. |
+| Multi-record persistence | Timer then Down, empty stale Raw then UnknownGap, Raw then source/decode Gap, epochs x3 may retain a confirmed prefix plus ambiguous failed bytes. Original errors halt; failed receipts are never called confirmed. |
+| Checked counters | CaptureAttempt/TimerId/RecordNo/epoch/reconnect exhaustion remain terminal checked paths. QueueGap count overflow is unreachable before allocated attempt exhaustion in valid state. |
+
+This is a reachability audit of the named supervisor paths, not proof of every
+physical storage/driver boundary. Q1 remains an explicit blocking exception;
+green CI cannot establish full bounded-loss compliance.
+
+### Verification, scope and next gate
+
+Only supervisor source, its integration tests and this handoff change. No
+architecture tests, domain, recording, accepted specs/ADR, workflow, composition
+or networking dependencies change. Previous F1-F6, liveness/N1-N3, H1/H2 and real
+WalWriter/WalReader tests remain in the full workspace suite.
+
+Local mandatory commands were attempted and each returned shell exit 127
+(`cargo: command not found`): fmt, clippy -D warnings and workspace tests are
+**NOT_RUN locally**. Local workspace build is **NOT_RUN locally**. Newly added
+Rust reproductions/tests are **NOT_RUN locally**. Live WS smoke is **NOT_RUN**;
+the accepted external socket-driver boundary remains, and this is not a runnable
+live connector.
+
+The containing immutable SHA and fresh CI run are recorded after this handoff
+commit in PR #34 / Issue #20 metadata, with no self-referential SHA. Require
+fmt, clippy -D warnings, Cargo.lock verification, workspace build, workspace
+tests/real CLI and clean checkout on that exact final SHA. Historical
+`37587058448` belongs only to rejected `82742c2e...` and does not transfer.
+
+Preserved: U-09 UNKNOWN/BLOCKED, U-10 UNKNOWN/BLOCKED,
+U-20 NOT_PROVEN/FORBIDDEN, C-01 BLOCKED, C-03 UNKNOWN.
+No REST healing, RPI normalization, quantity inference, zero-to-DeleteLevel,
+canonical book mutation, private API, strategy/execution or REC-001E/F.
+
+Worker disposition: **BLOCKED on Q1 contract policy; Q2 prepared for independent
+QA**. The existing PR remains Draft while Q1 is unresolved. Do not mark the
+whole REC-001D READY_FOR_INDEPENDENT_QA or READY_FOR_OWNER_REVIEW on the strength
+of the partial Q2 repair. After an accepted Q1 policy/remediation, the mandatory
+next gate remains full independent QA of the entire new immutable head, including
+Q1/Q2, all 63 H1 faults, H2 and every prior fix. No merge/auto-merge is authorized.
