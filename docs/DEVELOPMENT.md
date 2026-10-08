@@ -148,3 +148,100 @@ performance, profitability, market-data, or live-trading claim.
 Official workflow references:
 - https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 - https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows
+
+## REC-001F-1 offline diagnostic replay
+
+This section describes the bounded replay addition; the BOOT-001 notes above
+record the earlier bootstrap state. The `radar` package now also builds the
+`radar-replay` binary with local `domain`, `market-data` and `recording`
+dependencies. `default-run = "radar"` preserves existing `cargo run -p radar`
+behavior. No workspace member or third-party dependency is added.
+
+```sh
+cargo run --locked -p radar --bin radar-replay -- \
+  --wal tests/fixtures/replay/synthetic-v1.wal --profile synthetic-rec001f1-v1
+```
+
+The executable reads one offline, single-segment WAL using the accepted reader,
+decoder and DataHealth reducer. Receive order, lexical payloads, recorded
+monotonic samples, Timer fields and supported controls are preserved. Structural
+records receive explicit Noop steps. The initial synthetic definitions and
+configuration must exactly match the pinned profile; the optional inactive
+specification version 2 is only a diagnostic descriptor and is not activated.
+Archive admission is capped at 8 MiB, 256 records and two declared streams;
+the diagnostic profile supports its one exact stream.
+
+`--help` exits 0. Malformed CLI, unknown/repeated/missing arguments, live options
+and unknown profiles exit 2 with stderr. Physical incomplete/corrupt/unsupported
+inputs, profile mismatch, cap exhaustion and unsupported semantic controls
+return nonzero with explicit diagnostics. The existing reader does not skip,
+repair or rejoin corrupt suffixes. Semantic blocking may leave a separately
+scanned physical suffix, which is not described as semantic replay.
+
+Later configuration, SpecActivate and Verification/Warmup/Freshness proof
+application block dependent projection before that record. There is no
+production artifact verifier. Initial descriptor applicability remains
+`BLOCKED_UNVERIFIED`/unresolved; only the matched pinned synthetic diagnostic
+profile may exit 0 with these unresolved initial descriptors. No proof is
+fabricated, pending frames do not become usable, and physical Complete does not
+prove a canonical book. Observed Recording Failed remains terminal after a
+later Healthy observation; parsed evidence is not a trusted StorageFence or
+publication permit. Timer fields do not reconstruct scheduler authorization or
+physical Ping/Close delivery. U-09/U-10 and regular snapshot-zero semantics
+remain unresolved, and no quantity normalization or level mutation occurs.
+
+### Rebuild and compare the fixture
+
+Run from the repository root on Unix with the verified pinned toolchain and an
+Integrator-composed lockfile. `mktemp` supplies a fresh directory; the builder
+uses create-new and refuses an existing destination. Its explicit seals precede
+`WalWriter::finish`. The existing finish implementation synchronizes the file
+and parent directory on Unix. Windows parent-directory synchronization is
+unsupported and the builder returns an error; Windows is not a substitute for
+a successful Unix builder run. Offline replay itself uses no live-time or
+network reads.
+
+```sh
+replay_tmp="$(mktemp -d)"
+cargo run --locked -p radar --example build_replay_fixture -- \
+  --output "$replay_tmp/synthetic-v1.wal"
+cmp tests/fixtures/replay/synthetic-v1.wal "$replay_tmp/synthetic-v1.wal"
+sha256sum -c tests/fixtures/replay/SHA256SUMS
+
+cargo run --locked -p radar --bin radar-replay -- \
+  --wal tests/fixtures/replay/synthetic-v1.wal \
+  --profile synthetic-rec001f1-v1 > "$replay_tmp/replay-1.txt"
+cargo run --locked -p radar --bin radar-replay -- \
+  --wal tests/fixtures/replay/synthetic-v1.wal \
+  --profile synthetic-rec001f1-v1 > "$replay_tmp/replay-2.txt"
+cmp "$replay_tmp/replay-1.txt" "$replay_tmp/replay-2.txt"
+cmp tests/fixtures/replay/synthetic-v1.expected.txt "$replay_tmp/replay-1.txt"
+sha256sum "$replay_tmp/replay-1.txt" "$replay_tmp/replay-2.txt"
+
+cargo build --workspace --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo test -p radar --test replay --locked
+```
+
+These are verification commands, not a claim that a particular SHA passed them.
+The real-binary tests exercise deterministic output, CLI and profile guards,
+recorded health transitions and physical corruption/recovery boundaries. The
+fixture README and manifest pin synthetic provenance, exact raw-source hashes,
+engineering policy and byte offsets. Preserve accepted raw Git blob bytes,
+including LF line endings, when rebuilding; checkout newline conversion would
+change the embedded payloads and derivative archive hash.
+
+### Lock integration and review
+
+Root `Cargo.lock` belongs to the Integrator. The worker prepares the permitted
+code/fixtures and a separate exact Cargo-generated proposed lock delta, then
+opens one Draft PR with status `DRAFT_FOR_LOCK_INTEGRATION`. Checks on a separate
+composed candidate apply to that candidate only. The Integrator commits the
+lockfile sequentially in the same branch. Final locked checks and
+`READY_FOR_INDEPENDENT_QA` require the actual final head after that lock commit;
+fresh CI and independent QA must inspect that exact SHA. Draft readiness does
+not claim merge approval, canonical readiness, full REC-001F completion or M1
+completion. Exact executed commands, outcomes and limitations belong in the
+task handoff.
