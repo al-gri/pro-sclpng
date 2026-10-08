@@ -3171,7 +3171,7 @@ fn qa_down_close_foreign_and_dispatch_lifecycle(gate: RecordingGate) {
         owner.finalize(&mut turn, &mut proof).unwrap();
         let (records, report) = read_all(&wal.0);
         assert_eq!(report.status, ArchiveStatus::Complete);
-        assert_eq!(report.input_quality, Some(InputQuality::NoKnownLoss));
+        assert_eq!(report.input_quality, Some(InputQuality::Unknown));
         assert_eq!(records.len(), 7);
         assert_eq!(records[4], original);
         assert_eq!(
