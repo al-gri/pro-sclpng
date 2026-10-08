@@ -2367,7 +2367,7 @@ toolchain/OS/overrides/source inventories and stdout/stderr hashes are delivered
 
 No added per-W/per-scope fields, side lane/history/payload copy or dependency.
 WorkCell248B and previous fixed metadata ceilings remain. Clean f80 source owner
-allocation debug/release: cap5 peak29571/29570 vs8575010, cap9 31298/31297 vs8710676.
+allocation debug/release: cap5 peak29571/29571 vs8575010, cap9 31298/31298 vs8710676.
 Full-supervisor Flushed cap5/cap9 peak56710/60820 vs10256259/10410374,100 repeats/
 teardown PASS/released0 in both profiles. These are requested Layout bytes, not
 RSS/usable heap/network-memory; unchanged Written/Flushed probes are supplemental.
