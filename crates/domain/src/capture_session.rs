@@ -1667,9 +1667,78 @@ impl SupervisorSessionHandle {
         Ok(())
     }
 
+    fn retain_received_down_close(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+        identity: ObservationIdentity,
+    ) -> Result<(), AuthorityError> {
+        {
+            let state = self.authority.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == identity.stream)
+                .ok_or(AuthorityError::InvalidBinding)?;
+            if let Some(close) = scope.close.identity.get()
+                && close.epoch == identity.epoch
+            {
+                if close.stream != identity.stream || close.connection != scope.binding.connection {
+                    return Err(AuthorityError::InvalidOwner);
+                }
+                if let CloseStorage::WorkOwner(work_id) = close.storage
+                    && work_id != owner.id()
+                    && scope.close.state.get() != CloseState::Settled
+                {
+                    // An unrelated live work owner's Close cannot account this
+                    // Down merely because its connection/epoch numbers match.
+                    // A genuine earlier Down keeps its existing R2 ownership.
+                    let retained = scope.close.work.borrow();
+                    let prior = retained.as_ref().ok_or(AuthorityError::InvalidOwner)?;
+                    self.validate_work(prior)?;
+                    let original = prior
+                        .cell
+                        .observation
+                        .get()
+                        .ok_or(AuthorityError::InvalidOwner)?;
+                    let received_down = matches!(
+                        (original.class, prior.cell.received_progress.get()),
+                        (ObservationClass::Disconnected, ReceivedProgress::Down)
+                            | (ObservationClass::Timer { .. }, ReceivedProgress::TimerDown)
+                    );
+                    let generated_down = prior.cell.generated_plan.get().is_some_and(|plan| {
+                        prior.cell.obligation_origin.get() == ObligationOrigin::Generated
+                            && plan.connection == close.connection
+                            && plan.original.connection == close.epoch
+                            && matches!(
+                                original.class,
+                                ObservationClass::Disconnected | ObservationClass::Timer { .. }
+                            )
+                    });
+                    if prior.id() != work_id
+                        || prior.cell.close_scope.get() != Some(identity.stream)
+                        || original.stream != identity.stream
+                        || original.epoch != identity.epoch
+                        || !(received_down || generated_down)
+                    {
+                        return Err(AuthorityError::InvalidOwner);
+                    }
+                }
+            }
+        }
+        // This existing serialized R2 transition installs the first Close on
+        // the original W or reuses a valid prior/terminal owner. All fallible
+        // checks precede its mutation; a pending observation stays retryable.
+        self.authority
+            .mandatory_close(turn, identity.stream, identity.epoch, Some(owner))?;
+        Ok(())
+    }
+
     /// Complete the canonical job after all its required writes/dispositions.
     /// Receipts are authenticated by the bound sink. A no-write obsolete Up or
     /// Pong is accepted only after actual same-epoch Down was gate-confirmed.
+    /// Received Down retains its mandatory Close before settling this job;
+    /// that Close may remain Pending/Leased until the caller dispatches it.
     pub fn complete_observation(
         &self,
         turn: &mut SessionTurn,
@@ -1738,6 +1807,12 @@ impl SupervisorSessionHandle {
                 }))
         {
             return Err(AuthorityError::NotQuiescent);
+        }
+        if !generated && identity.class == ObservationClass::Disconnected {
+            // Reuse the existing R2 owner if this epoch already has a Close.
+            // A first ordinary Down transfers retention into the same W; a
+            // rejected installation leaves the admitted obligation Pending.
+            self.retain_received_down_close(turn, owner, identity)?;
         }
         owner.cell.obligation.set(ObservationObligation::Settled);
         Ok(())

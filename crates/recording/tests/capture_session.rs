@@ -410,12 +410,25 @@ fn owner_two_scopes(
     SupervisorSessionHandle,
     BoundRecordSink,
 ) {
+    owner_two_scopes_with_gate(path, RecordingGate::Written)
+}
+
+fn owner_two_scopes_with_gate(
+    path: &PathBuf,
+    gate: RecordingGate,
+) -> (
+    CaptureSessionOwner,
+    SessionTurn,
+    SupervisorSessionHandle,
+    BoundRecordSink,
+) {
     let mut definitions = bootstrap();
     let mut config = definitions.pop().expect("config");
     config.record_no = record(6);
     let Record::ConfigDefinition(config_definition) = &mut config.value else {
         unreachable!("fixture config")
     };
+    config_definition.fields.recording_gate = gate;
     config_definition.context = context(6, true);
     let mut second_spec = definitions[0].clone();
     second_spec.record_no = record(4);
@@ -2272,15 +2285,6 @@ fn qa_received_control_metadata(gate: RecordingGate) {
         }
         sink.persist_owned(&mut turn, &original, gate, &work)
             .unwrap();
-        let close = if class == ObservationClass::Disconnected {
-            Some(
-                handle
-                    .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
-                    .unwrap(),
-            )
-        } else {
-            None
-        };
         let mut duplicate = original.clone();
         duplicate.record_no = record(6);
         qa_reject_preserving(
@@ -2292,6 +2296,8 @@ fn qa_received_control_metadata(gate: RecordingGate) {
             &duplicate,
         );
         qa_settle_once(&handle, &mut turn, &sink, &work);
+        let close = (class == ObservationClass::Disconnected)
+            .then(|| qa_pending_down_close(&owner, identity, &work));
         if let Some(close) = close {
             assert_eq!(close.storage(), CloseStorage::WorkOwner(work.id()));
             let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
@@ -2323,7 +2329,7 @@ fn qa_new_durable_received_controls_require_original_up_or_down_identity() {
 fn qa_obsolete_control_no_write(gate: RecordingGate) {
     for class in [ObservationClass::Connected, ObservationClass::Pong] {
         let wal = TempWal::new("qa-new-obsolete-control");
-        let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
         let down_identity = qa_original_identity(ObservationClass::Disconnected);
         let down = qa_admit(&handle, &mut turn, down_identity);
         sink.persist_owned(
@@ -2334,6 +2340,7 @@ fn qa_obsolete_control_no_write(gate: RecordingGate) {
         )
         .unwrap();
         qa_settle_once(&handle, &mut turn, &sink, &down);
+        let close = qa_pending_down_close(&owner, down_identity, &down);
         let mut identity = qa_original_identity(class);
         identity.stamp = ReceiveStamp {
             unix_ns: 6,
@@ -2382,7 +2389,23 @@ fn qa_obsolete_control_no_write(gate: RecordingGate) {
         assert_eq!(owner.watermarks().written, Some(record(5)));
         drop(work);
         drop(down);
+        assert_eq!(handle.authority().ownership_report().work_used, 1);
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::NotReady(_)
+        ));
+        let lease = leased(owner.reclaim_close(&mut turn, close));
+        assert!(matches!(
+            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            DispatchReport::Dispatched
+        ));
         assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::Ready(_)
+        ));
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
         assert_eq!(read_all(&wal.0).0.len(), 5);
     }
 }
@@ -2633,10 +2656,8 @@ fn qa_generated_original_stages(gate: RecordingGate) {
     let alias = work.share().unwrap();
     let down = qa_transport(5, identity, Transport::Down);
     sink.persist_owned(&mut turn, &down, gate, &work).unwrap();
-    let close = handle
-        .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
-        .unwrap();
     qa_settle_once(&handle, &mut turn, &sink, &work);
+    let close = qa_pending_down_close(&owner, identity, &work);
     work.set_kind(&mut turn, WorkKind::PendingPlan).unwrap();
     handle.retain_generated_plan(&mut turn, &work).unwrap();
     // The earlier authenticated Down is not fresh generated progress.
@@ -2831,4 +2852,1002 @@ fn qa_new_written_generated_completion_needs_original_ordered_fresh_epoch_stages
 #[test]
 fn qa_new_durable_generated_completion_needs_original_ordered_fresh_epoch_stages() {
     qa_generated_original_stages(RecordingGate::Durable);
+}
+
+// Integrator static-review probe for d85fa687; unexecuted when supplied.
+// Either safe implementation may install Close at completion or reject while
+// Pending until the rightful caller installs it. Ok without Close is forbidden.
+fn qa_integrator_down_completion_keeps_original_close(gate: RecordingGate) {
+    let wal = TempWal::new("qa-integrator-down-close");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let work_id = work.id();
+    let original = qa_transport(5, identity, Transport::Down);
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    let prefix = handle.prefix();
+    let watermarks = owner.watermarks();
+    let physical = fs::read(&wal.0).unwrap();
+
+    // No caller mandatory_close has been performed at this boundary.
+    match handle.complete_observation(&mut turn, &sink, &work, None) {
+        Ok(()) => {}
+        Err(AuthorityError::NotQuiescent) => {
+            assert_eq!(handle.authority().ownership_report().work_used, 1);
+            assert_eq!(
+                handle.authority().ownership_report().pending_observations,
+                1
+            );
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.watermarks(), watermarks);
+            assert_eq!(fs::read(&wal.0).unwrap(), physical);
+            handle
+                .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
+                .unwrap();
+            handle
+                .complete_observation(&mut turn, &sink, &work, None)
+                .unwrap();
+        }
+        other => panic!("unexpected original Down completion: {other:?}"),
+    }
+    let snapshot = owner.outstanding_close_owners();
+    assert_eq!(
+        snapshot.iter().count(),
+        1,
+        "exact received Down must not settle while its mandatory Close is absent"
+    );
+    let view = snapshot.iter().next().unwrap();
+    let close = view.owner.clone();
+    assert_eq!(view.state, CloseState::Pending);
+    assert_eq!(close.stream(), identity.stream);
+    assert_eq!(close.connection(), binding().connection_id);
+    assert_eq!(close.epoch(), identity.epoch);
+    assert_eq!(close.storage(), CloseStorage::WorkOwner(work_id));
+    let ledger = handle.authority().ownership_report();
+    assert_eq!(ledger.work_used, 1);
+    assert_eq!(ledger.pending_observations, 0);
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::InvalidOwner)
+    );
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    let same_close = handle
+        .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
+        .unwrap();
+    assert_eq!(same_close, close);
+    assert_eq!(owner.outstanding_close_owners(), snapshot);
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.watermarks(), watermarks);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+
+    // Release caller stewardship before Closing; the Close itself retains W.
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert_eq!(lease.work_owner_id(), Some(work_id));
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close.clone()),
+        CloseLeaseReport::AlreadyLeased
+    ));
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    drop(lease);
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    assert_eq!(read_all(&wal.0).0.len(), 5);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    let mut dispatched = 0;
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |command| {
+            assert_eq!(command.stream, identity.stream);
+            assert_eq!(command.connection, binding().connection_id);
+            assert_eq!(command.epoch, identity.epoch);
+            assert_eq!(command.kind, &CommandKind::Close);
+            dispatched += 1;
+            Ok::<_, ()>(())
+        }),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(dispatched, 1);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close),
+        CloseLeaseReport::AlreadySettled
+    ));
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::Ready(_)
+    ));
+    assert_eq!(read_all(&wal.0).0.last(), Some(&original));
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+}
+
+#[test]
+fn independent_qa_durable_exact_down_cannot_settle_without_original_mandatory_close() {
+    qa_integrator_down_completion_keeps_original_close(RecordingGate::Durable);
+}
+
+#[test]
+fn independent_qa_written_exact_down_cannot_settle_without_original_mandatory_close() {
+    qa_integrator_down_completion_keeps_original_close(RecordingGate::Written);
+}
+
+fn qa_pending_down_close(
+    owner: &CaptureSessionOwner,
+    identity: ObservationIdentity,
+    work: &WorkOwner,
+) -> CloseOwnerRef {
+    let snapshot = owner.outstanding_close_owners();
+    assert_eq!(snapshot.iter().count(), 1);
+    let view = snapshot.iter().next().unwrap();
+    assert_eq!(view.state, CloseState::Pending);
+    assert_eq!(view.owner.stream(), identity.stream);
+    assert_eq!(view.owner.connection(), binding().connection_id);
+    assert_eq!(view.owner.epoch(), identity.epoch);
+    assert_eq!(view.owner.storage(), CloseStorage::WorkOwner(work.id()));
+    view.owner.clone()
+}
+
+fn qa_down_close_foreign_and_dispatch_lifecycle(gate: RecordingGate) {
+    let wal = TempWal::new("qa-down-close-lifecycle");
+    let foreign_wal = TempWal::new("qa-down-close-foreign");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let (mut foreign_owner, mut foreign_turn, foreign_handle, foreign_sink) =
+        owner_with_fault(&foreign_wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let work_id = work.id();
+    let foreign_work = qa_admit(&foreign_handle, &mut foreign_turn, identity);
+    let original = qa_transport(5, identity, Transport::Down);
+    let unconfirmed = handle.authority().ownership_report();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &work, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    assert_eq!(handle.authority().ownership_report(), unconfirmed);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    let pending = handle.authority().ownership_report();
+    let status = owner.session_status();
+    let prefix = handle.prefix();
+    let watermarks = owner.watermarks();
+    let physical = fs::read(&wal.0).unwrap();
+    for variant in 0..4 {
+        let result = match variant {
+            0 => handle.complete_observation(&mut foreign_turn, &sink, &work, None),
+            1 => handle.complete_observation(&mut turn, &foreign_sink, &work, None),
+            2 => handle.complete_observation(&mut turn, &sink, &foreign_work, None),
+            3 => foreign_handle.complete_observation(&mut foreign_turn, &sink, &work, None),
+            _ => unreachable!(),
+        };
+        assert_eq!(result, Err(AuthorityError::AuthorityMismatch));
+        assert_eq!(handle.authority().ownership_report(), pending);
+        assert_eq!(owner.session_status(), status);
+        assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+        assert_eq!(handle.prefix(), prefix);
+        assert_eq!(owner.watermarks(), watermarks);
+        assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    }
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    let close = qa_pending_down_close(&owner, identity, &work);
+    let settled = handle.authority().ownership_report();
+    assert_eq!(settled.work_used, 1);
+    assert_eq!(settled.pending_observations, 0);
+    assert_eq!(settled.work_references, pending.work_references + 1);
+    assert_eq!(
+        settled.metadata_backing_bytes,
+        pending.metadata_backing_bytes
+    );
+    assert_eq!(
+        handle
+            .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&work))
+            .unwrap(),
+        close
+    );
+    assert_eq!(handle.authority().ownership_report(), settled);
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    assert_eq!(handle.authority().ownership_report().abandoned_work, 0);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let retained = handle.authority().ownership_report();
+    for _ in 0..3 {
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::NotReady(_)
+        ));
+        assert_eq!(handle.authority().ownership_report(), retained);
+    }
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert_eq!(lease.work_owner_id(), Some(work_id));
+    let leased_ledger = handle.authority().ownership_report();
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close.clone()),
+        CloseLeaseReport::AlreadyLeased
+    ));
+    assert!(matches!(
+        owner.reclaim_close(&mut foreign_turn, close.clone()),
+        CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
+    ));
+    assert!(matches!(
+        foreign_owner.reclaim_close(&mut foreign_turn, close.clone()),
+        CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
+    ));
+    assert_eq!(handle.authority().ownership_report(), leased_ledger);
+    let command = match owner.dispatch(
+        &mut foreign_turn,
+        lease.into_command(),
+        |_| -> Result<(), ()> { panic!("foreign turn cannot invoke the Close effect") },
+    ) {
+        DispatchReport::Denied {
+            reason: AuthorityError::AuthorityMismatch,
+            command,
+        } => command,
+        other => panic!("foreign turn must return the same command: {other:?}"),
+    };
+    let command = match foreign_owner.dispatch(&mut foreign_turn, command, |_| -> Result<(), ()> {
+        panic!("foreign owner cannot invoke the Close effect")
+    }) {
+        DispatchReport::Denied {
+            reason: AuthorityError::AuthorityMismatch,
+            command,
+        } => command,
+        other => panic!("foreign owner must return the same command: {other:?}"),
+    };
+    assert_eq!(command.close_owner(), Some(&close));
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+    assert_eq!(handle.authority().ownership_report(), leased_ledger);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    drop(command);
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+    assert_eq!(handle.authority().ownership_report(), retained);
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |_| Err::<(), _>(
+            "ambiguous original Close"
+        )),
+        DispatchReport::DispatchFailed {
+            error: "ambiguous original Close",
+            effect: AmbiguousEffect::Unknown
+        }
+    ));
+    assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+    assert_eq!(handle.authority().ownership_report(), retained);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.watermarks(), watermarks);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    let mut dispatched = 0;
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |command| {
+            assert_eq!(command.stream, identity.stream);
+            assert_eq!(command.connection, binding().connection_id);
+            assert_eq!(command.epoch, identity.epoch);
+            assert_eq!(command.kind, &CommandKind::Close);
+            dispatched += 1;
+            Ok::<_, ()>(())
+        }),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(dispatched, 1);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close),
+        CloseLeaseReport::AlreadySettled
+    ));
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("rightful Close enables the original sole proof")
+    };
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::TicketConsumed
+    ));
+    if gate == RecordingGate::Durable {
+        owner.finalize(&mut turn, &mut proof).unwrap();
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(report.status, ArchiveStatus::Complete);
+        assert_eq!(report.input_quality, Some(InputQuality::NoKnownLoss));
+        assert_eq!(records.len(), 7);
+        assert_eq!(records[4], original);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.value, Record::SegmentSeal(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| matches!(record.value, Record::ArchiveSeal(_)))
+                .count(),
+            1
+        );
+        let finalized = fs::read(&wal.0).unwrap();
+        assert!(owner.finalize(&mut turn, &mut proof).is_err());
+        assert_eq!(fs::read(&wal.0).unwrap(), finalized);
+    } else {
+        assert_eq!(read_all(&wal.0).0.len(), 5);
+        assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    }
+}
+
+#[test]
+fn qa_down_written_public_completion_retains_close_through_foreign_drop_error_and_recovery() {
+    qa_down_close_foreign_and_dispatch_lifecycle(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_public_completion_retains_close_through_foreign_drop_error_and_recovery() {
+    qa_down_close_foreign_and_dispatch_lifecycle(RecordingGate::Durable);
+}
+
+fn qa_down_close_alias_exhaustion(gate: RecordingGate) {
+    let wal = TempWal::new("qa-down-close-share-limit");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = qa_transport(5, identity, Transport::Down);
+    sink.persist_owned(&mut turn, &original, gate, &work)
+        .unwrap();
+    let mut aliases = Vec::new();
+    for _ in 0..8 {
+        match work.share() {
+            Ok(alias) => aliases.push(alias),
+            Err(AuthorityError::WorkShareExhausted) => break,
+            other => panic!("unexpected bounded share result: {other:?}"),
+        }
+    }
+    assert!(!aliases.is_empty());
+    assert!(matches!(
+        work.share(),
+        Err(AuthorityError::WorkShareExhausted)
+    ));
+    let pending = handle.authority().ownership_report();
+    let prefix = handle.prefix();
+    let watermarks = owner.watermarks();
+    let physical = fs::read(&wal.0).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &work, None),
+            Err(AuthorityError::WorkShareExhausted)
+        );
+        assert_eq!(handle.authority().ownership_report(), pending);
+        assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+        assert_eq!(handle.prefix(), prefix);
+        assert_eq!(owner.watermarks(), watermarks);
+        assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    }
+    assert_eq!(pending.work_used, 1);
+    assert_eq!(pending.pending_observations, 1);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    drop(aliases.pop().unwrap());
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    let close = qa_pending_down_close(&owner, identity, &work);
+    drop(aliases);
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    assert_eq!(handle.authority().ownership_report().abandoned_work, 0);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    let lease = leased(owner.reclaim_close(&mut turn, close));
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::Ready(_)
+    ));
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+}
+
+#[test]
+fn qa_down_written_close_install_share_limit_preserves_pending_and_rightful_retry() {
+    qa_down_close_alias_exhaustion(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_close_install_share_limit_preserves_pending_and_rightful_retry() {
+    qa_down_close_alias_exhaustion(RecordingGate::Durable);
+}
+
+fn qa_down_close_duplicate_prior_and_terminal_reuse(gate: RecordingGate) {
+    for variant in 0..4 {
+        let wal = TempWal::new("qa-down-close-prior-reuse");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let first_identity = qa_original_identity(ObservationClass::Disconnected);
+        let first = qa_admit(&handle, &mut turn, first_identity);
+        let mut next_identity = first_identity;
+        next_identity.stamp = ReceiveStamp {
+            unix_ns: 6,
+            monotonic_ns: 6,
+        };
+        let next = qa_admit(&handle, &mut turn, next_identity);
+        sink.persist_owned(
+            &mut turn,
+            &qa_transport(5, first_identity, Transport::Down),
+            gate,
+            &first,
+        )
+        .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &first);
+        let close = qa_pending_down_close(&owner, first_identity, &first);
+        let mut held = None;
+        if variant != 0 {
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            if variant == 2 {
+                assert!(matches!(
+                    owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                    DispatchReport::Dispatched
+                ));
+            } else {
+                held = Some(lease);
+            }
+        }
+        if variant == 3 {
+            let termination = handle.terminate(&mut turn, terminal()).unwrap();
+            assert_eq!(termination.close_owner, close);
+            assert!(termination.close.is_none());
+        }
+        let state = if variant == 2 {
+            CloseState::Settled
+        } else if held.is_some() {
+            CloseState::Leased
+        } else {
+            CloseState::Pending
+        };
+        let original_cut = owner.session_status().cut_sequence;
+        let original_close = owner.outstanding_close_owners();
+        sink.persist_owned(
+            &mut turn,
+            &qa_transport(6, next_identity, Transport::Down),
+            gate,
+            &next,
+        )
+        .unwrap();
+        let before = handle.authority().ownership_report();
+        qa_settle_once(&handle, &mut turn, &sink, &next);
+        let after = handle.authority().ownership_report();
+        let mut expected = before;
+        expected.pending_observations -= 1;
+        assert_eq!(
+            after, expected,
+            "duplicate Down settles only its original observation; no second owner/alias"
+        );
+        assert_eq!(owner.outstanding_close_owners(), original_close);
+        assert_eq!(owner.session_status().cut_sequence, original_cut);
+        assert_eq!(
+            handle
+                .authority()
+                .close_state(first_identity.stream, first_identity.epoch),
+            Ok(state)
+        );
+        assert_eq!(
+            handle
+                .mandatory_close(
+                    &mut turn,
+                    next_identity.stream,
+                    next_identity.epoch,
+                    Some(&next)
+                )
+                .unwrap(),
+            close
+        );
+        assert_eq!(handle.authority().ownership_report(), after);
+        assert_eq!(close.storage(), CloseStorage::WorkOwner(first.id()));
+        drop(first);
+        drop(next);
+        assert_eq!(
+            handle.authority().ownership_report().work_used,
+            usize::from(state != CloseState::Settled)
+        );
+        drop(held);
+        if state != CloseState::Settled {
+            assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            assert!(matches!(
+                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                DispatchReport::Dispatched
+            ));
+        }
+        assert!(matches!(
+            owner.reclaim_close(&mut turn, close),
+            CloseLeaseReport::AlreadySettled
+        ));
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        if variant == 3 {
+            assert!(matches!(
+                owner.begin_finalization(&mut turn),
+                Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+            ));
+        } else {
+            let ticket = owner.begin_finalization(&mut turn).unwrap();
+            assert!(matches!(
+                handle.quiesce(&mut turn, &ticket),
+                QuiescenceReport::Ready(_)
+            ));
+        }
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(records.len(), 6);
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(!records.iter().any(|record| matches!(
+            record.value,
+            Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+        )));
+    }
+}
+
+#[test]
+fn qa_down_written_duplicate_prior_and_terminal_close_reuse_preserves_one_owner() {
+    qa_down_close_duplicate_prior_and_terminal_reuse(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_duplicate_prior_and_terminal_close_reuse_preserves_one_owner() {
+    qa_down_close_duplicate_prior_and_terminal_reuse(RecordingGate::Durable);
+}
+
+fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
+    for variant in 0..4 {
+        let wal = TempWal::new("qa-down-close-unrelated-owner");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let other_identity = qa_original_identity(if variant == 3 {
+            ObservationClass::Timer {
+                timer_id: 99,
+                deadline_ns: 5,
+            }
+        } else {
+            ObservationClass::Raw
+        });
+        let other = if variant == 0 {
+            handle
+                .reserve_work(&mut turn, WorkKind::PendingPlan)
+                .unwrap()
+        } else {
+            qa_admit(&handle, &mut turn, other_identity)
+        };
+        let mut down_no = 5;
+        if variant >= 2 {
+            let other_record = if variant == 2 {
+                qa_raw(5, other_identity, false)
+            } else {
+                frame(
+                    5,
+                    Record::Control(ControlRecord {
+                        context: qa_context(other_identity),
+                        value: Control::Timer {
+                            stream: other_identity.stream,
+                            timer_id: 99,
+                            deadline_ns: 5,
+                        },
+                    }),
+                )
+            };
+            sink.persist_owned(&mut turn, &other_record, gate, &other)
+                .unwrap();
+            qa_settle_once(&handle, &mut turn, &sink, &other);
+            down_no = 6;
+        }
+        let close = handle
+            .mandatory_close(
+                &mut turn,
+                binding().id,
+                binding().tag.connection,
+                Some(&other),
+            )
+            .unwrap();
+        let held = leased(owner.reclaim_close(&mut turn, close.clone()));
+        let identity = qa_original_identity(ObservationClass::Disconnected);
+        let down = qa_admit(&handle, &mut turn, identity);
+        let original = qa_transport(down_no, identity, Transport::Down);
+        sink.persist_owned(&mut turn, &original, gate, &down)
+            .unwrap();
+        let before = handle.authority().ownership_report();
+        let status = owner.session_status();
+        let closes = owner.outstanding_close_owners();
+        let prefix = handle.prefix();
+        let watermarks = owner.watermarks();
+        let bytes = fs::read(&wal.0).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, &down, None),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(handle.authority().ownership_report(), before);
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(owner.outstanding_close_owners(), closes);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.watermarks(), watermarks);
+            assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        }
+        assert_eq!(close.storage(), CloseStorage::WorkOwner(other.id()));
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::NotReady(_)
+        ));
+        assert!(matches!(
+            owner.dispatch(&mut turn, held.into_command(), |_| Ok::<_, ()>(())),
+            DispatchReport::Dispatched
+        ));
+        // The earlier Close is now actually fulfilled; retry reuses its settled
+        // identity without installing a replacement owner on the received Down.
+        qa_settle_once(&handle, &mut turn, &sink, &down);
+        assert_eq!(
+            handle
+                .authority()
+                .close_state(identity.stream, identity.epoch),
+            Ok(CloseState::Settled)
+        );
+        assert_eq!(
+            handle
+                .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&down))
+                .unwrap(),
+            close
+        );
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        if variant == 1 {
+            sink.persist_owned(
+                &mut turn,
+                &qa_raw(down_no + 1, other_identity, false),
+                gate,
+                &other,
+            )
+            .unwrap();
+            qa_settle_once(&handle, &mut turn, &sink, &other);
+        }
+        drop(other);
+        drop(down);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::Ready(_)
+        ));
+        let records = read_all(&wal.0).0;
+        assert_eq!(records.len(), (down_no + u64::from(variant == 1)) as usize);
+        assert!(!records.iter().any(|record| matches!(
+            record.value,
+            Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+        )));
+    }
+}
+
+#[test]
+fn qa_down_written_incompatible_live_close_preserves_pending_until_truthful_settlement() {
+    qa_down_close_rejects_unrelated_live_owner(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_incompatible_live_close_preserves_pending_until_truthful_settlement() {
+    qa_down_close_rejects_unrelated_live_owner(RecordingGate::Durable);
+}
+
+fn qa_down_close_failure_cut_neighbor_and_abandonment(gate: RecordingGate) {
+    for mismatch in [false, true] {
+        let wal = TempWal::new("qa-down-close-failure-cut");
+        let (mut owner, mut turn, handle, mut sink) = owner_two_scopes_with_gate(&wal.0, gate);
+        let identity = qa_original_identity(ObservationClass::Disconnected);
+        let down = qa_admit(&handle, &mut turn, identity);
+        let mut neighbor_identity = qa_original_identity(ObservationClass::Raw);
+        neighbor_identity.stream = positive(StreamId::new(2));
+        let neighbor = qa_admit(&handle, &mut turn, neighbor_identity);
+        sink.persist_owned(
+            &mut turn,
+            &qa_transport(7, identity, Transport::Down),
+            gate,
+            &down,
+        )
+        .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &down);
+        let close = qa_pending_down_close(&owner, identity, &down);
+        let held = leased(owner.reclaim_close(&mut turn, close.clone()));
+        let failure = terminal();
+        let termination = handle.terminate(&mut turn, failure).unwrap();
+        assert_eq!(termination.close_owner, close);
+        assert!(termination.close.is_none());
+        let cut = owner.session_status().cut_sequence;
+        assert_eq!(down.cut_side(), domain::capture_session::CutSide::PreCut);
+        assert_eq!(
+            neighbor.cut_side(),
+            domain::capture_session::CutSide::PreCut
+        );
+        let neighbor_raw = qa_raw(8, neighbor_identity, false);
+        sink.persist_owned(&mut turn, &neighbor_raw, gate, &neighbor)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &neighbor);
+        drop(neighbor);
+        assert_eq!(owner.session_status().cut_sequence, cut);
+        assert_eq!(owner.session_status().first_failure, Some(failure));
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+        let before = handle.authority().ownership_report();
+        let prefix = handle.prefix();
+        let error = PersistError::typed(PersistErrorKind::Io, "received Down marker error");
+        let kind = if mismatch {
+            SinkFaultKind::ReceiptMismatch { through: record(8) }
+        } else {
+            SinkFaultKind::BeforeWrite(error)
+        };
+        owner
+            .set_sink_fault(
+                &mut turn,
+                Some(SinkFault {
+                    at: record(9),
+                    kind,
+                }),
+            )
+            .unwrap();
+        let mut marker = failed_marker();
+        marker.record_no = record(9);
+        let Record::Control(ControlRecord {
+            value: Control::Recording(evidence),
+            ..
+        }) = &mut marker.value
+        else {
+            unreachable!()
+        };
+        evidence.kind = if gate == RecordingGate::Durable {
+            WatermarkKind::Durable
+        } else {
+            WatermarkKind::Written
+        };
+        evidence.through = Some(record(8));
+        let result = sink.persist(&mut turn, &marker, gate);
+        if mismatch {
+            assert_eq!(
+                result,
+                Err(PersistBoundaryError::ReceiptMismatch {
+                    expected: record(9),
+                    actual: record(8)
+                })
+            );
+        } else {
+            assert_eq!(result, Err(PersistBoundaryError::Persistence(error)));
+        }
+        assert_eq!(handle.authority().ownership_report(), before);
+        assert_eq!(handle.prefix(), prefix);
+        assert!(owner.session_status().storage_stopped.is_some());
+        assert_eq!(owner.session_status().cut_sequence, cut);
+        assert_eq!(owner.session_status().first_failure, Some(failure));
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Leased));
+        drop(down);
+        assert_eq!(handle.authority().ownership_report().work_used, 1);
+        drop(held);
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert!(matches!(
+            owner.reclaim_close(&mut turn, close),
+            CloseLeaseReport::AlreadySettled
+        ));
+        assert!(matches!(
+            owner.begin_finalization(&mut turn),
+            Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+        ));
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(records[7], neighbor_raw);
+        assert_eq!(records.len(), 8 + usize::from(mismatch));
+        if mismatch {
+            assert_eq!(records.last(), Some(&marker));
+        }
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(!records.iter().any(|record| matches!(
+            record.value,
+            Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+        )));
+    }
+    let wal = TempWal::new("qa-down-close-abandoned-receipt");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let down = qa_admit(&handle, &mut turn, identity);
+    let work_id = down.id();
+    sink.persist_owned(
+        &mut turn,
+        &qa_transport(5, identity, Transport::Down),
+        gate,
+        &down,
+    )
+    .unwrap();
+    let prefix = handle.prefix();
+    let bytes = fs::read(&wal.0).unwrap();
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    drop(down);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+    ));
+    let abandoned = owner.session_status().first_abandonment.unwrap();
+    assert_eq!(abandoned.identity, identity);
+    assert_eq!(abandoned.work_id, work_id);
+    assert_eq!(
+        owner.session_status().storage_stopped.unwrap().kind,
+        PersistErrorKind::OwnershipAbandoned
+    );
+    assert_eq!(handle.authority().ownership_report().abandoned_work, 1);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    let snapshot = owner.outstanding_close_owners();
+    assert_eq!(snapshot.iter().count(), 1);
+    let close = snapshot.iter().next().unwrap().owner.clone();
+    assert_eq!(close.storage(), CloseStorage::ReservedTerminal);
+    let lease = leased(owner.reclaim_close(&mut turn, close));
+    assert!(matches!(
+        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+    ));
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    let records = read_all(&wal.0).0;
+    assert_eq!(records.len(), 5);
+    assert!(!records.iter().any(|record| matches!(
+        record.value,
+        Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+    )));
+}
+
+#[test]
+fn qa_down_written_failure_cut_neighbor_and_abandonment_preserve_truthful_close() {
+    qa_down_close_failure_cut_neighbor_and_abandonment(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_failure_cut_neighbor_and_abandonment_preserve_truthful_close() {
+    qa_down_close_failure_cut_neighbor_and_abandonment(RecordingGate::Durable);
+}
+
+fn qa_down_close_reserved_terminal_reuse(gate: RecordingGate) {
+    for variant in 0..3 {
+        let wal = TempWal::new("qa-down-close-reserved-terminal");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let identity = qa_original_identity(ObservationClass::Disconnected);
+        let down = qa_admit(&handle, &mut turn, identity);
+        let failure = terminal();
+        let termination = handle.terminate(&mut turn, failure).unwrap();
+        let close = termination.close_owner;
+        assert_eq!(close.storage(), CloseStorage::ReservedTerminal);
+        let lease = termination
+            .close
+            .expect("one original reserved terminal lease");
+        assert_eq!(lease.work_owner_id(), None);
+        let held = if variant == 1 {
+            Some(lease)
+        } else {
+            if variant == 2 {
+                assert!(matches!(
+                    owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                    DispatchReport::Dispatched
+                ));
+            } else {
+                drop(lease);
+            }
+            None
+        };
+        let expected_state = match variant {
+            0 => CloseState::Pending,
+            1 => CloseState::Leased,
+            2 => CloseState::Settled,
+            _ => unreachable!(),
+        };
+        let cut = owner.session_status().cut_sequence;
+        let original = qa_transport(5, identity, Transport::Down);
+        sink.persist_owned(&mut turn, &original, gate, &down)
+            .unwrap();
+        let before = handle.authority().ownership_report();
+        let closes = owner.outstanding_close_owners();
+        let prefix = handle.prefix();
+        let watermarks = owner.watermarks();
+        let bytes = fs::read(&wal.0).unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &down);
+        let mut expected = before;
+        expected.pending_observations -= 1;
+        assert_eq!(handle.authority().ownership_report(), expected);
+        assert_eq!(owner.outstanding_close_owners(), closes);
+        assert_eq!(
+            handle
+                .authority()
+                .close_state(identity.stream, identity.epoch),
+            Ok(expected_state)
+        );
+        assert_eq!(
+            handle
+                .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&down))
+                .unwrap(),
+            close
+        );
+        assert_eq!(handle.authority().ownership_report(), expected);
+        assert_eq!(owner.session_status().first_failure, Some(failure));
+        assert_eq!(owner.session_status().cut_sequence, cut);
+        assert_eq!(handle.prefix(), prefix);
+        assert_eq!(owner.watermarks(), watermarks);
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        drop(down);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        drop(held);
+        if expected_state != CloseState::Settled {
+            assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            assert_eq!(lease.work_owner_id(), None);
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::AlreadyLeased
+            ));
+            assert!(matches!(
+                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                DispatchReport::Dispatched
+            ));
+        }
+        assert!(matches!(
+            owner.reclaim_close(&mut turn, close),
+            CloseLeaseReport::AlreadySettled
+        ));
+        assert!(matches!(
+            owner.begin_finalization(&mut turn),
+            Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+        ));
+        assert_eq!(owner.session_status().cut_sequence, cut);
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(records.len(), 5);
+        assert_eq!(records.last(), Some(&original));
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(!records.iter().any(|record| matches!(
+            record.value,
+            Record::SegmentSeal(_) | Record::ArchiveSeal(_)
+        )));
+    }
+}
+
+#[test]
+fn qa_down_written_preexisting_reserved_terminal_close_is_reused_in_all_states() {
+    qa_down_close_reserved_terminal_reuse(RecordingGate::Written);
+}
+
+#[test]
+fn qa_down_durable_preexisting_reserved_terminal_close_is_reused_in_all_states() {
+    qa_down_close_reserved_terminal_reuse(RecordingGate::Durable);
 }
