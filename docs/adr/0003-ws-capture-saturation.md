@@ -1065,3 +1065,14 @@ not an unavailable owner executor. No Release PASS is inferred. The prepared
 exact-head runner uses the named-pipe context, a clean rust:1.98.1-bookworm
 temporary container, bash -c, temporary rustfmt/clippy and full stdout/stderr,
 command exits, Rust/Cargo versions and before/after clean-source provenance.
+
+The first implementation headdd2dd52f89f155bb447a2c5fb686a2f190a87c7d was tested
+by [Linux CI37755315999](https://github.com/al-gri/pro-sclpng/actions/runs/37755315999).
+Fmt/Clippy/build passed; tests stopped at the unchanged supervisor architecture
+guard because newly added private fixtures directly read files. The bounded
+correction retains the guard, uses a trusted in-memory private fixture, and adds
+two public canonical integration tests with physical-prefix and real retry
+evidence. Production supervisor code is unchanged by this correction. Private
+profile labels are not physical durability evidence. The failed job skipped its
+final clean-source check; complete failed-head logs remain distinct from any
+later corrected-head verification.

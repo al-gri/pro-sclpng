@@ -2681,7 +2681,7 @@ Implemented A1–A5 boundaries:
   Close and schedule use checked fixed storage with W+N+1<=M.
 
 Regression additions retain all previous test function names:13 private domain,
-36 recording integration and8 supervisor functions (6 integration,2 private).
+36 recording integration and10 supervisor functions (8 integration,2 private).
 The T01–T16 matrix maps public paired Durable/Written cases, variant loops,
 private counter/backend-observer tests and explicit type/source constraints.
 Private generated-stage modeling is a predicate test, not a claim of concurrent
@@ -2727,3 +2727,26 @@ source and must be checked against this implementation head. Fresh independent Q
 must follow implementation and cannot be replaced by author tests or peer source
 analysis. Integrator acceptance, READY, merge/auto-merge and post-merge CI remain
 unissued; no such actions were performed.
+
+### Fresh implementation CI correction
+
+First Timer implementation headdd2dd52f89f155bb447a2c5fb686a2f190a87c7d /
+tree6480f2e7b7f77d6afaba23971a03403f728cbc8f was actually tested by Linux CI
+[37755315999](https://github.com/al-gri/pro-sclpng/actions/runs/37755315999).
+Fmt and strict Clippy passed; workspace build passed. Workspace tests stopped at
+the unchanged market-data architecture guard: two filesystem reads in newly added
+private test fixtures caused filesystem-ownership rejection. The job's final
+clean-source step was skipped, so no final clean-check claim is made for that
+failed job. Full logs and original failing source identity are retained.
+
+Correction changes only the ws_supervisor private test module and permitted
+integration test file, plus ADR/handoff facts. Production supervisor behavior is
+unchanged. The existing architecture guard remains exact and passes7 tests.
+The two private order/retry tests now use a trusted in-memory boundary; their
+historical profile suffixes do not mean physical Durable/Written execution.
+Two new public canonical integration tests cover both Open and neighbor-cut
+variants, three preserving order rejections, zero sink calls/unchanged physical
+prefix, then actual original Raw receipt and lawful Timer retry. The Written
+integration test passes locally; genuine Durable on Windows fails at the original
+Unix metadata-sync bootstrap. Fresh corrected-head Linux results are a new gate;
+neither this failed CI nor source-only profile names certify that gate.

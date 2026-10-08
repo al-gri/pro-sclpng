@@ -4493,21 +4493,7 @@ mod tests {
         Vec<StreamBinding>,
         std::path::PathBuf,
     ) {
-        unconstructed_boundary_fixture_with_gate(policy, RecordingGate::Durable)
-    }
-
-    fn unconstructed_boundary_fixture_with_gate(
-        policy: QueuePolicy,
-        gate: RecordingGate,
-    ) -> (
-        WsSupervisorConfig,
-        session::SupervisorSessionHandle,
-        recording::CaptureSessionOwner,
-        session::SessionTurn,
-        session::BoundRecordSink,
-        Vec<StreamBinding>,
-        std::path::PathBuf,
-    ) {
+        let gate = RecordingGate::Durable;
         use domain::identity::{ArchiveId, CaptureSessionId, ClockId};
         use domain::numeric::ExactDecimal;
         use domain::policy::{DurabilityMode, PolicyFields, SilenceRule};
@@ -4671,13 +4657,123 @@ mod tests {
         }
     }
 
+    struct PureTimerBoundarySink {
+        frames: std::rc::Rc<std::cell::RefCell<Vec<RecordFrame>>>,
+    }
+
+    impl session::SessionRecordWriter for PureTimerBoundarySink {
+        fn persist(
+            &mut self,
+            frame: &RecordFrame,
+            gate: RecordingGate,
+        ) -> Result<PersistenceReceipt, PersistError> {
+            self.frames.borrow_mut().push(frame.clone());
+            Ok(PersistenceReceipt {
+                through: frame.record_no,
+                achieved_gate: gate,
+            })
+        }
+    }
+
+    struct PureTimerBoundary {
+        config: WsSupervisorConfig,
+        handle: session::SupervisorSessionHandle,
+        authority: session::CaptureSessionAuthority,
+        turn: session::SessionTurn,
+        sink: session::BoundRecordSink,
+        bindings: Vec<StreamBinding>,
+        frames: std::rc::Rc<std::cell::RefCell<Vec<RecordFrame>>>,
+    }
+
+    fn pure_timer_boundary_fixture(gate: RecordingGate) -> PureTimerBoundary {
+        use domain::identity::{ArchiveId, CaptureSessionId, ClockId};
+        let (core, first, _) = fixture();
+        let mut second = first.clone();
+        second.id = StreamId::new(2).unwrap();
+        second.instrument_slot = InstrumentSlot::new(2).unwrap();
+        second.connection_id = ConnectionId::new(2).unwrap();
+        second.book_id = Some(BookId::new(2).unwrap());
+        second.spec.instrument.native_symbol = Token::new("ETHUSDT").unwrap();
+        let bindings = vec![first, second];
+        let policy = QueuePolicy::default();
+        let (authority, mut turn) =
+            session::CaptureSessionAuthority::new(session::SessionBinding {
+                archive: ArchiveId::new([7; 16]).unwrap(),
+                session: CaptureSessionId::new([8; 16]).unwrap(),
+                clock: ClockId::new(1).unwrap(),
+            });
+        let scopes: Vec<_> = bindings
+            .iter()
+            .map(|binding| session::ScopeBinding {
+                stream: binding.id,
+                connection: binding.connection_id,
+                epoch: binding.tag.connection,
+            })
+            .collect();
+        let next_record = RecordNo::new(7).unwrap();
+        let handle = authority
+            .register_supervisor(
+                &mut turn,
+                &scopes,
+                session::RetentionBudget {
+                    item_cap: policy.max_total_items,
+                    raw_frame_limit: policy.max_raw_frames_per_stream,
+                    raw_byte_limit: policy.max_raw_bytes_per_stream,
+                    max_message_bytes: policy.max_raw_message_bytes,
+                },
+                session::PrefixBinding {
+                    context: core.active_context,
+                    recording_gate: gate,
+                    segment: SegmentNo::new(0),
+                    next_record,
+                },
+                HeartbeatPolicy::SupervisorV2,
+            )
+            .unwrap();
+        authority
+            .set_accepted_stream_bindings(&mut turn, &bindings)
+            .unwrap();
+        let frames = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = authority
+            .bind_sink(
+                &mut turn,
+                Box::new(PureTimerBoundarySink {
+                    frames: std::rc::Rc::clone(&frames),
+                }),
+            )
+            .unwrap();
+        PureTimerBoundary {
+            config: WsSupervisorConfig {
+                active_context: core.active_context,
+                recording_gate: gate,
+                segment_no: SegmentNo::new(0),
+                next_record_no: next_record,
+                queue_policy: policy,
+                streams: bindings.clone(),
+            },
+            handle,
+            authority,
+            turn,
+            sink,
+            bindings,
+            frames,
+        }
+    }
+
     fn timer_a_authority_scheduler_order_retry(gate: RecordingGate) {
-        // Private supervisor setup exposes the already owner-minted handle;
-        // all admission/write/settlement operations use its public boundary.
+        // This is a pure trusted boundary test, with no storage guarantee.
+        // Paired integration tests verify actual owner/WAL rejection bytes.
         // The authority's accepted Up is deliberately absent from the core.
         for with_cut in [false, true] {
-            let (mut config, handle, mut owner, mut turn, mut sink, bindings, path) =
-                unconstructed_boundary_fixture_with_gate(QueuePolicy::default(), gate);
+            let PureTimerBoundary {
+                mut config,
+                handle,
+                authority,
+                mut turn,
+                mut sink,
+                bindings,
+                frames,
+            } = pure_timer_boundary_fixture(gate);
             let a = &bindings[0];
             let up_owner = handle
                 .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
@@ -4729,7 +4825,12 @@ mod tests {
             let mut supervisor = PublicWsSupervisor::new(config, handle).unwrap();
             let start = supervisor.start_commands(&mut turn);
             start.outcome.unwrap();
-            dispatch_boundary(&mut owner, &mut turn, start.commands);
+            for command in start.commands {
+                assert!(matches!(
+                    authority.dispatch(&mut turn, command, |_| Ok::<(), ()>(())),
+                    session::DispatchReport::Dispatched
+                ));
+            }
             assert_eq!(
                 supervisor.snapshot(a.id).unwrap().transport,
                 Transport::Unknown
@@ -4803,7 +4904,8 @@ mod tests {
             let queued_owner_id = supervisor.queued_owners.front().unwrap().id();
             let status = supervisor.session_status();
             let close = supervisor.handle.authority().outstanding_close_owners();
-            let prefix = std::fs::read(&path).unwrap();
+            let prefix = supervisor.handle.prefix();
+            let accepted_frames = frames.borrow().clone();
             for _ in 0..3 {
                 let blocked = supervisor.drain_one(&mut turn, &mut sink);
                 assert!(matches!(blocked.outcome,
@@ -4830,7 +4932,8 @@ mod tests {
                     supervisor.handle.authority().outstanding_close_owners(),
                     close
                 );
-                assert_eq!(std::fs::read(&path).unwrap(), prefix);
+                assert_eq!(supervisor.handle.prefix(), prefix);
+                assert_eq!(*frames.borrow(), accepted_frames);
                 assert!(!supervisor.is_halted());
             }
             earlier
@@ -4873,7 +4976,7 @@ mod tests {
                 .unwrap();
             assert_eq!(ping.work_owner_id(), Some(queued_owner_id));
             assert!(matches!(
-                owner.dispatch(&mut turn, ping, |_| Ok::<(), ()>(())),
+                authority.dispatch(&mut turn, ping, |_| Ok::<(), ()>(())),
                 session::DispatchReport::Dispatched
             ));
             drop(result);
