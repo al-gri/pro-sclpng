@@ -7926,6 +7926,33 @@ macro_rules! qa42_reports {
     }};
 }
 
+fn qa42_original_failure_marker(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+) {
+    let descriptor = handle.archive_failure_observation().unwrap();
+    let marker = frame(
+        handle.prefix().next_record.get(),
+        Record::Control(ControlRecord {
+            context: descriptor.context,
+            value: Control::Recording(RecordingEvidence {
+                health: RecordingHealth::Failed,
+                kind: descriptor.kind,
+                through: handle.trusted_watermark(descriptor.kind),
+                reason: descriptor.reason,
+            }),
+        }),
+    );
+    sink.persist_marker(turn, &marker, gate).unwrap();
+    handle
+        .authority()
+        .marker_confirmed(turn, marker.record_no)
+        .unwrap();
+    assert_eq!(handle.archive_failure_observation(), Some(descriptor));
+}
+
 fn qa42_dispatch_terminal(
     owner: &mut CaptureSessionOwner,
     turn: &mut SessionTurn,
@@ -8217,7 +8244,7 @@ fn qa42_durable_closing_failure_before_and_after_ready_revokes_proof_and_keeps_o
                 Ok(CloseState::Settled)
             );
             if !storage_stop {
-                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+                qa42_original_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
             }
             assert!(matches!(
                 owner.close_diagnostic(&mut turn).outcome,
@@ -8263,7 +8290,7 @@ fn qa42_durable_failed_scope_gap_at_three_old_stages_rejects_extension_and_drain
             assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
             if cap == 9 {
                 assert_eq!(gap.cut_side(), domain::capture_session::CutSide::PostCut);
-                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+                qa42_original_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
             }
             let original = qa_gap(
                 handle.prefix().next_record.get(),
@@ -8321,7 +8348,7 @@ fn qa42_durable_failed_scope_gap_at_three_old_stages_rejects_extension_and_drain
             }
             drop(gap);
             if cap == 5 {
-                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+                qa42_original_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
             }
             assert_eq!(
                 handle.authority().terminal_failure(identity.stream),
@@ -8388,7 +8415,7 @@ fn qa42_durable_healthy_postcut_gap_thirty_two_extensions_keep_original_owner_an
             .terminal_failure(identity.stream)
             .is_none()
     );
-    qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+    qa42_original_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
     gap.set_kind(&mut turn, WorkKind::InFlightObservation)
         .unwrap();
     let expanded = qa_gap(
@@ -8486,7 +8513,7 @@ fn qa42_failed_scope_requested_allocation(gate: RecordingGate) {
             assert_eq!(probe.sample().live_requested_bytes, baseline);
         }
         if cap == 9 {
-            qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+            qa42_original_failure_marker(&handle, &mut turn, &mut sink, gate);
         }
         gap.set_kind(&mut turn, WorkKind::InFlightObservation)
             .unwrap();
@@ -8500,7 +8527,7 @@ fn qa42_failed_scope_requested_allocation(gate: RecordingGate) {
         qa_settle_once(&handle, &mut turn, &sink, &gap);
         drop(gap);
         if cap == 5 {
-            qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+            qa42_original_failure_marker(&handle, &mut turn, &mut sink, gate);
         }
         drop(reserved);
         assert_eq!(handle.authority().ownership_report().work_used, 0);
