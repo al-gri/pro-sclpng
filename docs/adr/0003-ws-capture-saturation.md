@@ -1076,3 +1076,16 @@ evidence. Production supervisor code is unchanged by this correction. Private
 profile labels are not physical durability evidence. The failed job skipped its
 final clean-source check; complete failed-head logs remain distinct from any
 later corrected-head verification.
+
+Corrected source headc922fb0d3db715f4f018a22ef519d72e75dd85d3 /
+tree0618465dba0e1be2a5a1384f169552f4e3fc168b passed
+[Linux debug CI37757268193](https://github.com/al-gri/pro-sclpng/actions/runs/37757268193).
+All three jobs verified expected=checked-out exact SHA and their final clean
+checks; pinned Rust/Cargo1.98.1, formatting, strict Clippy, locked workspace
+build/test and actual CLI passed. Full debug workspace yielded498 successful
+results =487 runtime functions+11 expected compile-fail doctests, zero failures
+or ignored tests. Actual filesystem-Durable cases are distinct from private
+trusted profile doubles and Written/Flushed cases in the coverage matrix. This
+paragraph is a docs-only continuation; its containing head still requires its
+own fresh exact-head CI. Linux release remains NOT_RUN, independent QA and
+acceptance remain pending, and no READY/merge permission follows from debug CI.

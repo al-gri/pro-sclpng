@@ -2750,3 +2750,42 @@ prefix, then actual original Raw receipt and lawful Timer retry. The Written
 integration test passes locally; genuine Durable on Windows fails at the original
 Unix metadata-sync bootstrap. Fresh corrected-head Linux results are a new gate;
 neither this failed CI nor source-only profile names certify that gate.
+
+### Corrected source-head Linux debug result and final review freeze
+
+Source correction headc922fb0d3db715f4f018a22ef519d72e75dd85d3 /
+tree0618465dba0e1be2a5a1384f169552f4e3fc168b is independently identified from
+approval982a23d1 and failed Timer implementationdd2dd52f. Its
+[Linux debug CI37757268193](https://github.com/al-gri/pro-sclpng/actions/runs/37757268193)
+passed all three jobs: rust-tests113244790610, rust-fmt113244790904 and
+rust-clippy113244791069. Each raw log contains expected=checked-out c922 full SHA;
+all three final clean-check steps succeeded. Pinned Rust/Cargo1.98.1,
+Cargo-generated lockfile verification, fmt, strict all-target Clippy, locked
+workspace build/test and real CLI checks passed on Linux x86_64.
+
+Full debug run:19 suite results,498 successful test/doctest results,
+487 runtime functions+11 expected compile-fail doctests, zero failed/ignored.
+This includes all97 Recording capture tests,100 supervisor integration tests and
+34 private domain units, with actual Unix filesystem-Durable variants. Original31
+families and T01–T16 are mapped to their executed assertions and source/type
+constraints. H1's63 and Q2's12 internal fault variants are loop accounting, not
+additional test counts. Private counter/observer tests and the two pure supervisor
+fixtures remain labeled trusted boundaries, never physical durability evidence.
+All original tests remain; successful Linux T10 assertions are unchanged from
+the Windows cases whose final sync fails for that environment.
+
+This final append changes only documentation. The containing final head is
+recorded externally in Issue20/PR34 and the evidence report, with its OWN fresh
+exact-head CI and clean-source inventory. No current-head result is inferred
+solely from this source-parent pass. Linux release and focused genuine Linux
+requested-layout measurements remain NOT_RUN until the prepared full exact-head
+runner actually executes on the owner-confirmed Docker Linux executor. Worker
+require_escalated probes remain blocked before launch by session policy; source
+labels distinguish GitHub Actions debug, worker-local Windows, and any later
+owner-executed Docker verification.
+
+Final code is frozen for a full new independent QA of one immutable head, covering
+genuine Linux/Durable debug AND release, all31 rows, T01–T16 and corrective scope.
+An edit requires a new revision/review identity. Current return remains PARTIAL /
+QA_PENDING until required release verification; independent acceptance, Integrator
+acceptance, READY, merge/auto-merge, post-merge CI and Issue closure are unissued.
