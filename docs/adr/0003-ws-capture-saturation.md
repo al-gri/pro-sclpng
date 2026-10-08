@@ -1089,3 +1089,179 @@ trusted profile doubles and Written/Flushed cases in the coverage matrix. This
 paragraph is a docs-only continuation; its containing head still requires its
 own fresh exact-head CI. Linux release remains NOT_RUN, independent QA and
 acceptance remain pending, and no READY/merge permission follows from debug CI.
+
+## 19. Public Finalized Close and admitted GAP-tail restoration — 2026-10-08
+
+### 19.1 Rejected baseline and authoritative task
+
+The start of this bounded remediation is the independently reviewed and rejected
+head da157ee69b555e1170ed58e724a064f36c8bf2d6, tree
+4b3a4abc06a86b30624d8f81c58ad5d691f6919f, sole parent
+c922fb0d3db715f4f018a22ef519d72e75dd85d3. Main/base remains
+39ff0dba797eb010586238ef06fb80e996340401. The current independent verdict for
+that head is CHANGES_REQUIRED: exactly QA-DA-01 and QA-DA-02, both MEDIUM/P2.
+The earlier worker QA_PENDING disposition is historical. The owner-executed and
+independent Linux canonical debug/release results of498 each on da remain valid
+execution evidence for da; they did not establish either rejected behavioral
+invariant and cannot establish a future corrected head's results.
+
+The user-authorized unified TASK supersedes routing/start/status instructions in
+the nested historical packets. Unified input ZIP42304682 bytes has SHA256
+7acc19bd3633e2be6067f9b9de010aec4f5dd92ba335db43f92916ecdd434e8a;
+TASK28409 bytes has SHA256
+a6534c7b7483b541fa9e5eae0d8b51ca998695f3a253b5854d98fa3a50864b00.
+Full independent QA ZIP25601743 bytes contains879 payloads plus MANIFEST.json;
+its SHA256 is
+ed00c0cb9ebf70f1352cedadbd4b89d30322aaee75f08522f6738a9d705eaa8a,
+manifest SHA256
+1ab05d843e2f0638cda598d2fbb33b0d22db7580cd4cf7a9ba02e47a02a44dc1.
+The standalone and archived REPORT are identical109062-byte inputs, SHA256
+df1a79882e10d6c7de574cb3b45ffa22300ca6ce9ea23f2840a2873bc190cb54.
+All declared payload hashes, safe unique paths and nested ZIP CRC/size identities
+were checked; original packets, reports, patches and logs remain unchanged.
+
+ARCH-REC-001D-TIMER-A-20261008 remains DESIGN_APPROVED_A. The complete33986-byte
+normative addendum, SHA256
+cf585a92e3bd8372caf90326c67436274fef5abb5a8d163b389aa0a42ab838ba,
+is preserved exactly once in each document. Approval provenance982a23d1 precedes
+Timer implementation; d85 proposal and the prior Down/Close ancestors remain
+history. These two corrections restore the accepted contract; they introduce no
+new Architecture gate, Timer policy, WAL schema or accepted-spec revision.
+
+### 19.2 QA-DA-01: successful Finalized denies new operational Close
+
+The original public Durable probe actually finalized a healthy archive, observed
+Finalized/physical Complete with7 records and unique final SegmentSeal/ArchiveSeal,
+then minted a new Pending/ready reserved-terminal Close, reclaimed a lease,
+converted it and dispatched a synchronous callback once. Its4259-byte original
+patch has SHA256
+978df0c92a3e5f18acca3a49dc5692fb0270e9496556755918c6a8679b1c5936;
+tested parent content tree cf841071d883df5c6c89b85e79ecd3810e08baf0.
+In BOTH independent Linux profiles compilation exited0 and the negative behavior
+exited101; the lawful healthy-finalization control exited0. This was a missing
+common-authority Finalized service guard, not a compile or environment failure.
+The observed late entitlement/callback did not change W, lifecycle/cut/prefix,
+backend calls, physical bytes/records/seals or prove a socket/trading effect,
+corruption, false Ready or duplicate finalization. Severity remains MEDIUM/P2.
+
+The common authority now uses ensure_close_service after pure turn/authority/
+original-owner validation and before operational mutation or effect. Exactly
+SessionLifecycle::Finalized returns the existing typed SessionClosed. The guard
+covers direct and handle mandatory_close, direct and owner reclaim_close,
+CloseLease::into_command, Close dispatch, and a new pending confirm_closed
+settlement. It does not reconcile unrelated abandonment or fabricate failure.
+Readonly close_state stays truthful. Authenticated acknowledgment of an already
+Settled original Close remains AlreadySettled without new settlement or effect;
+that report grants no new lease or command. Failed descriptor closure and
+StorageStopped preserve their existing original Close service, readiness,
+same-W ownership and fail-safe behavior. Normal/diagnostic Closing and genuine
+scoped failure are not subjected to a blanket closed/stopped service ban.
+
+The supplied independent_qa_durable_finalized_archive_cannot_mint_or_dispatch_new_close
+name is retained, as is the lawful physical-finalization control. Public Durable
+controls with and without a genuine settled original Close exercise100 repeated
+handle/direct-authority late mint and applicable owner/direct reclaim rejections,
+readonly settled inventory, consumed proof/ticket, unchanged Complete report and
+unique seals. Existing source-only private fixtures separately defend conversion,
+dispatch and pending settlement using explicitly modeled Finalized-plus-retained
+operational objects. Those injected states are defensive boundary tests, not
+claims that a lawful public successful finalization can retain such objects.
+
+### 19.3 QA-DA-02: F2 extends only the actual admitted global tail
+
+The primary v2 public Durable probe admitted Queued GAP1..1/count1/stamp5, then
+Connected/stamp6, and incorrectly extended the old GAP to1..2/count2 before
+setting it InFlight. Actual expanded GAP and original Up were written in that
+order and settled; W0 and physical ValidPrefixIncomplete were observed. The
+4586-byte primary patch has SHA256
+d059218d23c6b92b767bc77a981138e49e1fa09c34583a1ac12f3e14fcd4b091;
+tested parent content tree53e129dbba5e3b27379a026b30dfc730dd33fda7.
+BOTH profiles compiled0, failed the negative behavior101 and passed the lawful
+same-tail control0. Superseded v1 bytes/tree/logs remain historical. The finding
+proves forbidden metadata coalescing and expanded GAP/Up ordering; it proves no
+false Complete/Ready/seals, corruption, heap/frontier or external effect.
+
+The authority-owned readonly gap_extension_eligible derives tail eligibility from
+the existing archive-lifetime record_admission_counter and the owner's ORIGINAL
+record-admission ordinal. It also requires an allowed lifecycle, no storage stop,
+Queued/Pending/Received GAP, unconfirmed progress, zero confirmed receipts and a
+compatible current cut. extend_gap_observation rechecks this predicate under the
+rightful turn before exact compatible identity/range/count mutation. Ineligible
+extension returns typed InvalidOwner without synchronization, I/O, new W/ordinal,
+counter reset, cut change, scheduler/Close effect or abandoned-work reconciliation.
+Existing stream/tag/epoch/reason/range/count/stamp compatibility checks remain.
+
+The tail is global F2 compatibility: a later actual admission in ANY scope remains
+a barrier after its receipt, settlement, last-alias Drop or work-cell reuse.
+This does not make Timer A1 global FIFO; unrelated scopes retain lawful progress.
+Work reservation order, timestamps, live-W scans and held/unadmitted aliases are
+not admission order. Unadmitted generated plans are not barriers; genuinely
+activated/admitted generated stages and authority-admitted due Timer are barriers.
+Lawful extension retains the original ordinal/stamp/cut without a successor or
+extra W, including record-admission-counter MAX. No new fixed field, history,
+cache, work lane or caller-supplied permission flag is introduced.
+
+The demonstrated canonical supervisor dependency is corrected in the same F2
+scope. It prepares only a copy of compatible GAP metadata and asks the authority's
+readonly tail predicate BEFORE core mutation. Eligible checked extension commits
+authority first; the validated identical core range/count/frontier commit under
+the same serialized turn is then infallible and reserves no new W/ordinal. A
+typed authority rejection preserves core state and current candidate. Ineligible
+physical core tail uses the existing fresh distinct-loss admission; if no W fits,
+the existing exact received reserved-terminal failure truthfully accounts the
+new candidate while preserving the original GAP. The former post-core
+extend(...).expect does not turn the stronger boundary into panic or divergence.
+No rollback promise, new loss semantics or dependency approval is required.
+
+Supplied negative and lawful-control names are retained. Public Durable tests
+cover received Raw/control/due-Timer barriers, neighbors, actual settlement,
+Drop/cell reuse, reserved reverse order/unadmitted work/failed capacity, unchanged
+original retry and abandoned-obligation/cut preservation. Private MAX/reuse probes
+keep private-state modeling explicit. Canonical supervisor variants use actual
+generated H1 control receipts, old-tail distinct loss or truthful saturation,
+and the original loss2..33/count32 path at cap5/cap9. The earlier queue-identity
+fixture now remains genuinely Queued until coalescing; it no longer uses the
+old helper's premature InFlight phase to claim the accepted queued-tail control.
+Original function names and meaningful receipt/identity assertions remain.
+
+### 19.4 Bounded paths, preservation and new-head verification gate
+
+At this appendix's preparation the source correction uses exactly:
+- crates/domain/src/capture_session.rs: common authority lifecycle and actual-tail
+  guards plus their explicitly private contract tests;
+- crates/recording/tests/capture_session.rs: supplied public Durable probes and
+  concrete negatives, rightful controls, repeat/inventory/allocation assertions;
+- crates/market-data/src/ws_supervisor.rs: necessary authority/core F2 integration;
+- crates/market-data/tests/ws_supervisor.rs: the corresponding real-sink generated
+  barrier, distinct/terminal fallback and lawful current-loss32 controls.
+
+ADR and handoff are append-only. The conditional supervisor paths are justified
+by the demonstrated same-invariant dependency; the original13-path ceiling and
+§8 table are unchanged. The complete preexisting document bytes, all31 §9 rows,
+full15A approval, Timer A1–A5/T01–T16 and prior Down/Close contract remain intact.
+No inherited20-file cleanup, new metadata fields, accepted specs, ADR0002, reader/
+recovery/decoder, dependency, Cargo.lock, toolchain, workflow or application change
+is part of this correction. U09/U10 UNKNOWN/BLOCKED, U20 NOT_PROVEN/FORBIDDEN,
+C01 BLOCKED and C03 UNKNOWN remain unresolved as before.
+
+New-head canonical commands, genuine Linux/Durable debug AND release, fresh
+exact-head CI and renewed cap5/cap9 requested-layout/repeat/teardown checks are
+NOT_RUN at preparation of this section. Dirty-source targeted worker results,
+private modeled predicates and historical da runs cannot confer PASS on the
+containing head. Actual new SHA/tree/parent, exact133-source inventory, diff,
+tested patches, argv/exits/full logs/hashes and source/lock/clean checks will be
+recorded AFTER publication in the exact-head evidence and existing Issue20/PR34
+records; no containing SHA is invented here. Requested allocation is not RSS;
+100 Ping/obsolete iterations per scope and100 reclaim/drop retries of ONE
+Timeout/Close are distinct from100 completed Timeout cycles.
+
+The full future gate preserves all31 families and T01–T16, Q1/Q2, R1–R3, B1–B3,
+QA-D1/D2,63 H1 loop variants, scoped H2,12 Q2 fault variants, F1–F6/N1–N3,
+decoder/continuity/DataHealth/publication/WAL/reader/recovery/real CLI and11 affine
+compile-fail examples, including the independent stale-required-GAP supervisor
+control. Independent da failed rows A03/A04/A11 and T02/T10/T14/T16 remain failed
+for da despite other passing functions in those families. New exact-head worker
+success can return REMEDIATED / QA_PENDING only after actual remediation gates;
+full fresh independent QA, Integrator acceptance, READY, merge/auto-merge,
+post-merge CI and Issue closure remain separate and unissued. Existing Issue20 /
+parent5 / claim6024304772 / recovery6025249885 / branch / DraftPR34 is retained.

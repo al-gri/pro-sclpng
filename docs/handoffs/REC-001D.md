@@ -2789,3 +2789,190 @@ genuine Linux/Durable debug AND release, all31 rows, T01–T16 and corrective sc
 An edit requires a new revision/review identity. Current return remains PARTIAL /
 QA_PENDING until required release verification; independent acceptance, Integrator
 acceptance, READY, merge/auto-merge, post-merge CI and Issue closure are unissued.
+
+## Post-freeze owner-executed verification — 2026-10-08
+
+Current worker disposition: REMEDIATED / QA_PENDING. Independent acceptance,
+READY and merge remain unissued. This addendum updates the delivered worker
+handoff after the exact immutable Git snapshot above; the validated branch is
+frozen at da157ee69b555e1170ed58e724a064f36c8bf2d6, tree
+4b3a4abc06a86b30624d8f81c58ad5d691f6919f. No source/head mutation accompanies
+this post-run evidence. Historical NOT_RUN/PARTIAL records describe the time
+before the owner execution and do not describe its current verified outcome.
+
+Owner confirmed actual execution outside the sandbox,09:42:33–09:43:58UTC.
+Execution source: owner-executed on confirmed WSL2/Docker Linux executor.
+Docker Desktop Linux Engine29.3.1/WSL2, desktop-linux named pipe, Linuxx86_64,
+Debian12, rust:1.98.1-bookworm, bash -c. Rust/Cargo1.98.1 and temporary
+rustfmt/clippy verified. No TCP2375 or workflow changes.
+
+All5 canonical commands passed with actual recorded exit0:
+- cargo fmt --all -- --check
+- cargo clippy --workspace --all-targets --locked -- -D warnings
+- cargo build --workspace --locked
+- cargo test --workspace --locked
+- cargo test --workspace --release --locked
+
+BOTH full profiles:498 successes=487runtime+11compile-fail examples,19suites,
+0fail/ignored/filtered.133source entries and Cargo.lock unchanged before/after;
+exact SHA/tree unchanged; per-command source verification exited0 and clean
+status files are empty. All147 expanded family identities and11doc examples
+match actual CI and BOTH owner logs. Complete stdout/stderr/exits are retained.
+Fresh exact-final-head CI37757836420 independently passed all3 jobs and clean checks.
+
+Additional memory runs exit0 with actual matches: Recording3/debug and3/release;
+supervisor1/debug and1/release. Timer Written/Durable in BOTH profiles:
+cap5 backing3321<=73641,peak31811<=8575730B;cap9 backing5074<=145714,
+peak34187<=8712084B;100cycles;teardown_live0. Supervisor N1/M5 peak56745
+<=10256771B;N2/M9 peak61183<=10411646B;released0. Requested allocation,
+not RSS. Fixed W+N+1<=M, original Close and all31/T01–T16 boundaries unchanged.
+
+Original owner logs: work/timer-linux-owner-da157ee. Frozen copy and independent
+hash/source/command verification accompany this handoff in the evidence bundle.
+Owner supplied verified ZIP129488B, SHA256
+6a75a2e3c47b916c6c5f830bca42282da44146b76d32e12e257c5b468970a68e.
+Actual execution is owner-executed; earlier worker require_escalated probes were
+rejected before launch by session policy and have no invented process exits.
+That earlier worker restriction does not imply release NOT_RUN for this run.
+
+Full new independent QA remains separate and REQUIRED on this frozen head:
+genuine Linux/Durable debug/release,all31 requirements,T01–T16 and corrective
+scope. Worker/owner/CI results do not grant independent acceptance,READY,
+merge/auto-merge,post-merge CI or Issue20 closure. Same claim/Issue/branch/DraftPR34.
+## Bounded P2 continuation after full independent QA rejection — 2026-10-08
+
+### Historical owner appendix and current verdict
+
+The immediately preceding Post-freeze owner-executed verification is imported
+VERBATIM from the delivered REC-001D-TIMER-A-da157ee6-handoff.txt: immutable
+209759-byte canonical prefix plus2956-byte external delta, original delivered
+file212715 bytes SHA256
+b91e499775bee46a09ebf2d1fbd15bce71f9bb38e8cbb9dae2bab0b54235e437.
+Its exact source is da157ee69b555e1170ed58e724a064f36c8bf2d6 / tree
+4b3a4abc06a86b30624d8f81c58ad5d691f6919f. It is HISTORICAL owner-executed
+evidence, not worker-local execution and not a later corrected-head result.
+The literal100cycles wording in that immutable appendix is refined by the full
+QA/source audit:100 Ping/obsolete iterations PER scope, then ONE Timeout/Close
+with100 reclaim/drop retries. It does not mean100 completed Timeout cycles.
+The approved33986-byte norm is not duplicated by this import.
+
+Full new independent QA subsequently rejected da with CHANGES_REQUIRED, exactly
+QA-DA-01 and QA-DA-02 MEDIUM/P2. Independent Linux Rust/Cargo1.98.1 five canonical
+commands exited0; debug/release498 each=487 runtime+11 compile-fail/19 suites.
+Additional public Durable negatives compiled0 then failed101 in BOTH profiles;
+lawful controls passed0. Thus the preceding owner's REMEDIATED / QA_PENDING
+disposition describes its earlier evidence stage, not current independent
+acceptance. Canonical passing functions did not discharge the two invariants.
+No old result or PASS_SCOPED matrix row transfers to the corrected head.
+
+### Exact authoritative inputs and baseline
+
+User-authorized unified TASK28409 bytes SHA256
+a6534c7b7483b541fa9e5eae0d8b51ca998695f3a253b5854d98fa3a50864b00
+is the current routing/start/status instruction; nested old TASK/README/status
+files remain historical snapshots. Unified ZIP42304682 bytes SHA256
+7acc19bd3633e2be6067f9b9de010aec4f5dd92ba335db43f92916ecdd434e8a
+contains the original histories unchanged. Full QA ZIP25601743 bytes SHA256
+ed00c0cb9ebf70f1352cedadbd4b89d30322aaee75f08522f6738a9d705eaa8a
+has879 payloads plus MANIFEST.json, manifest SHA256
+1ab05d843e2f0638cda598d2fbb33b0d22db7580cd4cf7a9ba02e47a02a44dc1.
+REPORT109062 bytes SHA256
+df1a79882e10d6c7de574cb3b45ffa22300ca6ce9ea23f2840a2873bc190cb54
+matches the standalone input. Recursive safe unique paths/CRC/sizes and all
+declared payload hashes were validated; the full47-row matrix, actual parent
+probe logs/trees, candidate133/base125 sources and original inputs are retained.
+
+Actual remediation starts from rejected da157ee69b555e1170ed58e724a064f36c8bf2d6,
+tree4b3a4abc06a86b30624d8f81c58ad5d691f6919f, sole parent
+c922fb0d3db715f4f018a22ef519d72e75dd85d3; main/base remains
+39ff0dba797eb010586238ef06fb80e996340401. Approval982a23d1, proposald85 and
+Down/Close8e4 ancestors remain intact. ARCH-REC-001D-TIMER-A-20261008 remains
+DESIGN_APPROVED_A; complete33986-byte norm SHA256
+cf585a92e3bd8372caf90326c67436274fef5abb5a8d163b389aa0a42ab838ba
+remains EXACTLY ONCE in ADR and handoff. Neither restoration needs a new
+Architecture approval or rollback/replay of existing Timer implementation.
+
+### Two bounded public-authority restorations
+
+QA-DA-01: after actual healthy Durable finalize, Finalized/Complete/7 records/
+unique seals, the missing common guard allowed new reserved-terminal Close,
+lease/conversion and a callback1 dispatch. Original4259-byte patch SHA256
+978df0c92a3e5f18acca3a49dc5692fb0270e9496556755918c6a8679b1c5936,
+parent probe treecf841071d883df5c6c89b85e79ecd3810e08baf0 is immutable.
+No W/prefix/status/cut/backend/physical/seal mutation, false Ready, corruption
+or external socket/trading effect was demonstrated; severity remains MEDIUM/P2.
+
+Private common-authority ensure_close_service now denies ONLY successful
+Finalized with typed SessionClosed after pure rightful turn/authority/owner
+validation, before operational mutation/effect. Direct/handle mandatory Close,
+owner/direct reclaim, conversion, dispatch and pending confirm_closed are guarded.
+Readonly settled Close reports and authenticated AlreadySettled acknowledgment
+remain truthful without granting operational entitlement. Existing failed
+DiagnosticClosed/StorageStopped, Closing and genuine scoped fail-safe original
+Close service/readiness/same-W ownership remain. Public concrete Durable controls
+with/without a genuine settled original Close repeat late mint/reclaim100 times
+and preserve Complete bytes/records/seals and consumed proof/ticket. Conversion/
+dispatch or pending settlement in a Finalized state that cannot lawfully retain
+such objects is explicitly PRIVATE defensive modeling, not public reachability.
+
+QA-DA-02: original Queued GAP1..1/count1/stamp5 crossed later admitted
+Connected/stamp6; forbidden extension was actually persisted as GAP1..2 then Up,
+settled W0/ValidPrefixIncomplete. Primary v2 patch4586 bytes SHA256
+d059218d23c6b92b767bc77a981138e49e1fa09c34583a1ac12f3e14fcd4b091,
+parent tree53e129dbba5e3b27379a026b30dfc730dd33fda7 remains immutable;
+superseded v1 stays historical. No false Complete/Ready/seals/corruption/heap or
+external effect was proved. Both primary negatives are actual behaviorFAIL101,
+not compile failure or an environment blocker; both lawful controls PASS0.
+
+Readonly authority gap_extension_eligible uses existing GLOBAL successful
+record_admission_counter against the GAP's original ordinal, plus Queued/Pending/
+Received/unconfirmed/zero-receipt/current-cut/lifecycle/storage conditions.
+Checked extend revalidates and rejects with InvalidOwner before synchronization
+or I/O, preserving identity/range/count/stamp/ordinal/cut/W/prefix/schedule/Close.
+Later actual admissions remain barriers after receipt/settlement/Drop/cell reuse,
+including another scope and genuine admitted generated control/due Timer. Only
+reserved W/unadmitted plan/held aliases are not barriers. Lawful extension keeps
+original ordinal/stamp/cut, no new W/successor even at counterMAX. Timer A1 remains
+same-scope required-stage order and neighbors remain serviceable.
+
+Necessary conditional supervisor integration prepares a COPY of scalar GAP
+metadata, asks readonly tail eligibility before core mutation, commits eligible
+authority extension before the same-turn infallible core update, or uses existing
+fresh distinct-loss admission/reserved received terminal failure when ineligible.
+The old Gap is preserved; stronger rejection cannot become post-core expect panic,
+candidate loss or authority/core divergence. Real canonical generated H1 receipts
+exercise distinct/saturated fallback; cap5/cap9 current-loss2..33/count32 retains
+one original stamp11 GAP without extra W. No new fixed fields/history/lane,
+payload copy, caller permission flag, wire/schema or coalescing contract is added.
+
+### Preservation, bounded path need and verification status
+
+Current source paths are domain/src/capture_session.rs, recording/tests/
+capture_session.rs and the conditionally necessary market-data/src/ws_supervisor.rs
+plus market-data/tests/ws_supervisor.rs. Only ADR0003 and this handoff append to
+document them. The exact13-path ceiling is unchanged, as are §8/all31 §9 rows,
+full15A, all old test names and Timer/Down-Close requirements. The old queue
+identity control now remains actually Queued until coalescing instead of using
+the prior helper's premature InFlight phase; its legitimate original assertions
+and name remain. Supplied Finalized negative, GAP-barrier negative/same-tail
+control and original Timer/Down independent regression names remain identifiable;
+original patches are retained separately from current tested source changes.
+
+At this appendix's preparation new immutable-head canonical commands, actual
+Linux/Durable debug/release, fresh exact-head CI and renewed requested-layout
+cap5/cap9/repeat/teardown outcomes are NOT_RUN. Dirty worker checks are supplemental
+and cannot certify the containing head. No containing SHA/tree is invented. After
+publication, exact head/tree/parent/diff/source133, current patch hashes, actual
+argv/exits/full stdout/stderr/OS/toolchain/clean source+lock identities, all47 rows
+and bounded measurements will accompany the existing Issue20/PR34 records and
+SHA256-manifested evidence. Requested allocation remains distinct from RSS.
+
+Full new gate preserves all31/T01–T16, Q1/Q2/R1–R3/B1–B3/QA-D1/D2, H1's63 loop
+variants, Q2's12 fault variants, H2/F1–F6/N1–N3, decoder/continuity/DataHealth/
+publication/WAL/reader/recovery/realCLI/11 compile-fail and stale-required-GAP
+supervisor evidence. Independent da failed A03/A04/A11 and T02/T10/T14/T16 stay
+failed for da. Corrected worker return may be REMEDIATED / QA_PENDING after actual
+gates, followed by FULL NEW independent QA. Integrator acceptance, READY,
+merge/auto-merge, post-merge CI and Issue closure remain unissued. Same Issue20 /
+parent5 / claim6024304772 / recovery6025249885 / branch / DraftPR34; no new claim,
+Issue, branch, PR, workflow, dependency/lock/toolchain or accepted-spec change.

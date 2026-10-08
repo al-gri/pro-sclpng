@@ -751,6 +751,7 @@ impl CloseLease {
 
     pub fn into_command(self) -> Result<CommandLease, AuthorityError> {
         self.owner.authority.close_cell(&self.owner)?;
+        self.owner.authority.ensure_close_service()?;
         if !self.cell.ready.get() {
             return Err(AuthorityError::CloseNotReady);
         }
@@ -2491,6 +2492,35 @@ impl SupervisorSessionHandle {
         Ok(())
     }
 
+    /// F2 may extend only the last actually admitted archive observation.
+    /// Reservation, retained aliases and cell reuse cannot move this frontier.
+    /// This preflight is read-only; extension rechecks it under the same turn.
+    pub fn gap_extension_eligible(
+        &self,
+        turn: &SessionTurn,
+        owner: &WorkOwner,
+    ) -> Result<bool, AuthorityError> {
+        self.authority.validate_turn(turn)?;
+        self.validate_work(owner)?;
+        let state = self.authority.state.borrow();
+        Ok(matches!(
+            state.lifecycle,
+            SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+        ) && state.storage_stopped.is_none()
+            && owner.cell.kind.get() == WorkKind::QueuedObservation
+            && owner.cell.obligation_origin.get() == ObligationOrigin::Received
+            && owner.cell.obligation.get() == ObservationObligation::Pending
+            && owner.cell.received_progress.get() == ReceivedProgress::Unconfirmed
+            && owner.cell.confirmed_records.get() == 0
+            && owner
+                .cell
+                .observation
+                .get()
+                .is_some_and(|identity| identity.class == ObservationClass::Gap)
+            && owner.cell.record_admission_order.get() == Some(state.record_admission_counter)
+            && (!state.failed || owner.cut_side() == CutSide::PostCut))
+    }
+
     pub fn extend_gap_observation(
         &self,
         turn: &mut SessionTurn,
@@ -2499,7 +2529,11 @@ impl SupervisorSessionHandle {
     ) -> Result<(), AuthorityError> {
         self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
-        self.authority.synchronize_obligations(turn)?;
+        // Reject incompatible identity/order without reconciling another lost
+        // steward or changing the failure cut. No I/O is involved in F2.
+        if !self.gap_extension_eligible(turn, owner)? {
+            return Err(AuthorityError::InvalidOwner);
+        }
         let old = owner
             .cell
             .observation
@@ -4431,6 +4465,13 @@ impl CaptureSessionAuthority {
         Ok(())
     }
 
+    fn ensure_close_service(&self) -> Result<(), AuthorityError> {
+        if self.state.borrow().lifecycle == SessionLifecycle::Finalized {
+            return Err(AuthorityError::SessionClosed);
+        }
+        Ok(())
+    }
+
     pub fn mandatory_close(
         &self,
         turn: &mut SessionTurn,
@@ -4456,31 +4497,34 @@ impl CaptureSessionAuthority {
             {
                 return Err(AuthorityError::InvalidOwner);
             }
-            if let Some(timer) = work.cell.timer.get() {
-                if timer.plan != TimerPlan::Timeout {
-                    return Err(AuthorityError::TimerAuthorityRequired);
-                }
-                let state = self.state.borrow();
-                let scope = state
-                    .scopes
-                    .iter()
-                    .find(|scope| scope.binding.stream == stream)
-                    .ok_or(AuthorityError::InvalidOwner)?;
-                let identity = scope
-                    .close
-                    .identity
-                    .get()
-                    .filter(|close| {
-                        close.stream == stream
-                            && close.epoch == epoch
-                            && close.storage == CloseStorage::WorkOwner(work.id())
-                    })
-                    .ok_or(AuthorityError::TimerCloseConflict)?;
-                return Ok(CloseOwnerRef {
-                    authority: self.clone(),
-                    identity,
-                });
+        }
+        self.ensure_close_service()?;
+        if let Some(work) = work
+            && let Some(timer) = work.cell.timer.get()
+        {
+            if timer.plan != TimerPlan::Timeout {
+                return Err(AuthorityError::TimerAuthorityRequired);
             }
+            let state = self.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == stream)
+                .ok_or(AuthorityError::InvalidOwner)?;
+            let identity = scope
+                .close
+                .identity
+                .get()
+                .filter(|close| {
+                    close.stream == stream
+                        && close.epoch == epoch
+                        && close.storage == CloseStorage::WorkOwner(work.id())
+                })
+                .ok_or(AuthorityError::TimerCloseConflict)?;
+            return Ok(CloseOwnerRef {
+                authority: self.clone(),
+                identity,
+            });
         }
         self.synchronize_obligations(turn)?;
         let s = self.state.borrow();
@@ -4601,6 +4645,9 @@ impl CaptureSessionAuthority {
             Ok(cell) => cell,
             Err(e) => return CloseLeaseReport::Rejected(e),
         };
+        if let Err(error) = self.ensure_close_service() {
+            return CloseLeaseReport::Rejected(error);
+        }
         if cell.state.get() == CloseState::Settled {
             return CloseLeaseReport::AlreadySettled;
         }
@@ -4652,6 +4699,9 @@ impl CaptureSessionAuthority {
         }
         if cell.state.get() == CloseState::Settled {
             return CloseSettlementReport::AlreadySettled;
+        }
+        if let Err(error) = self.ensure_close_service() {
+            return CloseSettlementReport::Rejected(error);
         }
         cell.state.set(CloseState::Settled);
         cell.work.borrow_mut().take();
@@ -4739,6 +4789,9 @@ impl CaptureSessionAuthority {
         }
         if let Some(close) = command.close.as_ref() {
             if let Err(reason) = self.close_cell(&close.owner) {
+                return DispatchReport::Denied { reason, command };
+            }
+            if let Err(reason) = self.ensure_close_service() {
                 return DispatchReport::Denied { reason, command };
             }
             if !close.cell.ready.get() {
@@ -5490,6 +5543,125 @@ mod conformance {
                     reason: Reason::QueueOverflow,
                 }),
             }),
+        }
+    }
+
+    // Private arithmetic modeling: MAX cannot be reached by a bounded-duration
+    // public test. The actual admitted ordinal is set by admit_observation.
+    #[test]
+    fn p2_gap_current_tail_extends_at_admission_max_without_new_order_or_work() {
+        let (authority, mut turn, handle) = session(10);
+        authority.state.borrow_mut().record_admission_counter = u64::MAX - 1;
+        let first = CaptureAttemptNo::new(1).unwrap();
+        let identity = ObservationIdentity {
+            stream: StreamId::new(1).unwrap(),
+            epoch: ConnectionEpoch::new(1).unwrap(),
+            stamp: ReceiveStamp {
+                unix_ns: 5,
+                monotonic_ns: 5,
+            },
+            class: ObservationClass::Gap,
+            tag: Some(accepted_binding().tag),
+            attempts: Some((first, first)),
+            loss_count: Some(1),
+        };
+        let reserved_first = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        let gap = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle.admit_observation(&mut turn, &gap, identity).unwrap();
+        assert_eq!(gap.cell.record_admission_order.get(), Some(u64::MAX));
+        let report = authority.ownership_report();
+        let cut = gap.cut_side();
+        for last in 2..=33 {
+            let extended = ObservationIdentity {
+                attempts: Some((first, CaptureAttemptNo::new(last).unwrap())),
+                loss_count: Some(last),
+                ..identity
+            };
+            assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+            handle
+                .extend_gap_observation(&mut turn, &gap, extended)
+                .unwrap();
+            assert_eq!(gap.cell.observation.get(), Some(extended));
+            assert_eq!(gap.cell.record_admission_order.get(), Some(u64::MAX));
+            assert_eq!(authority.state.borrow().record_admission_counter, u64::MAX);
+            assert_eq!(gap.cut_side(), cut);
+            assert_eq!(authority.ownership_report(), report);
+            assert_eq!(reserved_first.cell.record_admission_order.get(), None);
+        }
+    }
+
+    #[test]
+    fn p2_gap_barrier_survives_receipt_settlement_drop_and_work_cell_reuse() {
+        let (authority, mut turn, handle) = session(10);
+        let first = CaptureAttemptNo::new(1).unwrap();
+        let identity = ObservationIdentity {
+            stream: StreamId::new(1).unwrap(),
+            epoch: ConnectionEpoch::new(1).unwrap(),
+            stamp: ReceiveStamp {
+                unix_ns: 5,
+                monotonic_ns: 5,
+            },
+            class: ObservationClass::Gap,
+            tag: Some(accepted_binding().tag),
+            attempts: Some((first, first)),
+            loss_count: Some(1),
+        };
+        let gap = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle.admit_observation(&mut turn, &gap, identity).unwrap();
+        let barrier = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(
+                &mut turn,
+                &barrier,
+                ObservationIdentity {
+                    class: ObservationClass::Raw,
+                    stamp: ReceiveStamp {
+                        unix_ns: 6,
+                        monotonic_ns: 6,
+                    },
+                    loss_count: None,
+                    ..identity
+                },
+            )
+            .unwrap();
+        let expanded = ObservationIdentity {
+            attempts: Some((first, CaptureAttemptNo::new(2).unwrap())),
+            loss_count: Some(2),
+            ..identity
+        };
+        let old_order = gap.cell.record_admission_order.get();
+        // Modeling only: a public two-scope concrete Durable regression below
+        // actually writes and settles the neighbor before reusing its cell.
+        barrier.cell.received_progress.set(ReceivedProgress::Raw);
+        barrier.cell.obligation.set(ObservationObligation::Settled);
+        let barrier_cell = barrier.cell.clone();
+        drop(barrier);
+        let reused = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        assert!(Rc::ptr_eq(&barrier_cell, &reused.cell));
+        assert_eq!(reused.cell.record_admission_order.get(), None);
+        assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+        let status = authority.status();
+        let report = authority.ownership_report();
+        for _ in 0..100 {
+            assert_eq!(
+                handle.extend_gap_observation(&mut turn, &gap, expanded),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(gap.cell.observation.get(), Some(identity));
+            assert_eq!(gap.cell.record_admission_order.get(), old_order);
+            assert_eq!(authority.state.borrow().record_admission_counter, 2);
+            assert_eq!(authority.status(), status);
+            assert_eq!(authority.ownership_report(), report);
         }
     }
 
@@ -7655,6 +7827,206 @@ mod conformance {
             AuthorityError::ProofConsumed
         );
         assert_eq!(authority.status().lifecycle, SessionLifecycle::Finalized);
+    }
+
+    #[test]
+    fn finalized_close_mint_and_reclaim_preserve_immutable_authority_state() {
+        // Pure authority finalization; recording regressions independently
+        // require actual Durable final seals and physical Complete bytes.
+        for prior_close in [false, true] {
+            let (authority, mut turn, handle) = session(10);
+            let (foreign, mut foreign_turn, _) = session(10);
+            let stream = StreamId::new(1).unwrap();
+            let epoch = ConnectionEpoch::new(1).unwrap();
+            let close = prior_close.then(|| {
+                let close = handle
+                    .mandatory_close(&mut turn, stream, epoch, None)
+                    .unwrap();
+                let CloseLeaseReport::Leased(lease) =
+                    authority.reclaim_close(&mut turn, close.clone())
+                else {
+                    panic!("original Close");
+                };
+                assert!(matches!(
+                    authority.dispatch(&mut turn, lease.into_command().unwrap(), |_| {
+                        Ok::<_, ()>(())
+                    }),
+                    DispatchReport::Dispatched
+                ));
+                close
+            });
+            let ticket = authority.begin_finalization(&mut turn).unwrap();
+            let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+                panic!("all original ownership settled");
+            };
+            authority.consume_proof(&mut turn, &mut proof).unwrap();
+            authority.finalization_finished(&mut turn).unwrap();
+            let snapshot = || {
+                let state = authority.state.borrow();
+                let scope = &state.scopes[0];
+                (
+                    authority.status(),
+                    authority.ownership_report(),
+                    authority.outstanding_close_owners(),
+                    authority.prefix().unwrap(),
+                    (
+                        state.sequence,
+                        state.record_admission_counter,
+                        scope.schedule_generation,
+                        scope.timer_id,
+                    ),
+                    (
+                        scope.close.identity.get(),
+                        scope.close.state.get(),
+                        scope.close.ready.get(),
+                    ),
+                )
+            };
+            let before = snapshot();
+            assert_eq!(before.0.lifecycle, SessionLifecycle::Finalized);
+            assert_eq!(before.1.work_used, 0);
+            assert_eq!(before.2.iter().count(), 0);
+            for _ in 0..100 {
+                assert_eq!(
+                    handle
+                        .mandatory_close(&mut turn, stream, epoch, None)
+                        .unwrap_err(),
+                    AuthorityError::SessionClosed
+                );
+                assert_eq!(
+                    authority
+                        .mandatory_close(&mut turn, stream, epoch, None)
+                        .unwrap_err(),
+                    AuthorityError::SessionClosed
+                );
+                if let Some(close) = &close {
+                    assert!(matches!(
+                        authority.reclaim_close(&mut turn, close.clone()),
+                        CloseLeaseReport::Rejected(AuthorityError::SessionClosed)
+                    ));
+                    assert_eq!(
+                        authority.close_state(stream, epoch).unwrap(),
+                        CloseState::Settled
+                    );
+                }
+                assert_eq!(snapshot(), before);
+            }
+            assert_eq!(
+                authority
+                    .mandatory_close(&mut foreign_turn, stream, epoch, None)
+                    .unwrap_err(),
+                AuthorityError::AuthorityMismatch
+            );
+            let foreign_close = foreign
+                .mandatory_close(&mut foreign_turn, stream, epoch, None)
+                .unwrap();
+            assert!(matches!(
+                authority.reclaim_close(&mut turn, foreign_close),
+                CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
+            ));
+            assert_eq!(snapshot(), before);
+            assert!(matches!(
+                handle.quiesce(&mut turn, &ticket),
+                QuiescenceReport::TicketConsumed
+            ));
+            assert_eq!(
+                authority.consume_proof(&mut turn, &mut proof).unwrap_err(),
+                AuthorityError::ProofConsumed
+            );
+            assert_eq!(snapshot(), before);
+        }
+    }
+
+    #[test]
+    fn finalized_close_defensive_conversion_and_dispatch_cannot_create_effect() {
+        // Private defensive modeling: genuine quiescence cannot finalize while
+        // a Pending/Leased Close exists. Only this fixture installs Finalized
+        // beside that retained obligation; it is not public reachability.
+        for leased in [false, true] {
+            let (authority, mut turn, _) = session(10);
+            let (foreign, mut foreign_turn, _) = session(10);
+            let stream = StreamId::new(1).unwrap();
+            let epoch = ConnectionEpoch::new(1).unwrap();
+            let close = authority
+                .mandatory_close(&mut turn, stream, epoch, None)
+                .unwrap();
+            let cell = authority.close_cell(&close).unwrap();
+            let command = leased.then(|| {
+                let CloseLeaseReport::Leased(lease) =
+                    authority.reclaim_close(&mut turn, close.clone())
+                else {
+                    panic!("one genuine lease before modeled Finalized");
+                };
+                lease.into_command().unwrap()
+            });
+            authority.state.borrow_mut().lifecycle = SessionLifecycle::Finalized;
+            let snapshot = || {
+                (
+                    authority.status(),
+                    authority.ownership_report(),
+                    authority.outstanding_close_owners(),
+                    cell.identity.get(),
+                    cell.state.get(),
+                    cell.ready.get(),
+                )
+            };
+            let before = snapshot();
+            assert!(matches!(
+                authority.reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::Rejected(AuthorityError::SessionClosed)
+            ));
+            // A disarmed private fixture isolates conversion from affine Drop
+            // housekeeping. No public constructor can issue this second lease.
+            let modeled_lease = CloseLease {
+                owner: close.clone(),
+                cell: Rc::clone(&cell),
+                work: None,
+                armed: false,
+            };
+            assert_eq!(
+                modeled_lease.into_command().unwrap_err(),
+                AuthorityError::SessionClosed
+            );
+            assert_eq!(snapshot(), before);
+            let mut effects = 0;
+            if let Some(command) = command {
+                let DispatchReport::Denied { reason, command } =
+                    authority.dispatch(&mut turn, command, |_| {
+                        effects += 1;
+                        Ok::<_, ()>(())
+                    })
+                else {
+                    panic!("Finalized preserves and denies the held command");
+                };
+                assert_eq!(reason, AuthorityError::SessionClosed);
+                assert_eq!(command.close_owner(), Some(&close));
+                assert_eq!(effects, 0);
+                assert_eq!(snapshot(), before);
+                let DispatchReport::Denied { reason, command } =
+                    foreign.dispatch(&mut foreign_turn, command, |_| {
+                        effects += 1;
+                        Ok::<_, ()>(())
+                    })
+                else {
+                    panic!("foreign authority preserves the same command");
+                };
+                assert_eq!(reason, AuthorityError::AuthorityMismatch);
+                assert_eq!(effects, 0);
+                assert_eq!(snapshot(), before);
+                // Return only the modeled lifecycle to its actual prior Open
+                // value; the same returned genuine command remains lawful.
+                authority.state.borrow_mut().lifecycle = SessionLifecycle::Open;
+                assert!(matches!(
+                    authority.dispatch(&mut turn, command, |_| {
+                        effects += 1;
+                        Ok::<_, ()>(())
+                    }),
+                    DispatchReport::Dispatched
+                ));
+                assert_eq!(effects, 1);
+                assert_eq!(cell.state.get(), CloseState::Settled);
+            }
+        }
     }
 
     #[test]

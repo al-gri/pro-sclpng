@@ -2083,11 +2083,18 @@ fn qa_queue_gap_metadata(gate: RecordingGate) {
     let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
     let first = positive(CaptureAttemptNo::new(1));
     let mut identity = qa_original_identity(ObservationClass::Gap);
-    let work = qa_admit(&handle, &mut turn, identity);
+    let work = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle
+        .admit_observation(&mut turn, &work, identity)
+        .unwrap();
     identity.attempts = Some((first, positive(CaptureAttemptNo::new(3))));
     identity.loss_count = Some(3);
     handle
         .extend_gap_observation(&mut turn, &work, identity)
+        .unwrap();
+    work.set_kind(&mut turn, WorkKind::InFlightObservation)
         .unwrap();
     let original = qa_gap(5, identity, Reason::QueueOverflow);
     // Thirteen substitutions against the coalesced original range/stamp.
@@ -6572,4 +6579,902 @@ fn timer_a_t15_durable_actual_allocation_cap5_cap9_hundred_ping_obsolete_close_c
 fn timer_a_t15_written_actual_allocation_cap5_cap9_hundred_ping_obsolete_close_cycles_and_zero_teardown()
  {
     qa_timer_t15_requested_allocation(RecordingGate::Written);
+}
+
+// Independent preflight probe for ADR0003 section 15A.4 Finalized row.
+// Public real owner/sink route; no fault or private-field mutation.
+// Compilation and runtime are NOT_RUN in the Integrator environment.
+#[test]
+fn independent_qa_durable_finalized_archive_cannot_mint_or_dispatch_new_close() {
+    let wal = TempWal::new("independent-finalized-close");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = qa_raw(5, identity, false);
+    sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    drop(work);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+
+    // Healthy positive control proves real completion and both seals first.
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("healthy original must finalize");
+    };
+    owner.finalize(&mut turn, &mut proof).unwrap();
+    assert_eq!(
+        owner.session_status().lifecycle,
+        SessionLifecycle::Finalized
+    );
+    let (records, physical) = read_all(&wal.0);
+    assert_eq!(physical.status, ArchiveStatus::Complete);
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[4], original);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(frame.value, Record::SegmentSeal(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(frame.value, Record::ArchiveSeal(_)))
+            .count(),
+        1
+    );
+
+    let before_status = owner.session_status();
+    let before_ownership = handle.authority().ownership_report();
+    let before_close = owner.outstanding_close_owners();
+    let before_unsettled = handle.authority().unsettled_summary();
+    let before_prefix = handle.prefix();
+    let before_bytes = fs::read(&wal.0).unwrap();
+    let before_calls = owner.sink_persist_calls();
+    assert_eq!(before_close.iter().count(), 0);
+
+    // Preserve the actual result and inspect ALL public Close routes even when
+    // minting incorrectly succeeds, so the log records the effect boundary.
+    let mint = handle.mandatory_close(&mut turn, identity.stream, identity.epoch, None);
+    let rejected = matches!(&mint, Err(AuthorityError::SessionClosed));
+    let after_mint_close = owner.outstanding_close_owners();
+    let mut effects = 0;
+    eprintln!("late finalized mandatory_close={mint:?}; after_mint={after_mint_close:?}");
+    if let Ok(close) = mint {
+        let reclaim = owner.reclaim_close(&mut turn, close);
+        eprintln!("late finalized reclaim={reclaim:?}");
+        if let CloseLeaseReport::Leased(lease) = reclaim {
+            let conversion = lease.into_command();
+            eprintln!("late finalized conversion={conversion:?}");
+            if let Ok(command) = conversion {
+                let dispatch = owner.dispatch(&mut turn, command, |_| {
+                    effects += 1;
+                    Ok::<_, ()>(())
+                });
+                eprintln!("late finalized dispatch={dispatch:?}; effects={effects}");
+            }
+        }
+    }
+
+    assert_eq!(owner.session_status(), before_status);
+    assert_eq!(handle.authority().ownership_report(), before_ownership);
+    assert_eq!(handle.prefix(), before_prefix);
+    assert_eq!(owner.sink_persist_calls(), before_calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), before_bytes);
+    assert_eq!(read_all(&wal.0).0, records);
+    assert_eq!(
+        after_mint_close, before_close,
+        "Finalized must not mint a new Close owner"
+    );
+    assert_eq!(owner.outstanding_close_owners(), before_close);
+    assert_eq!(handle.authority().unsettled_summary(), before_unsettled);
+    assert!(rejected, "late Close mint must return typed SessionClosed");
+    assert_eq!(
+        effects, 0,
+        "Finalized must not dispatch a newly minted Close"
+    );
+}
+
+fn qa_p2_finalized_close_preservation(with_original_close: bool) {
+    let wal = TempWal::new("qa-p2-finalized-close");
+    let foreign_wal = TempWal::new("qa-p2-finalized-close-foreign");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let (foreign_owner, mut foreign_turn, foreign_handle, _foreign_sink) =
+        owner_with_fault(&foreign_wal.0, RecordingGate::Durable, None);
+    let identity = qa_original_identity(if with_original_close {
+        ObservationClass::Disconnected
+    } else {
+        ObservationClass::Raw
+    });
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = if with_original_close {
+        qa_transport(5, identity, Transport::Down)
+    } else {
+        qa_raw(5, identity, false)
+    };
+    sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    let mut effects = 0;
+    let original_close = if with_original_close {
+        let close = qa_pending_down_close(&owner, identity, &work);
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| {
+                effects += 1;
+                Ok::<_, ()>(())
+            }),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(effects, 1, "the original ready Close callback succeeds");
+        assert_eq!(
+            handle
+                .authority()
+                .close_state(identity.stream, identity.epoch),
+            Ok(CloseState::Settled)
+        );
+        Some(close)
+    } else {
+        None
+    };
+    drop(work);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("completed Durable input and original Close must quiesce")
+    };
+    owner.finalize(&mut turn, &mut proof).unwrap();
+    assert_eq!(
+        owner.session_status().lifecycle,
+        SessionLifecycle::Finalized
+    );
+    let (records, physical) = read_all(&wal.0);
+    assert_eq!(physical.status, ArchiveStatus::Complete);
+    assert_eq!(physical.input_quality, Some(InputQuality::Unknown));
+    assert_eq!(records.len(), 7);
+    assert_eq!(records[4], original);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(
+                frame.value,
+                Record::SegmentSeal(SegmentSeal { is_final: true, .. })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|frame| matches!(frame.value, Record::ArchiveSeal(_)))
+            .count(),
+        1
+    );
+    let status = owner.session_status();
+    let ledger = handle.authority().ownership_report();
+    let unsettled = handle.authority().unsettled_summary();
+    let close_owners = owner.outstanding_close_owners();
+    let prefix = handle.prefix();
+    let watermarks = owner.watermarks();
+    let bytes = fs::read(&wal.0).unwrap();
+    let calls = owner.sink_persist_calls();
+    let foreign_status = foreign_owner.session_status();
+    let foreign_ledger = foreign_handle.authority().ownership_report();
+    let foreign_unsettled = foreign_handle.authority().unsettled_summary();
+    let foreign_close = foreign_owner.outstanding_close_owners();
+    let foreign_prefix = foreign_handle.prefix();
+    let foreign_watermarks = foreign_owner.watermarks();
+    let foreign_bytes = fs::read(&foreign_wal.0).unwrap();
+    let foreign_calls = foreign_owner.sink_persist_calls();
+    macro_rules! unchanged {
+        () => {
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(handle.authority().ownership_report(), ledger);
+            assert_eq!(handle.authority().unsettled_summary(), unsettled);
+            assert_eq!(owner.outstanding_close_owners(), close_owners);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.watermarks(), watermarks);
+            assert_eq!(owner.sink_persist_calls(), calls);
+            assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+            assert_eq!(effects, usize::from(with_original_close));
+            assert_eq!(foreign_owner.session_status(), foreign_status);
+            assert_eq!(
+                foreign_handle.authority().ownership_report(),
+                foreign_ledger
+            );
+            assert_eq!(
+                foreign_handle.authority().unsettled_summary(),
+                foreign_unsettled
+            );
+            assert_eq!(foreign_owner.outstanding_close_owners(), foreign_close);
+            assert_eq!(foreign_handle.prefix(), foreign_prefix);
+            assert_eq!(foreign_owner.watermarks(), foreign_watermarks);
+            assert_eq!(foreign_owner.sink_persist_calls(), foreign_calls);
+            assert_eq!(fs::read(&foreign_wal.0).unwrap(), foreign_bytes);
+        };
+    }
+    for _ in 0..100 {
+        assert!(matches!(
+            handle.mandatory_close(&mut turn, identity.stream, identity.epoch, None),
+            Err(AuthorityError::SessionClosed)
+        ));
+        unchanged!();
+        assert!(matches!(
+            handle
+                .authority()
+                .mandatory_close(&mut turn, identity.stream, identity.epoch, None),
+            Err(AuthorityError::SessionClosed)
+        ));
+        unchanged!();
+        if let Some(close) = &original_close {
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::Rejected(AuthorityError::SessionClosed)
+            ));
+            unchanged!();
+            assert!(matches!(
+                handle.authority().reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::Rejected(AuthorityError::SessionClosed)
+            ));
+            assert_eq!(
+                handle
+                    .authority()
+                    .close_state(identity.stream, identity.epoch),
+                Ok(CloseState::Settled),
+                "read-only settlement remains truthful without issuing a lease"
+            );
+            unchanged!();
+        }
+    }
+    assert!(matches!(
+        handle.mandatory_close(&mut foreign_turn, identity.stream, identity.epoch, None),
+        Err(AuthorityError::AuthorityMismatch)
+    ));
+    unchanged!();
+    assert!(matches!(
+        handle.authority().mandatory_close(
+            &mut foreign_turn,
+            identity.stream,
+            identity.epoch,
+            None
+        ),
+        Err(AuthorityError::AuthorityMismatch)
+    ));
+    if let Some(close) = &original_close {
+        assert!(matches!(
+            owner.reclaim_close(&mut foreign_turn, close.clone()),
+            CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
+        ));
+        assert!(matches!(
+            handle
+                .authority()
+                .reclaim_close(&mut foreign_turn, close.clone()),
+            CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
+        ));
+    }
+    unchanged!();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::TicketConsumed
+    ));
+    assert!(matches!(
+        owner.finalize(&mut turn, &mut proof),
+        Err(OwnerError::Authority(AuthorityError::ProofConsumed))
+    ));
+    unchanged!();
+    assert_eq!(read_all(&wal.0), (records, physical));
+}
+
+#[test]
+fn qa_p2_durable_finalized_repeated_handle_and_authority_mint_preserve_complete_archive() {
+    qa_p2_finalized_close_preservation(false);
+}
+
+#[test]
+fn qa_p2_durable_finalized_settled_original_close_cannot_reclaim_or_create_effect() {
+    qa_p2_finalized_close_preservation(true);
+}
+
+// Independent public-handle F2 contract probe, actual filesystem Durable.
+// The new received loss would follow an already-admitted control barrier.
+// No production/private mutation, fabricated receipt or alternate writer.
+fn independent_qa_public_gap_extension_probe(with_control_barrier: bool) {
+    let wal = TempWal::new("independent-gap-control-barrier");
+    let (owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let identity = qa_original_identity(ObservationClass::Gap);
+    let gap_work = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle
+        .admit_observation(&mut turn, &gap_work, identity)
+        .unwrap();
+    let control_identity = ObservationIdentity {
+        stamp: ReceiveStamp {
+            unix_ns: 6,
+            monotonic_ns: 6,
+        },
+        ..qa_original_identity(ObservationClass::Connected)
+    };
+    let barrier = with_control_barrier.then(|| {
+        let work = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(&mut turn, &work, control_identity)
+            .unwrap();
+        work
+    });
+    let before = handle.authority().ownership_report();
+    let before_status = owner.session_status();
+    let before_prefix = handle.prefix();
+    let before_calls = owner.sink_persist_calls();
+    let before_bytes = fs::read(&wal.0).unwrap();
+    let expanded = ObservationIdentity {
+        attempts: Some((
+            positive(CaptureAttemptNo::new(1)),
+            positive(CaptureAttemptNo::new(2)),
+        )),
+        loss_count: Some(2),
+        ..identity
+    };
+    let extension = handle.extend_gap_observation(&mut turn, &gap_work, expanded);
+    let rejected = extension.is_err();
+    eprintln!("F2 with_control_barrier={with_control_barrier}; extension={extension:?}");
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(owner.session_status(), before_status);
+    assert_eq!(handle.prefix(), before_prefix);
+    assert_eq!(owner.sink_persist_calls(), before_calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), before_bytes);
+
+    // Observe the accepted identity at the real bound writer, then drain the
+    // unchanged control. This avoids calling an accepted wrong mutation merely
+    // hypothetical when its altered original can really enter the prefix.
+    let accepted_identity = if extension.is_ok() {
+        expanded
+    } else {
+        identity
+    };
+    let written_gap = qa_gap(5, accepted_identity, Reason::QueueOverflow);
+    gap_work
+        .set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    sink.persist_owned(&mut turn, &written_gap, RecordingGate::Durable, &gap_work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &gap_work);
+    drop(gap_work);
+    if let Some(control_work) = barrier {
+        let original_control = qa_transport(6, control_identity, Transport::Up);
+        control_work
+            .set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        sink.persist_owned(
+            &mut turn,
+            &original_control,
+            RecordingGate::Durable,
+            &control_work,
+        )
+        .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &control_work);
+        drop(control_work);
+        assert_eq!(
+            &read_all(&wal.0).0[4..],
+            &[written_gap.clone(), original_control]
+        );
+    } else {
+        assert_eq!(read_all(&wal.0).0[4], written_gap);
+    }
+    eprintln!(
+        "F2 written_gap={written_gap:?}; physical={:?}; work_used={}",
+        read_all(&wal.0).1.status,
+        handle.authority().ownership_report().work_used
+    );
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+    if with_control_barrier {
+        assert!(
+            rejected,
+            "public F2 extension must reject after an intervening admitted control barrier"
+        );
+    } else {
+        assert!(
+            extension.is_ok(),
+            "lawful contiguous same-tail GAP extension positive control"
+        );
+    }
+}
+
+#[test]
+fn independent_qa_durable_public_gap_extension_rejects_intervening_admitted_control() {
+    independent_qa_public_gap_extension_probe(true);
+}
+
+#[test]
+fn independent_qa_durable_public_gap_extension_allows_lawful_same_tail_control() {
+    independent_qa_public_gap_extension_probe(false);
+}
+
+// Corrective P2 evidence uses the accepted concrete filesystem Durable sink.
+// No private state, fabricated receipt, alternate writer or weaker gate.
+fn p2_queued_gap(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    identity: ObservationIdentity,
+) -> WorkOwner {
+    let work = handle
+        .reserve_work(turn, WorkKind::QueuedObservation)
+        .unwrap();
+    handle.admit_observation(turn, &work, identity).unwrap();
+    work
+}
+
+fn p2_expanded_gap(identity: ObservationIdentity, last: u64) -> ObservationIdentity {
+    ObservationIdentity {
+        attempts: Some((
+            identity.attempts.unwrap().0,
+            positive(CaptureAttemptNo::new(last)),
+        )),
+        loss_count: Some(last),
+        ..identity
+    }
+}
+
+fn p2_gap_reject_preserving(
+    boundary: (&TempWal, &CaptureSessionOwner, &SupervisorSessionHandle),
+    turn: &mut SessionTurn,
+    work: &WorkOwner,
+    expanded: ObservationIdentity,
+) {
+    let (wal, owner, handle) = boundary;
+    let status = owner.session_status();
+    let ledger = handle.authority().ownership_report();
+    let unsettled = handle.authority().unsettled_summary();
+    let close = owner.outstanding_close_owners();
+    let prefix = handle.prefix();
+    let calls = owner.sink_persist_calls();
+    let bytes = fs::read(&wal.0).unwrap();
+    let id = work.id();
+    let cut = work.cut_side();
+    for _ in 0..100 {
+        assert_eq!(handle.gap_extension_eligible(turn, work), Ok(false));
+        assert_eq!(
+            handle.extend_gap_observation(turn, work, expanded),
+            Err(AuthorityError::InvalidOwner)
+        );
+        assert_eq!(owner.session_status(), status);
+        assert_eq!(handle.authority().ownership_report(), ledger);
+        assert_eq!(handle.authority().unsettled_summary(), unsettled);
+        assert_eq!(owner.outstanding_close_owners(), close);
+        assert_eq!(handle.prefix(), prefix);
+        assert_eq!(owner.sink_persist_calls(), calls);
+        assert_eq!(work.id(), id);
+        assert_eq!(work.cut_side(), cut);
+    }
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+}
+
+fn p2_write_original_gap_after_rejection(
+    boundary: (&TempWal, &CaptureSessionOwner, &SupervisorSessionHandle),
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    work: &WorkOwner,
+    original: ObservationIdentity,
+) {
+    let (wal, owner, handle) = boundary;
+    work.set_kind(turn, WorkKind::InFlightObservation).unwrap();
+    let number = handle.prefix().next_record.get();
+    let expanded = qa_gap(number, p2_expanded_gap(original, 2), Reason::QueueOverflow);
+    qa_reject_preserving(
+        (wal, owner, handle),
+        turn,
+        sink,
+        work,
+        RecordingGate::Durable,
+        &expanded,
+    );
+    let rightful = qa_gap(number, original, Reason::QueueOverflow);
+    sink.persist_owned(turn, &rightful, RecordingGate::Durable, work)
+        .unwrap();
+    qa_settle_once(handle, turn, sink, work);
+    assert_eq!(read_all(&wal.0).0.last(), Some(&rightful));
+}
+
+#[test]
+fn p2_durable_gap_rejects_connected_pong_down_raw_and_due_timer_barriers() {
+    for class in [
+        ObservationClass::Connected,
+        ObservationClass::Pong,
+        ObservationClass::Disconnected,
+        ObservationClass::Raw,
+    ] {
+        let wal = TempWal::new("p2-gap-public-barriers");
+        let (mut owner, mut turn, handle, mut sink) =
+            owner_with_fault(&wal.0, RecordingGate::Durable, None);
+        let original = qa_original_identity(ObservationClass::Gap);
+        let gap = p2_queued_gap(&handle, &mut turn, original);
+        let identity = ObservationIdentity {
+            stamp: ReceiveStamp {
+                unix_ns: 6,
+                monotonic_ns: 6,
+            },
+            ..qa_original_identity(class)
+        };
+        let barrier = p2_queued_gap(&handle, &mut turn, identity);
+        p2_gap_reject_preserving(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &gap,
+            p2_expanded_gap(original, 2),
+        );
+        p2_write_original_gap_after_rejection(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &gap,
+            original,
+        );
+        drop(gap);
+        barrier
+            .set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let frame = match class {
+            ObservationClass::Raw => qa_raw(handle.prefix().next_record.get(), identity, false),
+            ObservationClass::Disconnected => {
+                qa_transport(handle.prefix().next_record.get(), identity, Transport::Down)
+            }
+            _ => qa_transport(handle.prefix().next_record.get(), identity, Transport::Up),
+        };
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &barrier)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &barrier);
+        drop(barrier);
+        if class == ObservationClass::Disconnected {
+            let close = owner
+                .outstanding_close_owners()
+                .iter()
+                .next()
+                .unwrap()
+                .owner
+                .clone();
+            let command = leased(owner.reclaim_close(&mut turn, close))
+                .into_command()
+                .unwrap();
+            let mut effects = 0;
+            assert!(matches!(
+                owner.dispatch(&mut turn, command, |_| {
+                    effects += 1;
+                    Ok::<_, ()>(())
+                }),
+                DispatchReport::Dispatched
+            ));
+            assert_eq!(effects, 1);
+        }
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        assert_eq!(
+            read_all(&wal.0).1.status,
+            ArchiveStatus::ValidPrefixIncomplete
+        );
+        assert_eq!(read_all(&wal.0).0.len(), 6);
+    }
+    let wal = TempWal::new("p2-gap-due-timer-barrier");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    qa_timer_install_up(
+        &handle,
+        &mut turn,
+        &mut sink,
+        RecordingGate::Durable,
+        scope().stream,
+        5,
+    );
+    let original = qa_original_identity(ObservationClass::Gap);
+    let gap = p2_queued_gap(&handle, &mut turn, original);
+    let timer = qa_timer_due(&handle, &mut turn, scope().stream, 5 + QA_PING_NS);
+    assert_eq!(timer.kind(), TimerKind::Ping);
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    p2_write_original_gap_after_rejection(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &gap,
+        original,
+    );
+    drop(gap);
+    let frame = qa_timer_frame(handle.prefix().next_record.get(), timer.identity());
+    sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, timer.owner())
+        .unwrap();
+    let command = handle.take_timer_ping(&mut turn, timer.owner()).unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    drop(timer);
+    assert!(matches!(
+        owner.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+}
+
+#[test]
+fn p2_durable_gap_global_tail_barrier_survives_neighbor_settlement_alias_drop_and_cell_reuse() {
+    let wal = TempWal::new("p2-gap-neighbor-settled");
+    let (owner, mut turn, handle, mut sink) =
+        owner_two_scopes_with_gate(&wal.0, RecordingGate::Durable);
+    let original = qa_original_identity(ObservationClass::Gap);
+    let gap = p2_queued_gap(&handle, &mut turn, original);
+    let neighbor_identity = ObservationIdentity {
+        stream: positive(StreamId::new(2)),
+        stamp: ReceiveStamp {
+            unix_ns: 6,
+            monotonic_ns: 6,
+        },
+        ..qa_original_identity(ObservationClass::Connected)
+    };
+    let neighbor = p2_queued_gap(&handle, &mut turn, neighbor_identity);
+    neighbor
+        .set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    let up = qa_timer_transport(
+        handle.prefix().next_record.get(),
+        neighbor_identity,
+        Transport::Up,
+    );
+    // A1 remains scoped: the genuine neighbor actually progresses despite the
+    // earlier queued Gap, while its admission removes GLOBAL F2 tail eligibility.
+    sink.persist_owned(&mut turn, &up, RecordingGate::Durable, &neighbor)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &neighbor);
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    drop(neighbor);
+    let unadmitted_reuse = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    drop(unadmitted_reuse);
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    p2_write_original_gap_after_rejection(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &gap,
+        original,
+    );
+    drop(gap);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    let records = read_all(&wal.0).0;
+    assert_eq!(
+        &records[6..],
+        &[up, qa_gap(8, original, Reason::QueueOverflow)]
+    );
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+}
+
+#[test]
+fn p2_durable_gap_queued_tail_reserved_reverse_order_and_failed_capacity_do_not_block_f2() {
+    let wal = TempWal::new("p2-gap-reservation-order");
+    let (owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let reserved_before = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    let original = qa_original_identity(ObservationClass::Gap);
+    let gap = p2_queued_gap(&handle, &mut turn, original);
+    let reserved_after = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    assert_eq!(
+        handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap_err(),
+        AuthorityError::WorkExhausted
+    );
+    let id = gap.id();
+    let cut = gap.cut_side();
+    let ledger = handle.authority().ownership_report();
+    let status = owner.session_status();
+    let prefix = handle.prefix();
+    let calls = owner.sink_persist_calls();
+    let mut expanded = original;
+    for last in 2..=33 {
+        expanded = p2_expanded_gap(original, last);
+        assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+        handle
+            .extend_gap_observation(&mut turn, &gap, expanded)
+            .unwrap();
+        assert_eq!(gap.id(), id);
+        assert_eq!(gap.cut_side(), cut);
+        assert_eq!(handle.authority().ownership_report(), ledger);
+        assert_eq!(owner.session_status(), status);
+        assert_eq!(handle.prefix(), prefix);
+        assert_eq!(owner.sink_persist_calls(), calls);
+    }
+    drop(reserved_before);
+    drop(reserved_after);
+    gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    let final_gap = qa_gap(5, expanded, Reason::QueueOverflow);
+    sink.persist_owned(&mut turn, &final_gap, RecordingGate::Durable, &gap)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &gap);
+    drop(gap);
+    assert_eq!(read_all(&wal.0).0[4], final_gap);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+}
+
+#[test]
+fn p2_durable_gap_rejection_does_not_reconcile_abandoned_barrier_or_change_failure_cut() {
+    let wal = TempWal::new("p2-gap-no-reconciliation");
+    let (owner, mut turn, handle, _sink) = owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let original = qa_original_identity(ObservationClass::Gap);
+    let gap = p2_queued_gap(&handle, &mut turn, original);
+    let abandoned = p2_queued_gap(
+        &handle,
+        &mut turn,
+        qa_original_identity(ObservationClass::Connected),
+    );
+    drop(abandoned);
+    assert!(!owner.session_status().failed);
+    assert!(owner.session_status().first_abandonment.is_none());
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    assert!(!owner.session_status().failed);
+    assert!(owner.session_status().first_abandonment.is_none());
+    // Actual later reconciliation, rather than extension rejection, installs
+    // the truthful original abandonment. No completion/proof/seal is claimed.
+    handle
+        .authority()
+        .synchronize_obligations(&mut turn)
+        .unwrap();
+    assert!(owner.session_status().failed);
+    assert!(owner.session_status().first_abandonment.is_some());
+    p2_gap_reject_preserving(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &gap,
+        p2_expanded_gap(original, 2),
+    );
+    assert_eq!(read_all(&wal.0).0.len(), 4);
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+}
+
+fn p2_gap_requested_allocation(gate: RecordingGate) {
+    for cap in [5, 9] {
+        let wal = TempWal::new("p2-gap-allocation");
+        let probe = AllocationProbe::begin();
+        let (owner, mut turn, handle, mut sink) = if cap == 5 {
+            owner_with_fault(&wal.0, gate, None)
+        } else {
+            owner_two_scopes_with_gate(&wal.0, gate)
+        };
+        let metadata = owner.memory_report();
+        let ledger = handle.authority().ownership_report();
+        let ceiling = ledger.metadata_ceiling_bytes
+            + metadata.known_metadata_backing_bytes
+            + metadata.registry_metadata_bound
+            + metadata.encoder_workspace_bound
+            + MAX_CAPTURE_PATH_BYTES
+            + 8192;
+        let identity = qa_original_identity(ObservationClass::Gap);
+        let gap = p2_queued_gap(&handle, &mut turn, identity);
+        let control_identity = ObservationIdentity {
+            stream: positive(StreamId::new(if cap == 5 { 1 } else { 2 })),
+            stamp: ReceiveStamp {
+                unix_ns: 6,
+                monotonic_ns: 6,
+            },
+            ..qa_original_identity(ObservationClass::Connected)
+        };
+        let barrier = p2_queued_gap(&handle, &mut turn, control_identity);
+        let expanded = p2_expanded_gap(identity, 2);
+        let status = owner.session_status();
+        let ownership = handle.authority().ownership_report();
+        let prefix = handle.prefix();
+        let calls = owner.sink_persist_calls();
+        let baseline = probe.sample().live_requested_bytes;
+        for _ in 0..100 {
+            assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+            assert_eq!(
+                handle.extend_gap_observation(&mut turn, &gap, expanded),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(handle.authority().ownership_report(), ownership);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.sink_persist_calls(), calls);
+            assert_eq!(probe.sample().live_requested_bytes, baseline);
+        }
+        gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let original = qa_gap(
+            handle.prefix().next_record.get(),
+            identity,
+            Reason::QueueOverflow,
+        );
+        sink.persist_owned(&mut turn, &original, gate, &gap)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &gap);
+        drop(gap);
+        barrier
+            .set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let control = qa_timer_transport(
+            handle.prefix().next_record.get(),
+            control_identity,
+            Transport::Up,
+        );
+        sink.persist_owned(&mut turn, &control, gate, &barrier)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &barrier);
+        drop(barrier);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        let measured = probe.sample();
+        assert!(!measured.unmatched_deallocation);
+        assert!(measured.peak_requested_bytes <= ceiling);
+        drop(sink);
+        drop(handle);
+        drop(turn);
+        drop(owner);
+        assert_eq!(probe.sample().live_requested_bytes, 0);
+        assert!(!probe.sample().unmatched_deallocation);
+        drop(probe);
+        eprintln!(
+            "p2 GAP requested allocation gate={gate:?} cap={cap}: rejects=100 retained_baseline={baseline} peak={} ceiling={ceiling} teardown_live=0",
+            measured.peak_requested_bytes
+        );
+    }
+}
+
+#[test]
+fn p2_written_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    p2_gap_requested_allocation(RecordingGate::Written);
+}
+
+#[test]
+fn p2_flushed_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    p2_gap_requested_allocation(RecordingGate::Flushed);
+}
+
+#[test]
+fn p2_durable_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    p2_gap_requested_allocation(RecordingGate::Durable);
 }

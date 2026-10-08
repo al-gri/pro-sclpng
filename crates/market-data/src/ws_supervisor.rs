@@ -1966,22 +1966,19 @@ impl SupervisorCore {
     /// An existing counted tail may represent this exact loss without a new
     /// admission owner. This preflight reads bytes only for the Pong delimiter;
     /// it does not decode or retain caller payload.
-    fn received_loss_can_coalesce(
+    fn received_loss_extension(
         &self,
         stream: StreamId,
         epoch: ConnectionEpoch,
         bytes: &[u8],
-    ) -> bool {
+    ) -> Option<Ingress> {
         if bytes == b"pong" {
-            return false;
+            return None;
         }
         let runtime = &self.streams[&stream];
-        let Some((tag, current)) = runtime.tag_for_observed_connection(epoch) else {
-            return false;
-        };
-        let Some(attempt) = runtime.capture_attempt_frontier.checked_add(1) else {
-            return false;
-        };
+        let (tag, current) = runtime.tag_for_observed_connection(epoch)?;
+        let attempt =
+            CaptureAttemptNo::new(runtime.capture_attempt_frontier.checked_add(1)?).ok()?;
         let per_stream_room = runtime.queued_raw_frames
             < self.queue_policy.max_raw_frames_per_stream
             && runtime
@@ -1995,19 +1992,34 @@ impl SupervisorCore {
             || self
                 .cut_remaining
                 .is_some_and(|remaining| self.queue.len() > remaining);
-        current
-            && !(per_stream_room && global_room)
-            && same_cut
-            && matches!(self.queue.back(), Some(Ingress::QueueGap {
-                stream: queued_stream,
-                tag: queued_tag,
-                last_attempt,
-                loss_count,
-                ..
-            }) if *queued_stream == stream
-                && *queued_tag == tag
-                && last_attempt.get().checked_add(1) == Some(attempt)
-                && loss_count.checked_add(1).is_some())
+        if !current || (per_stream_room && global_room) || !same_cut {
+            return None;
+        }
+        let Ingress::QueueGap {
+            stream: queued_stream,
+            tag: queued_tag,
+            first_attempt,
+            last_attempt,
+            loss_count,
+            stamp,
+        } = self.queue.back()?
+        else {
+            return None;
+        };
+        if *queued_stream != stream
+            || *queued_tag != tag
+            || last_attempt.get().checked_add(1) != Some(attempt.get())
+        {
+            return None;
+        }
+        Some(Ingress::QueueGap {
+            stream,
+            tag,
+            first_attempt: *first_attempt,
+            last_attempt: attempt,
+            loss_count: loss_count.checked_add(1)?,
+            stamp: *stamp,
+        })
     }
 
     fn push_loss_ingress(
@@ -2902,11 +2914,34 @@ impl PublicWsSupervisor {
             }
         }
         self.core.external_work = ownership.work_used - self.queued_owners.len();
-        let reuses_loss_owner = match (stream, epoch, call) {
+        let loss_extension = match (stream, epoch, call) {
             (Some(stream), Some(epoch), ReceivedCall::Text(bytes)) => {
-                self.core.received_loss_can_coalesce(stream, epoch, bytes)
+                self.core.received_loss_extension(stream, epoch, bytes)
             }
-            _ => false,
+            _ => None,
+        };
+        let reuses_loss_owner = if loss_extension.is_some() {
+            let Some(work) = self.queued_owners.back() else {
+                return self.admission_report(
+                    stream,
+                    Err(SupervisorError::InvalidConfiguration(
+                        "missing queued loss owner",
+                    )),
+                    Vec::new(),
+                );
+            };
+            match self.handle.gap_extension_eligible(turn, work) {
+                Ok(eligible) => eligible,
+                Err(error) => {
+                    return self.admission_report(
+                        stream,
+                        Err(SupervisorError::Authority(error)),
+                        Vec::new(),
+                    );
+                }
+            }
+        } else {
+            false
         };
         let proposed = usize::from(!reuses_loss_owner);
         let stage_count = free.min(proposed);
@@ -2946,23 +2981,89 @@ impl PublicWsSupervisor {
         // Staged tokens already reserve the prospective jobs. The protocol
         // core's capacity check excludes them, but includes all held results,
         // pending plans and command leases from earlier jobs.
-        let outcome = match call {
-            ReceivedCall::Text(bytes) => self.core.queue_text(
-                connection.expect("received connection"),
-                epoch.expect("received epoch"),
-                stamp,
-                bytes,
-            ),
-            ReceivedCall::Connected => self.core.queue_connected(
-                connection.expect("received connection"),
-                epoch.expect("received epoch"),
-                stamp,
-            ),
-            ReceivedCall::Disconnected => self.core.queue_disconnected(
-                connection.expect("received connection"),
-                epoch.expect("received epoch"),
-                stamp,
-            ),
+        let outcome = if let Some(extension) = loss_extension {
+            let Ingress::QueueGap {
+                stream,
+                tag,
+                last_attempt,
+                ..
+            } = extension
+            else {
+                unreachable!("loss extension contains only GAP metadata")
+            };
+            if reuses_loss_owner {
+                let work = self
+                    .queued_owners
+                    .back()
+                    .expect("validated queued loss owner");
+                if let Err(error) =
+                    self.handle
+                        .extend_gap_observation(turn, work, extension.observation_identity())
+                {
+                    return self.admission_report(
+                        Some(stream),
+                        Err(SupervisorError::Authority(error)),
+                        Vec::new(),
+                    );
+                }
+                // The exact extension and current tail are validated under the
+                // same serialized turn. No fallible core mutation follows its
+                // authority commit, and no new work/ordinal is reserved.
+                *self
+                    .core
+                    .queue
+                    .back_mut()
+                    .expect("validated queued loss tail") = extension;
+                self.core
+                    .streams
+                    .get_mut(&stream)
+                    .expect("received scope")
+                    .capture_attempt_frontier = last_attempt.get();
+                Ok(())
+            } else {
+                // A generated or externally admitted record can be newer than
+                // this physical core tail. Preserve that old GAP and represent
+                // this input as a fresh loss, including normal terminal overflow
+                // when a distinct counted owner cannot fit.
+                let admitted = self.core.push_loss_ingress(
+                    stream,
+                    Ingress::QueueGap {
+                        stream,
+                        tag,
+                        first_attempt: last_attempt,
+                        last_attempt,
+                        loss_count: 1,
+                        stamp,
+                    },
+                );
+                if admitted.is_ok() {
+                    self.core
+                        .streams
+                        .get_mut(&stream)
+                        .expect("received scope")
+                        .capture_attempt_frontier = last_attempt.get();
+                }
+                admitted
+            }
+        } else {
+            match call {
+                ReceivedCall::Text(bytes) => self.core.queue_text(
+                    connection.expect("received connection"),
+                    epoch.expect("received epoch"),
+                    stamp,
+                    bytes,
+                ),
+                ReceivedCall::Connected => self.core.queue_connected(
+                    connection.expect("received connection"),
+                    epoch.expect("received epoch"),
+                    stamp,
+                ),
+                ReceivedCall::Disconnected => self.core.queue_disconnected(
+                    connection.expect("received connection"),
+                    epoch.expect("received epoch"),
+                    stamp,
+                ),
+            }
         };
         let added = self.core.queue.len() - before;
         let mut admitted = [None; MAX_CONFIGURED_STREAMS];
@@ -3012,13 +3113,6 @@ impl PublicWsSupervisor {
             }
             *admitted_stream = Some(observed_stream);
             self.queued_owners.push_back(work);
-        }
-        if added == 0 && reuses_loss_owner {
-            let ingress = self.core.queue.back().expect("coalesced GAP tail");
-            let work = self.queued_owners.back().expect("counted GAP tail");
-            self.handle
-                .extend_gap_observation(turn, work, ingress.observation_identity())
-                .expect("core validated same-side GAP coalescing");
         }
         drop(staged);
         if let Err(

@@ -982,6 +982,406 @@ fn timer_a_supervisor_real_sink_order_rejection_preserves_physical_prefix_writte
     timer_a_supervisor_real_sink_order_rejection(RecordingGate::Written);
 }
 
+fn p2_supervisor_generated_barrier(gate: RecordingGate) {
+    for cap in [9, 16] {
+        for exhausted in [false, true] {
+            let a = stream_binding(1, 1, 1, "BTCUSDT");
+            let b = stream_binding(2, 2, 2, "ETHUSDT");
+            let policy = QueuePolicy {
+                max_total_items: cap,
+                max_raw_message_bytes: 4096,
+                ..QueuePolicy::default()
+            };
+            let mut supervisor = canonical_supervisor(vec![a.clone(), b.clone()], policy, gate);
+            let mut trace = MemorySink::default();
+            supervisor.start_commands().unwrap();
+            connect_one(&mut supervisor, &mut trace, &a, 100);
+            connect_one(&mut supervisor, &mut trace, &b, 101);
+            supervisor
+                .queue_disconnected(a.connection_id, a.tag.connection, stamp(200))
+                .unwrap();
+            let mut down = supervisor
+                .inner
+                .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                .outcome
+                .unwrap()
+                .unwrap();
+            assert_eq!(down.records.len(), 1);
+            let close = std::mem::take(&mut down.commands)
+                .into_iter()
+                .next()
+                .unwrap();
+            let original_close = close.close_owner().unwrap().clone();
+            let bytes = vec![b'x'; policy.max_raw_message_bytes + 1];
+            let first = supervisor.inner.queue_text(
+                &mut supervisor.turn,
+                b.connection_id,
+                b.tag.connection,
+                stamp(300),
+                &bytes,
+            );
+            assert_eq!(first.outcome, Ok(AdmissionOutcome::Admitted));
+            assert_eq!(supervisor.queued_items(), 1);
+            assert_eq!(supervisor.authority.ownership_report().work_used, 2);
+            assert!(matches!(
+                supervisor
+                    .owner
+                    .as_mut()
+                    .unwrap()
+                    .dispatch(&mut supervisor.turn, close, |_| Ok::<(), ()>(())),
+                session::DispatchReport::Dispatched
+            ));
+            drop(down);
+            let mut generated = supervisor
+                .inner
+                .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                .outcome
+                .unwrap()
+                .unwrap();
+            assert_eq!(generated.records.len(), 3);
+            supervisor.dispatch_views(std::mem::take(&mut generated.commands));
+            drop(generated);
+            assert_eq!(supervisor.snapshot(a.id).unwrap().tag.connection.get(), 2);
+            assert_eq!(supervisor.queued_items(), 1);
+            assert_eq!(supervisor.authority.ownership_report().work_used, 1);
+            assert_eq!(
+                supervisor
+                    .authority
+                    .close_state(a.id, a.tag.connection)
+                    .unwrap(),
+                session::CloseState::Settled
+            );
+            let prefix = timer_a_read_prefix(&supervisor);
+            assert!(prefix[prefix.len() - 3..].iter().all(|frame| matches!(
+                frame.value,
+                Record::Control(ControlRecord {
+                    value: Control::EpochAdvance { .. },
+                    ..
+                })
+            )));
+            assert!(
+                prefix
+                    .iter()
+                    .all(|frame| !matches!(frame.value, Record::Gap(_)))
+            );
+            // These are three actually admitted/persisted H1 stages from the
+            // canonical owner. No private ordinal or generated-plan injection.
+            let mut held = Vec::new();
+            if exhausted {
+                let limit = supervisor.authority.ownership_report().work_limit;
+                for _ in 1..limit {
+                    held.push(
+                        supervisor
+                            .authority
+                            .reserve_work(&mut supervisor.turn, session::WorkKind::Result)
+                            .unwrap(),
+                    );
+                }
+            }
+            let ownership = supervisor.authority.ownership_report();
+            let physical = supervisor.owner.as_ref().unwrap().watermarks();
+            let file_bytes = fs::read(&supervisor.temp.path).unwrap();
+            let before_prefix = supervisor.authority.prefix().unwrap();
+            let next = supervisor.inner.queue_text(
+                &mut supervisor.turn,
+                b.connection_id,
+                b.tag.connection,
+                stamp(301),
+                &bytes,
+            );
+            assert_eq!(supervisor.authority.prefix().unwrap(), before_prefix);
+            assert_eq!(supervisor.owner.as_ref().unwrap().watermarks(), physical);
+            assert_eq!(fs::read(&supervisor.temp.path).unwrap(), file_bytes);
+            assert_eq!(
+                supervisor.snapshot(b.id).unwrap().capture_attempt_frontier,
+                2
+            );
+            assert!(!supervisor.is_halted());
+            if exhausted {
+                assert_eq!(
+                    next.outcome,
+                    Err(SupervisorError::QueueExhausted { stream: b.id })
+                );
+                assert!(next.admitted_scopes.iter().all(Option::is_none));
+                let failure = next.failure.unwrap();
+                assert_eq!(failure.stream, b.id);
+                assert_eq!(failure.observed_tag, b.tag);
+                assert_eq!(failure.stamp.monotonic_ns, 301);
+                assert_eq!(
+                    failure.attempt,
+                    session::AttemptIdentity::Candidate(id(CaptureAttemptNo::new(2)))
+                );
+                assert_eq!(failure.cause, session::FailureCause::QueueOverflow);
+                assert_eq!(supervisor.queued_items(), 1);
+                assert_eq!(
+                    supervisor.authority.ownership_report().work_used,
+                    ownership.work_used
+                );
+                assert_eq!(supervisor.inner.retention_report().cut_remaining, Some(1));
+                assert!(supervisor.authority.terminal_failure(a.id).is_none());
+                supervisor.dispatch_views(next.commands);
+                let retained = supervisor.authority.ownership_report();
+                let status = supervisor.authority.status();
+                let close_inventory = supervisor.authority.outstanding_close_owners();
+                for _ in 0..3 {
+                    let repeat = supervisor.inner.queue_text(
+                        &mut supervisor.turn,
+                        b.connection_id,
+                        b.tag.connection,
+                        stamp(302),
+                        &bytes,
+                    );
+                    assert_eq!(repeat.outcome, Ok(AdmissionOutcome::AlreadyTerminated));
+                    assert_eq!(repeat.failure, Some(failure));
+                    assert_eq!(supervisor.authority.ownership_report(), retained);
+                    assert_eq!(supervisor.authority.status(), status);
+                    assert_eq!(
+                        supervisor.authority.outstanding_close_owners(),
+                        close_inventory
+                    );
+                    assert_eq!(supervisor.inner.retention_report().cut_remaining, Some(1));
+                    assert_eq!(
+                        supervisor.snapshot(b.id).unwrap().capture_attempt_frontier,
+                        2
+                    );
+                    assert_eq!(fs::read(&supervisor.temp.path).unwrap(), file_bytes);
+                }
+                drop(held);
+                let original_gap = supervisor
+                    .inner
+                    .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                    .outcome
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(original_gap.records.len(), 1);
+                drop(original_gap);
+                let marker = supervisor
+                    .inner
+                    .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                    .outcome
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(marker.records.len(), 1);
+                drop(marker);
+                let tag = supervisor.snapshot(a.id).unwrap().tag;
+                supervisor
+                    .queue_connected(
+                        a.connection_id,
+                        tag.connection,
+                        stamp(RECONNECT_MAX_NS_V1 + 400),
+                    )
+                    .unwrap();
+                supervisor.drain_one(&mut trace).unwrap().unwrap();
+                assert_eq!(supervisor.snapshot(a.id).unwrap().transport, Transport::Up);
+                assert_eq!(supervisor.authority.status().storage_stopped, None);
+            } else {
+                assert_eq!(next.outcome, Ok(AdmissionOutcome::Admitted));
+                assert_eq!(next.admitted_scopes, [Some(b.id), None, None, None]);
+                assert!(next.failure.is_none());
+                assert_eq!(supervisor.queued_items(), 2);
+                assert_eq!(
+                    supervisor.authority.ownership_report().work_used,
+                    ownership.work_used + 1
+                );
+                for _ in 0..2 {
+                    let gap = supervisor
+                        .inner
+                        .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                        .outcome
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(gap.records.len(), 1);
+                    drop(gap);
+                }
+                assert!(!supervisor.authority.status().failed);
+            }
+            let gaps: Vec<_> = timer_a_read_prefix(&supervisor)
+                .into_iter()
+                .filter_map(|frame| match frame.value {
+                    Record::Gap(gap) => Some(gap),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(gaps.len(), if exhausted { 1 } else { 2 });
+            for (index, gap) in gaps.iter().enumerate() {
+                let GapScope::ExplicitTargets(targets) = &gap.scope else {
+                    panic!("original explicit loss")
+                };
+                let attempt = index as u64 + 1;
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].stream, b.id);
+                assert_eq!(targets[0].tag, b.tag);
+                assert_eq!(
+                    targets[0].range,
+                    Some((
+                        id(CaptureAttemptNo::new(attempt)),
+                        id(CaptureAttemptNo::new(attempt))
+                    ))
+                );
+                assert_eq!(targets[0].loss_count, Some(1));
+                assert_eq!(gap.reason, Reason::QueueOverflow);
+                assert_eq!(gap.context.monotonic_ns.get(), 300 + index as u64);
+            }
+            assert_eq!(supervisor.authority.ownership_report().work_used, 0);
+            assert_eq!(
+                supervisor.authority.ownership_report().pending_observations,
+                0
+            );
+            assert_eq!(
+                supervisor
+                    .authority
+                    .close_state(a.id, original_close.epoch())
+                    .unwrap(),
+                session::CloseState::Settled
+            );
+            supervisor.assert_bounds();
+        }
+    }
+}
+
+#[test]
+fn p2_supervisor_durable_actual_generated_barrier_keeps_tail_loss_distinct_or_truthfully_terminal()
+{
+    p2_supervisor_generated_barrier(RecordingGate::Durable);
+}
+
+#[test]
+fn p2_supervisor_written_actual_generated_barrier_keeps_tail_loss_distinct_or_truthfully_terminal()
+{
+    p2_supervisor_generated_barrier(RecordingGate::Written);
+}
+
+fn p2_supervisor_current_loss32(gate: RecordingGate) {
+    for cap in [5, 9] {
+        let a = stream_binding(1, 1, 1, "BTCUSDT");
+        let b = stream_binding(2, 2, 2, "ETHUSDT");
+        let bindings = if cap == 5 {
+            vec![a.clone()]
+        } else {
+            vec![a.clone(), b.clone()]
+        };
+        let policy = QueuePolicy {
+            max_total_items: cap,
+            max_raw_frames_per_stream: 1,
+            max_raw_bytes_per_stream: 4096,
+            max_raw_message_bytes: 4096,
+        };
+        let mut supervisor = canonical_supervisor(bindings, policy, gate);
+        let mut trace = MemorySink::default();
+        supervisor.start_commands().unwrap();
+        connect_one(&mut supervisor, &mut trace, &a, 1);
+        if cap == 9 {
+            connect_one(&mut supervisor, &mut trace, &b, 2);
+        }
+        supervisor
+            .queue_text(a.connection_id, a.tag.connection, stamp(10), ack("BTCUSDT"))
+            .unwrap();
+        supervisor
+            .queue_text(a.connection_id, a.tag.connection, stamp(11), ack("BTCUSDT"))
+            .unwrap();
+        let held = supervisor
+            .authority
+            .reserve_work(&mut supervisor.turn, session::WorkKind::Result)
+            .unwrap();
+        let ownership = supervisor.authority.ownership_report();
+        assert_eq!(ownership.work_used, 3);
+        if cap == 5 {
+            assert_eq!(ownership.work_used, ownership.work_limit);
+        }
+        let prefix = supervisor.authority.prefix().unwrap();
+        let physical = supervisor.owner.as_ref().unwrap().watermarks();
+        let bytes = fs::read(&supervisor.temp.path).unwrap();
+        for n in 1..32 {
+            let coalesced = supervisor.inner.queue_text(
+                &mut supervisor.turn,
+                a.connection_id,
+                a.tag.connection,
+                stamp(11 + n),
+                &ack("BTCUSDT"),
+            );
+            assert_eq!(coalesced.outcome, Ok(AdmissionOutcome::CoalescedLoss));
+            assert!(coalesced.admitted_scopes.iter().all(Option::is_none));
+            assert!(coalesced.failure.is_none());
+            assert_eq!(supervisor.queued_items(), 2);
+            assert_eq!(supervisor.authority.ownership_report(), ownership);
+            assert_eq!(supervisor.authority.prefix().unwrap(), prefix);
+            assert_eq!(supervisor.owner.as_ref().unwrap().watermarks(), physical);
+            assert_eq!(fs::read(&supervisor.temp.path).unwrap(), bytes);
+        }
+        assert_eq!(
+            supervisor.snapshot(a.id).unwrap().capture_attempt_frontier,
+            33
+        );
+        drop(held);
+        if cap == 9 {
+            // The cap9 two-scope profile has one ordinary Raw slot. Confirm
+            // original A Raw first, keeping its coalesced GAP Pending while
+            // that real freed slot admits neighboring B Raw.
+            supervisor.drain_one(&mut trace).unwrap().unwrap();
+            supervisor
+                .queue_text(
+                    b.connection_id,
+                    b.tag.connection,
+                    stamp(100),
+                    ack("ETHUSDT"),
+                )
+                .unwrap();
+        }
+        drain_all(&mut supervisor, &mut trace);
+        let frames = timer_a_read_prefix(&supervisor);
+        let gaps: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| {
+                if let Record::Gap(gap) = &frame.value
+                    && gap.reason == Reason::QueueOverflow
+                {
+                    Some(gap)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(gaps.len(), 1);
+        let GapScope::ExplicitTargets(targets) = &gaps[0].scope else {
+            panic!("original explicit loss")
+        };
+        assert_eq!(targets[0].stream, a.id);
+        assert_eq!(targets[0].tag, a.tag);
+        assert_eq!(
+            targets[0].range,
+            Some((id(CaptureAttemptNo::new(2)), id(CaptureAttemptNo::new(33))))
+        );
+        assert_eq!(targets[0].loss_count, Some(32));
+        assert_eq!(gaps[0].context.monotonic_ns.get(), 11);
+        assert_eq!(gaps[0].context.unix_ns.get(), stamp(11).unix_ns);
+        assert_eq!(
+            supervisor
+                .snapshot(a.id)
+                .unwrap()
+                .accounted_attempt_frontier,
+            33
+        );
+        assert_eq!(supervisor.authority.ownership_report().work_used, 0);
+        assert_eq!(
+            supervisor.authority.ownership_report().pending_observations,
+            0
+        );
+        assert!(!supervisor.authority.status().failed);
+        assert!(!supervisor.is_halted());
+        supervisor.assert_bounds();
+    }
+}
+
+#[test]
+fn p2_supervisor_durable_original_current_loss32_remains_same_tail_at_cap5_and_cap9() {
+    p2_supervisor_current_loss32(RecordingGate::Durable);
+}
+
+#[test]
+fn p2_supervisor_written_original_current_loss32_remains_same_tail_at_cap5_and_cap9() {
+    p2_supervisor_current_loss32(RecordingGate::Written);
+}
+
 fn timer_a_supervisor_held_ping(gate: RecordingGate) {
     // T06/T09/T10: external commands retain the original counted W after the
     // Timer result is dropped, and are revalidated at dispatch after a revoke.
