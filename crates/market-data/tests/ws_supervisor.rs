@@ -11584,3 +11584,316 @@ fn qa_d2_foreign_work_cancellation_cannot_reconcile_pending_abandonment() {
     }
     rightful.assert_prefix(0, 0, false);
 }
+
+fn independent_qa_timer_stale_stage_fixture(gate: RecordingGate) {
+    for with_cut in [false, true] {
+        let a = stream_binding(1, 1, 1, "BTCUSDT");
+        let b = stream_binding(2, 2, 2, "ETHUSDT");
+        let bindings = vec![a.clone(), b.clone()];
+        let temp = TempWal::new("timer-a-order-real-owner");
+        let bootstrap = bootstrap_prefix_many(&bindings, gate);
+        let (mut owner, mut turn) = CaptureSessionOwner::create_new(
+            &temp.path,
+            &bootstrap[0],
+            BoundedCaptureProfile::new(&bootstrap[1..]),
+        )
+        .expect("actual accepted owner bootstrap");
+        let scopes: Vec<_> = bindings
+            .iter()
+            .map(|binding| session::ScopeBinding {
+                stream: binding.id,
+                connection: binding.connection_id,
+                epoch: binding.tag.connection,
+            })
+            .collect();
+        let policy = QueuePolicy::default();
+        let (handle, mut sink) = owner
+            .register_supervisor(
+                &mut turn,
+                &scopes,
+                session::RetentionBudget {
+                    item_cap: policy.max_total_items,
+                    raw_frame_limit: policy.max_raw_frames_per_stream,
+                    raw_byte_limit: policy.max_raw_bytes_per_stream,
+                    max_message_bytes: policy.max_raw_message_bytes,
+                },
+                HeartbeatPolicy::SupervisorV2,
+            )
+            .unwrap();
+        let authority = sink.authority().clone();
+        let up = handle
+            .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(
+                &mut turn,
+                &up,
+                session::ObservationIdentity {
+                    stream: a.id,
+                    epoch: a.tag.connection,
+                    stamp: session::ReceiveStamp {
+                        unix_ns: stamp(1).unix_ns,
+                        monotonic_ns: 1,
+                    },
+                    class: session::ObservationClass::Connected,
+                    tag: None,
+                    attempts: None,
+                    loss_count: None,
+                },
+            )
+            .unwrap();
+        up.set_kind(&mut turn, session::WorkKind::InFlightObservation)
+            .unwrap();
+        sink.persist_owned(
+            &mut turn,
+            &RecordFrame {
+                record_no: handle.prefix().next_record,
+                segment_no: handle.prefix().segment,
+                value: Record::Control(ControlRecord {
+                    context: WireContext {
+                        unix_ns: LocalUnixNs::new(stamp(1).unix_ns),
+                        monotonic_ns: MonotonicNs::new(1),
+                        context: InputContext::Active(active_context()),
+                    },
+                    value: Control::Transport {
+                        connection: a.connection_id,
+                        epoch: a.tag.connection,
+                        value: Transport::Up,
+                    },
+                }),
+            },
+            gate,
+            &up,
+        )
+        .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &up, None)
+            .unwrap();
+        drop(up);
+        let earlier = handle
+            .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+            .unwrap();
+        let attempt = id(CaptureAttemptNo::new(1));
+        handle
+            .admit_observation(
+                &mut turn,
+                &earlier,
+                session::ObservationIdentity {
+                    stream: a.id,
+                    epoch: a.tag.connection,
+                    stamp: session::ReceiveStamp {
+                        unix_ns: stamp(2).unix_ns,
+                        monotonic_ns: 2,
+                    },
+                    class: session::ObservationClass::RejectedStaleRaw,
+                    tag: Some(a.tag),
+                    attempts: Some((attempt, attempt)),
+                    loss_count: None,
+                },
+            )
+            .unwrap();
+        let config =
+            supervisor_config_with_record(bindings, policy, gate, handle.prefix().next_record);
+        let mut supervisor = BoundSupervisor::new(config, handle).unwrap();
+        let start = supervisor.start_commands(&mut turn);
+        start.outcome.unwrap();
+        for command in start.commands {
+            assert!(matches!(
+                owner.dispatch(&mut turn, command, |_| Ok::<(), ()>(())),
+                session::DispatchReport::Dispatched
+            ));
+        }
+        assert_eq!(
+            supervisor.snapshot(a.id).unwrap().transport,
+            Transport::Unknown
+        );
+        let due = 1 + HEARTBEAT_INTERVAL_NS;
+        let admitted = supervisor.queue_tick(&mut turn, stamp(due));
+        assert_eq!(admitted.outcome, Ok(AdmissionOutcome::Admitted));
+        assert_eq!(admitted.admitted_scopes, [Some(a.id), None, None, None]);
+        if with_cut {
+            let failure = authority
+                .terminate(
+                    &mut turn,
+                    session::TerminalFailure {
+                        stream: b.id,
+                        connection: b.connection_id,
+                        current_epoch: b.tag.connection,
+                        observed_tag: b.tag,
+                        context: active_context(),
+                        stamp: session::ReceiveStamp {
+                            unix_ns: stamp(due + 1).unix_ns,
+                            monotonic_ns: due + 1,
+                        },
+                        input_class: session::InputClass::Connected,
+                        attempt: session::AttemptIdentity::NotRaw,
+                        cause: session::FailureCause::QueueOverflow,
+                    },
+                )
+                .unwrap();
+            drop(failure.close);
+            let synchronized = supervisor.queue_tick(&mut turn, stamp(due + 2));
+            synchronized.outcome.unwrap();
+            assert!(synchronized.admitted_scopes.iter().all(Option::is_none));
+        }
+        let retained = authority.ownership_report();
+        let cut = supervisor.retention_report().cut_remaining;
+        assert_eq!(cut, with_cut.then_some(1));
+        let status = owner.session_status();
+        let close = owner.outstanding_close_owners();
+        let prefix = authority.prefix().unwrap();
+        let physical = owner.watermarks();
+        let bytes = fs::read(&temp.path).unwrap();
+        for _ in 0..3 {
+            let blocked = supervisor.drain_one(&mut turn, &mut sink);
+            assert!(matches!(blocked.outcome,
+                Err(SupervisorError::Authority(session::AuthorityError::TimerOrderBlocked {
+                    earlier_work_id,
+                })) if earlier_work_id == earlier.id()));
+            assert_eq!(supervisor.queued_items(), 1);
+            assert_eq!(supervisor.retention_report().cut_remaining, cut);
+            assert_eq!(authority.ownership_report(), retained);
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(owner.outstanding_close_owners(), close);
+            assert_eq!(authority.prefix().unwrap(), prefix);
+            assert_eq!(owner.watermarks(), physical);
+            assert_eq!(fs::read(&temp.path).unwrap(), bytes);
+            assert!(!supervisor.is_halted());
+        }
+        earlier
+            .set_kind(&mut turn, session::WorkKind::InFlightObservation)
+            .unwrap();
+        let prefix = authority.prefix().unwrap();
+        sink.persist_owned(
+            &mut turn,
+            &RecordFrame {
+                record_no: prefix.next_record,
+                segment_no: prefix.segment,
+                value: Record::RawInput(RawInput {
+                    context: WireContext {
+                        unix_ns: LocalUnixNs::new(stamp(2).unix_ns),
+                        monotonic_ns: MonotonicNs::new(2),
+                        context: InputContext::Active(active_context()),
+                    },
+                    stream: a.id,
+                    tag: a.tag,
+                    attempt,
+                    bytes: Vec::new(),
+                }),
+            },
+            gate,
+            &earlier,
+        )
+        .unwrap();
+        // New independent public-route probe. The first exact receipt is not
+        // the required diagnostic GAP. A held alias does not define readiness;
+        // authority's distinct received stages do, including after a fixed cut.
+        let stage_owner = authority.ownership_report();
+        let stage_status = owner.session_status();
+        let stage_prefix = authority.prefix().unwrap();
+        let stage_watermarks = owner.watermarks();
+        let stage_close = owner.outstanding_close_owners();
+        let stage_bytes = fs::read(&temp.path).unwrap();
+        let stage_calls = owner.sink_persist_calls();
+        for _ in 0..3 {
+            let blocked = supervisor.drain_one(&mut turn, &mut sink);
+            assert!(matches!(blocked.outcome,
+                Err(SupervisorError::Authority(session::AuthorityError::TimerOrderBlocked {
+                    earlier_work_id,
+                })) if earlier_work_id == earlier.id()));
+            assert_eq!(supervisor.queued_items(), 1);
+            assert_eq!(supervisor.retention_report().cut_remaining, cut);
+            assert_eq!(authority.ownership_report(), stage_owner);
+            assert_eq!(owner.session_status(), stage_status);
+            assert_eq!(owner.outstanding_close_owners(), stage_close);
+            assert_eq!(authority.prefix().unwrap(), stage_prefix);
+            assert_eq!(owner.watermarks(), stage_watermarks);
+            assert_eq!(fs::read(&temp.path).unwrap(), stage_bytes);
+            assert_eq!(owner.sink_persist_calls(), stage_calls);
+            assert!(!supervisor.is_halted());
+        }
+        let exact_gap = RecordFrame {
+            record_no: stage_prefix.next_record,
+            segment_no: stage_prefix.segment,
+            value: Record::Gap(Gap {
+                context: WireContext {
+                    unix_ns: LocalUnixNs::new(stamp(2).unix_ns),
+                    monotonic_ns: MonotonicNs::new(2),
+                    context: InputContext::Active(active_context()),
+                },
+                scope: GapScope::ExplicitTargets(vec![GapTarget {
+                    stream: a.id,
+                    tag: a.tag,
+                    range: None,
+                    loss_count: None,
+                }]),
+                reason: Reason::Unknown,
+            }),
+        };
+        let mut substituted_gap = exact_gap.clone();
+        let Record::Gap(gap) = &mut substituted_gap.value else {
+            unreachable!()
+        };
+        gap.context.monotonic_ns = MonotonicNs::new(3);
+        assert_eq!(
+            sink.persist_owned(&mut turn, &substituted_gap, gate, &earlier),
+            Err(session::PersistBoundaryError::Authority(
+                session::AuthorityError::InvalidBinding
+            ))
+        );
+        assert_eq!(owner.sink_persist_calls(), stage_calls);
+        assert_eq!(authority.prefix().unwrap(), stage_prefix);
+        assert_eq!(fs::read(&temp.path).unwrap(), stage_bytes);
+        sink.persist_owned(&mut turn, &exact_gap, gate, &earlier)
+            .unwrap();
+        assert_eq!(owner.sink_persist_calls(), stage_calls + 1);
+        println!(
+            "independent_stale_stage gate={:?} cut={} held_original_work={} pending={} exact_gap_record={}",
+            gate,
+            with_cut,
+            earlier.id(),
+            authority.ownership_report().pending_observations,
+            exact_gap.record_no.get()
+        );
+        let mut timer = supervisor
+            .drain_one(&mut turn, &mut sink)
+            .outcome
+            .unwrap()
+            .unwrap();
+        assert_eq!(timer.records.len(), 1);
+        assert_eq!(timer.commands.len(), 1);
+        let ping = std::mem::take(&mut timer.commands)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(ping.work_owner_id().is_some_and(|id| id != earlier.id()));
+        assert!(matches!(
+            owner.dispatch(&mut turn, ping, |_| Ok::<(), ()>(())),
+            session::DispatchReport::Dispatched
+        ));
+        drop(timer);
+        let mut reader = WalReader::open(&temp.path).unwrap();
+        let mut frames = Vec::new();
+        while let Some(frame) = reader.next_record().unwrap() {
+            frames.push(frame);
+        }
+        assert!(matches!(frames.last().unwrap().value,
+            Record::Control(ControlRecord {
+                context,
+                value: Control::Timer { stream, timer_id: 1, deadline_ns },
+            }) if stream == a.id && deadline_ns == due && context.monotonic_ns.get() == due));
+        assert_eq!(supervisor.queued_items(), 0);
+        assert_eq!(authority.ownership_report().work_used, 1);
+        assert_eq!(authority.ownership_report().pending_observations, 1);
+        // The public constructor consumed the only supervisor handle. This
+        // external stale Raw plus exact GAP remove its required-stage barrier,
+        // but its original Pending stewardship remains held and is not claimed
+        // settled by this test. Pure private coverage performs that settlement.
+        assert_eq!(owner.session_status().storage_stopped, None);
+    }
+}
+
+#[test]
+fn independent_qa_timer_waits_for_original_stale_gap_through_supervisor_durable() {
+    independent_qa_timer_stale_stage_fixture(RecordingGate::Durable);
+}

@@ -1299,3 +1299,33 @@ source/lock/clean checks and fresh exact-head CI must run on the ensuing immutab
 candidate. Current successor outcomes are NOT_RUN at this history append;
 failed dd evidence and rejected da QA remain immutable and grant no future PASS,
 independent acceptance, READY, merge or Issue closure.
+
+### Explicit independent stale-required-GAP regression preservation — 2026-10-08
+
+The supplied independent_qa_timer_waits_for_original_stale_gap_through_supervisor_durable
+regression is now imported into the permitted canonical market-data supervisor
+integration tests under its ORIGINAL name. Its original independent307-line
+addition/14132-byte patch SHA256
+3799a737859593dbad58629d7d409ec42b813772584ffd0992f629f3cb3fbbdf
+and rejected-da patched tree8cb47d9d886dc0ae2a0958500cb8fe631e9ad72b remain
+immutable historical provenance. That earlier root-independent debug/release
+PASS cannot confer a result on the new imported canonical function.
+
+The actual public concrete Durable owner/sink probe has two variants: Open and
+genuine other-scope immutable failure cut. An authenticated earlier stale Raw
+still requires its original second GAP stage; repeated due-Timer/order and wrong
+replacement-GAP rejection preserves ownership, cut, prefix, bytes and original
+stamp. The exact original GAP receipt then permits the original Timer receipt
+and rightful Ping. Retained earlier Raw Pending steward is not falsely claimed
+settled or finalizable. There is no private ordinal mutation, fabricated receipt,
+Durable substitution or weakened original assertion.
+
+Local test-only repair commit84ddac8d0253b5dead83449c0ea162b567b11443,
+tree601f471f8f315adcc3a8e0a5dc8baf1ec9333b4d, parentdd4478aa, has no asserted
+published/full-runtime result. This explicit preservation addition remains in
+the same allowed conditional market-data tests path; the cumulative corrective
+scope remains four Rust paths plus append-only ADR/handoff. All old function
+names, §8/all31 rows and the exact33986-byte norm remain unchanged. The ensuing
+containing head must receive its OWN full canonical/focused Linux debug/release
+and fresh CI with source/lock/clean identities. Those future outcomes are NOT_RUN
+at this append; no containing SHA/tree, PASS or independent acceptance is invented.
