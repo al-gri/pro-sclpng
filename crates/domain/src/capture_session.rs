@@ -104,6 +104,14 @@ pub enum AuthorityError {
     WorkExhausted,
     CounterExhausted(&'static str),
     WorkShareExhausted,
+    TimerAuthorityRequired,
+    TimerOrderBlocked { earlier_work_id: u64 },
+    TimerPlanInProgress { work_id: u64 },
+    TimerCloseConflict,
+    CloseNotReady,
+    PingNotReady,
+    PingAlreadyTaken,
+    TimeOverflow,
     InvalidOwner,
     OwnerRetired,
     CommandRevoked,
@@ -288,6 +296,102 @@ pub enum ObservationClass {
     Timer { timer_id: u64, deadline_ns: u64 },
 }
 
+/// Frozen local engineering policy; no caller-selected durations or revision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeartbeatPolicy {
+    SupervisorV2,
+}
+
+impl HeartbeatPolicy {
+    pub const fn revision(self) -> u32 {
+        2
+    }
+    pub const fn ping_interval_ns(self) -> u64 {
+        30_000_000_000
+    }
+    pub const fn pong_timeout_ns(self) -> u64 {
+        15_000_000_000
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimerKind {
+    Ping,
+    Timeout,
+}
+
+#[derive(Debug)]
+pub enum TimerAdmission {
+    NotDue,
+    AlreadyQueued { original_work_id: u64 },
+    Admitted(AdmittedTimer),
+}
+
+/// Only due admission can construct an original Timer capability.
+#[derive(Debug)]
+pub struct AdmittedTimer {
+    owner: WorkOwner,
+}
+
+impl AdmittedTimer {
+    pub fn kind(&self) -> TimerKind {
+        self.owner.cell.timer.get().expect("original Timer").kind
+    }
+    pub fn identity(&self) -> ObservationIdentity {
+        self.owner.cell.observation.get().expect("original Timer")
+    }
+    pub fn owner(&self) -> &WorkOwner {
+        &self.owner
+    }
+    pub fn into_owner(self) -> WorkOwner {
+        self.owner
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TimerProgressView {
+    Unselected,
+    TimerOnlyPing {
+        timer_confirmed: bool,
+        ping_taken: bool,
+    },
+    TimerOnlyObsolete {
+        timer_confirmed: bool,
+    },
+    TimerThenDown {
+        timer_confirmed: bool,
+        down_confirmed: bool,
+        close: CloseOwnerView,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TimerPlan {
+    Unselected,
+    Ping {
+        next_generation: u64,
+        pong_deadline_ns: u64,
+    },
+    Obsolete,
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PingTransfer {
+    None,
+    Retained,
+    Taken,
+    Revoked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TimerOriginal {
+    kind: TimerKind,
+    generation: u64,
+    plan: TimerPlan,
+    ping: PingTransfer,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AbandonedObservation {
     pub work_id: u64,
@@ -363,9 +467,54 @@ struct WorkCell {
     generated_progress: Cell<GeneratedProgress>,
     abandoned_kind: Cell<Option<WorkKind>>,
     obligation_origin: Cell<ObligationOrigin>,
+    record_admission_order: Cell<Option<u64>>,
+    generated_stage_order: Cell<Option<u64>>,
+    timer: Cell<Option<TimerOriginal>>,
 }
 
 impl WorkCell {
+    fn required_record_pending(&self) -> bool {
+        if !matches!(
+            self.obligation.get(),
+            ObservationObligation::Pending | ObservationObligation::Abandoned
+        ) {
+            return false;
+        }
+        if self.obligation_origin.get() == ObligationOrigin::Generated {
+            return self.generated_stage_order.get().is_some();
+        }
+        let Some(identity) = self.observation.get() else {
+            return false;
+        };
+        match identity.class {
+            ObservationClass::Raw => self.received_progress.get() == ReceivedProgress::Unconfirmed,
+            ObservationClass::RejectedStaleRaw => {
+                self.received_progress.get() != ReceivedProgress::StaleDiagnostic
+            }
+            ObservationClass::Gap => self.received_progress.get() != ReceivedProgress::Gap,
+            ObservationClass::Connected | ObservationClass::Pong => {
+                self.received_progress.get() != ReceivedProgress::Up
+            }
+            ObservationClass::Disconnected => {
+                self.received_progress.get() != ReceivedProgress::Down
+            }
+            ObservationClass::Timer { .. } => match self.timer.get().map(|timer| timer.plan) {
+                Some(TimerPlan::Timeout) => {
+                    self.received_progress.get() != ReceivedProgress::TimerDown
+                }
+                _ => self.received_progress.get() == ReceivedProgress::Unconfirmed,
+            },
+        }
+    }
+
+    fn active_record_order(&self) -> Option<u64> {
+        if self.obligation_origin.get() == ObligationOrigin::Generated {
+            self.generated_stage_order.get()
+        } else {
+            self.record_admission_order.get()
+        }
+    }
+
     fn is_retained(&self) -> bool {
         self.references.get() > 0
             || matches!(
@@ -505,6 +654,7 @@ struct CloseCell {
     identity: Cell<Option<CloseIdentity>>,
     state: Cell<CloseState>,
     work: RefCell<Option<WorkOwner>>,
+    ready: Cell<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -562,6 +712,7 @@ impl CloseOwnerRef {
 pub struct CloseOwnerView {
     pub owner: CloseOwnerRef,
     pub state: CloseState,
+    pub ready: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -598,8 +749,12 @@ impl CloseLease {
         self.work.as_ref().map(WorkOwner::id)
     }
 
-    pub fn into_command(self) -> CommandLease {
-        CommandLease {
+    pub fn into_command(self) -> Result<CommandLease, AuthorityError> {
+        self.owner.authority.close_cell(&self.owner)?;
+        if !self.cell.ready.get() {
+            return Err(AuthorityError::CloseNotReady);
+        }
+        Ok(CommandLease {
             authority: self.owner.authority.clone(),
             stream: self.owner.identity.stream,
             connection: self.owner.identity.connection,
@@ -607,7 +762,8 @@ impl CloseLease {
             kind: CommandKind::Close,
             work: None,
             close: Some(self),
-        }
+            timer_ping: None,
+        })
     }
 }
 
@@ -663,6 +819,7 @@ pub struct CommandLease {
     kind: CommandKind,
     work: Option<WorkOwner>,
     close: Option<CloseLease>,
+    timer_ping: Option<(u64, u64)>,
 }
 
 impl fmt::Debug for CommandLease {
@@ -818,6 +975,19 @@ pub trait SessionRecordWriter {
     }
 }
 
+struct ScheduleUpdate {
+    epoch: ConnectionEpoch,
+    generation: u64,
+    kind: TimerKind,
+    deadline: u64,
+}
+
+#[derive(Default)]
+struct PreparedOwnedEffects {
+    retained_ping: Option<WorkOwner>,
+    schedule: Option<ScheduleUpdate>,
+}
+
 pub struct BoundRecordSink {
     authority: CaptureSessionAuthority,
     writer: Box<dyn SessionRecordWriter>,
@@ -861,6 +1031,65 @@ pub enum PersistBoundaryError {
 }
 
 impl BoundRecordSink {
+    fn validate_frame_binding(
+        &self,
+        frame: &RecordFrame,
+        gate: RecordingGate,
+    ) -> Result<(), AuthorityError> {
+        frame
+            .validate_shape()
+            .map_err(|_| AuthorityError::InvalidBinding)?;
+        let state = self.authority.state.borrow();
+        let prefix = state.prefix.ok_or(AuthorityError::NotRegistered)?;
+        if gate != prefix.recording_gate
+            || frame.segment_no != prefix.segment
+            || frame.record_no != prefix.next_record
+            || !matches!(
+                frame.value,
+                Record::RawInput(_) | Record::Control(_) | Record::Gap(_)
+            )
+        {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        if let Record::RawInput(raw) = &frame.value
+            && raw.bytes.len()
+                > state
+                    .budget
+                    .ok_or(AuthorityError::NotRegistered)?
+                    .max_message_bytes
+        {
+            return Err(AuthorityError::InvalidBudget);
+        }
+        if let Record::Control(record) = &frame.value
+            && let Control::Recording(evidence) = &record.value
+            && evidence.health == RecordingHealth::Failed
+        {
+            let index = match evidence.kind {
+                WatermarkKind::Accepted => 0,
+                WatermarkKind::Appended => 1,
+                WatermarkKind::Written => 2,
+                WatermarkKind::Flushed => 3,
+                WatermarkKind::Durable => 4,
+            };
+            let descriptor = ArchiveFailureObservation {
+                context: record.context,
+                reason: evidence.reason,
+                kind: evidence.kind,
+            };
+            if evidence.through != state.trusted_watermarks[index]
+                || evidence
+                    .through
+                    .is_some_and(|through| through >= frame.record_no)
+                || state
+                    .archive_observation
+                    .is_some_and(|original| original != descriptor)
+                || matches!(state.marker, MarkerState::Confirmed(_))
+            {
+                return Err(AuthorityError::InvalidBinding);
+            }
+        }
+        Ok(())
+    }
     pub fn binding(&self) -> SessionBinding {
         self.authority.binding()
     }
@@ -913,16 +1142,66 @@ impl BoundRecordSink {
                 AuthorityError::AuthorityMismatch,
             ));
         }
-        if owner.cell.sequence.get() != owner.sequence
-            || owner.cell.references.get() == 0
-            || !matches!(
-                owner.cell.kind.get(),
-                WorkKind::InFlightObservation | WorkKind::PendingPlan
-            )
+        if owner.cell.sequence.get() != owner.sequence || owner.cell.references.get() == 0 {
+            return Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidOwner,
+            ));
+        }
+        if matches!(&frame.value, Record::Control(record) if matches!(record.value, Control::Timer { .. }))
+            && owner.cell.timer.get().is_none()
+        {
+            return Err(PersistBoundaryError::Authority(
+                AuthorityError::TimerAuthorityRequired,
+            ));
+        }
+        if !matches!(
+            owner.cell.kind.get(),
+            WorkKind::InFlightObservation | WorkKind::PendingPlan
+        ) {
+            return Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidOwner,
+            ));
+        }
+        self.authority
+            .ensure_storage_overlay_writable()
+            .map_err(PersistBoundaryError::Authority)?;
+        self.validate_frame_binding(frame, gate)
+            .map_err(PersistBoundaryError::Authority)?;
+        if owner.cell.observation.get().is_none()
+            && matches!(&frame.value, Record::Control(record) if matches!(record.value, Control::Transport { .. } | Control::EpochAdvance { .. }))
         {
             return Err(PersistBoundaryError::Authority(
                 AuthorityError::InvalidOwner,
             ));
+        }
+        self.next_owned_progress(frame, owner)
+            .map_err(PersistBoundaryError::Authority)?;
+        if owner.cell.obligation_origin.get() == ObligationOrigin::Generated
+            || owner.cell.observation.get().is_some_and(|identity| {
+                matches!(
+                    identity.class,
+                    ObservationClass::Timer { .. }
+                        | ObservationClass::Connected
+                        | ObservationClass::Pong
+                        | ObservationClass::Disconnected
+                )
+            })
+        {
+            self.authority
+                .validate_record_order(owner)
+                .map_err(PersistBoundaryError::Authority)?;
+        }
+        if let Some(timer) = owner.cell.timer.get()
+            && timer.plan == TimerPlan::Unselected
+            && timer.kind == TimerKind::Timeout
+            && self
+                .authority
+                .timer_active(owner, timer)
+                .map_err(PersistBoundaryError::Authority)?
+        {
+            self.authority
+                .validate_timer_close(owner)
+                .map_err(PersistBoundaryError::Authority)?;
         }
         self.authority
             .synchronize_obligations(turn)
@@ -983,6 +1262,11 @@ impl BoundRecordSink {
             .observation
             .get()
             .ok_or(AuthorityError::InvalidOwner)?;
+        if matches!(identity.class, ObservationClass::Timer { .. })
+            && owner.cell.timer.get().is_none()
+        {
+            return Err(AuthorityError::TimerAuthorityRequired);
+        }
         if owner.cell.obligation.get() != ObservationObligation::Pending {
             return Err(AuthorityError::InvalidOwner);
         }
@@ -1103,11 +1387,14 @@ impl BoundRecordSink {
             }
             (ObservationClass::Timer { .. }, ReceivedProgress::Timer, Record::Control(record))
                 if control_identity
+                    && owner
+                        .cell
+                        .timer
+                        .get()
+                        .is_some_and(|timer| timer.plan == TimerPlan::Timeout)
                     && matches!(record.value, Control::Transport { connection, epoch, value: Transport::Down }
                     if connection == scope.binding.connection && epoch == identity.epoch) =>
             {
-                // The exact optional Down is represented, but admission has no
-                // timer kind/active association proving its effect eligibility.
                 ReceivedProgress::TimerDown
             }
             _ => return Err(AuthorityError::InvalidBinding),
@@ -1231,6 +1518,210 @@ impl BoundRecordSink {
             }
         }
     }
+    fn prepare_owned_effects(
+        &self,
+        turn: &mut SessionTurn,
+        frame: &RecordFrame,
+        owner: &WorkOwner,
+        progress: &Option<OwnedProgress>,
+    ) -> Result<PreparedOwnedEffects, PersistBoundaryError> {
+        let Some(identity) = owner.cell.observation.get() else {
+            return Ok(PreparedOwnedEffects::default());
+        };
+        if let Some(mut timer) = owner.cell.timer.get()
+            && owner.cell.obligation_origin.get() == ObligationOrigin::Received
+            && timer.plan == TimerPlan::Unselected
+        {
+            if !self
+                .authority
+                .timer_active(owner, timer)
+                .map_err(PersistBoundaryError::Authority)?
+            {
+                timer.plan = TimerPlan::Obsolete;
+                owner.cell.timer.set(Some(timer));
+                return Ok(PreparedOwnedEffects::default());
+            }
+            if timer.kind == TimerKind::Timeout {
+                self.authority
+                    .reserve_timer_close(owner)
+                    .map_err(PersistBoundaryError::Authority)?;
+                timer.plan = TimerPlan::Timeout;
+                owner.cell.timer.set(Some(timer));
+                // Both original required records must have representable successors.
+                if frame
+                    .record_no
+                    .checked_next()
+                    .and_then(RecordNo::checked_next)
+                    .is_err()
+                {
+                    return Err(PersistBoundaryError::Authority(
+                        self.authority.stop_counter(turn, "RecordNo"),
+                    ));
+                }
+                return Ok(PreparedOwnedEffects::default());
+            }
+            if owner.cell.references.get() >= MAX_WORK_SHARES {
+                return Err(PersistBoundaryError::Authority(
+                    AuthorityError::WorkShareExhausted,
+                ));
+            }
+            let state = self.authority.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == identity.stream)
+                .ok_or(PersistBoundaryError::Authority(
+                    AuthorityError::InvalidBinding,
+                ))?;
+            let generation = scope.schedule_generation.checked_add(1);
+            let deadline = identity
+                .stamp
+                .monotonic_ns
+                .checked_add(state.heartbeat_policy.pong_timeout_ns());
+            drop(state);
+            let generation = generation.ok_or_else(|| {
+                PersistBoundaryError::Authority(
+                    self.authority.stop_counter(turn, "TimerScheduleGeneration"),
+                )
+            })?;
+            let deadline = deadline
+                .ok_or_else(|| PersistBoundaryError::Authority(self.authority.stop_time(turn)))?;
+            let retained = owner.share().map_err(PersistBoundaryError::Authority)?;
+            timer.plan = TimerPlan::Ping {
+                next_generation: generation,
+                pong_deadline_ns: deadline,
+            };
+            owner.cell.timer.set(Some(timer));
+            return Ok(PreparedOwnedEffects {
+                retained_ping: Some(retained),
+                schedule: Some(ScheduleUpdate {
+                    epoch: identity.epoch,
+                    generation,
+                    kind: TimerKind::Timeout,
+                    deadline,
+                }),
+            });
+        }
+        if matches!(
+            progress,
+            Some(OwnedProgress::Received(ReceivedProgress::Up))
+        ) {
+            let state = self.authority.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == identity.stream)
+                .ok_or(PersistBoundaryError::Authority(
+                    AuthorityError::InvalidBinding,
+                ))?;
+            if !matches!(
+                state.lifecycle,
+                SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+            ) || scope.failure.is_some()
+                || scope.binding.epoch != identity.epoch
+            {
+                return Ok(PreparedOwnedEffects::default());
+            }
+            let generation = scope.schedule_generation.checked_add(1);
+            let deadline = identity
+                .stamp
+                .monotonic_ns
+                .checked_add(state.heartbeat_policy.ping_interval_ns());
+            drop(state);
+            let generation = generation.ok_or_else(|| {
+                PersistBoundaryError::Authority(
+                    self.authority.stop_counter(turn, "TimerScheduleGeneration"),
+                )
+            })?;
+            let deadline = deadline
+                .ok_or_else(|| PersistBoundaryError::Authority(self.authority.stop_time(turn)))?;
+            return Ok(PreparedOwnedEffects {
+                retained_ping: None,
+                schedule: Some(ScheduleUpdate {
+                    epoch: identity.epoch,
+                    generation,
+                    kind: TimerKind::Ping,
+                    deadline,
+                }),
+            });
+        }
+        Ok(PreparedOwnedEffects::default())
+    }
+
+    fn commit_owned_effects(
+        &self,
+        owner: &WorkOwner,
+        progress: &Option<OwnedProgress>,
+        prepared: PreparedOwnedEffects,
+    ) {
+        let Some(identity) = owner.cell.observation.get() else {
+            return;
+        };
+        let mut state = self.authority.state.borrow_mut();
+        let Some(scope) = state
+            .scopes
+            .iter_mut()
+            .find(|scope| scope.binding.stream == identity.stream)
+        else {
+            return;
+        };
+        if let Some(ScheduleUpdate {
+            epoch,
+            generation,
+            kind,
+            deadline,
+        }) = prepared.schedule
+        {
+            scope.revoke_ping();
+            scope.schedule_generation = generation;
+            scope.schedule = Some((kind, epoch, deadline));
+            scope.queued_timer = None;
+            if let Some(retained) = prepared.retained_ping {
+                scope.pending_ping = Some((retained, generation));
+                let mut timer = owner.cell.timer.get().expect("prepared original Ping");
+                timer.ping = PingTransfer::Retained;
+                owner.cell.timer.set(Some(timer));
+            }
+        }
+        if matches!(
+            progress,
+            Some(OwnedProgress::Received(
+                ReceivedProgress::Down | ReceivedProgress::TimerDown
+            ))
+        ) {
+            scope.disable_schedule();
+            if owner
+                .cell
+                .timer
+                .get()
+                .is_some_and(|timer| timer.plan == TimerPlan::Timeout)
+            {
+                scope.frozen_timeout = None;
+                if scope.close.identity.get().is_some_and(|close| {
+                    close.storage == CloseStorage::WorkOwner(owner.id())
+                        && close.epoch == identity.epoch
+                }) {
+                    scope.close.ready.set(true);
+                }
+            }
+        }
+        if matches!(
+            progress,
+            Some(OwnedProgress::Received(ReceivedProgress::Timer))
+        ) && owner
+            .cell
+            .timer
+            .get()
+            .is_some_and(|timer| timer.plan != TimerPlan::Timeout)
+            && scope.queued_timer
+                == Some((
+                    owner.id(),
+                    owner.cell.timer.get().expect("original Timer").generation,
+                ))
+        {
+            scope.queued_timer = None;
+        }
+    }
     fn persist_checked(
         &mut self,
         turn: &mut SessionTurn,
@@ -1238,6 +1729,22 @@ impl BoundRecordSink {
         gate: RecordingGate,
         owner: Option<&WorkOwner>,
     ) -> Result<PersistenceReceipt, PersistBoundaryError> {
+        self.authority
+            .validate_turn(turn)
+            .map_err(PersistBoundaryError::Authority)?;
+        self.authority
+            .ensure_storage_overlay_writable()
+            .map_err(PersistBoundaryError::Authority)?;
+        self.validate_frame_binding(frame, gate)
+            .map_err(PersistBoundaryError::Authority)?;
+        if let Some(owner) = owner {
+            self.next_owned_progress(frame, owner)
+                .map_err(PersistBoundaryError::Authority)?;
+        }
+        self.writer
+            .checked_memory_profile()
+            .and_then(|profile| profile.validate())
+            .map_err(PersistBoundaryError::Authority)?;
         self.authority
             .synchronize_obligations(turn)
             .map_err(PersistBoundaryError::Authority)?;
@@ -1347,6 +1854,24 @@ impl BoundRecordSink {
                 .map_err(PersistBoundaryError::Authority)?,
             None => None,
         };
+        let prepared_effects = match owner {
+            Some(owner) => self.prepare_owned_effects(turn, frame, owner, &owned_progress)?,
+            None => PreparedOwnedEffects::default(),
+        };
+        if let Some(owner) = owner
+            && owner.cell.obligation_origin.get() == ObligationOrigin::Generated
+            && owner.cell.generated_progress.get() == GeneratedProgress::Unconfirmed
+            && frame
+                .record_no
+                .checked_next()
+                .and_then(RecordNo::checked_next)
+                .and_then(RecordNo::checked_next)
+                .is_err()
+        {
+            return Err(PersistBoundaryError::Authority(
+                self.authority.stop_counter(turn, "RecordNo"),
+            ));
+        }
         let next = frame.record_no.checked_next().map_err(|_| {
             let _ = self.authority.storage_stopped(
                 turn,
@@ -1356,13 +1881,36 @@ impl BoundRecordSink {
         })?;
         let confirmed_records = owner
             .map(|owner| {
-                owner.cell.confirmed_records.get().checked_add(1).ok_or(
-                    PersistBoundaryError::Authority(AuthorityError::CounterExhausted(
-                        "WorkReceipt",
-                    )),
-                )
+                owner
+                    .cell
+                    .confirmed_records
+                    .get()
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        PersistBoundaryError::Authority(
+                            self.authority.stop_counter(turn, "WorkReceipt"),
+                        )
+                    })
             })
             .transpose()?;
+        if let Some(owner) = owner
+            && owner.cell.obligation_origin.get() == ObligationOrigin::Generated
+            && owner.cell.generated_stage_order.get().is_none()
+        {
+            let next_order = self
+                .authority
+                .state
+                .borrow()
+                .record_admission_counter
+                .checked_add(1);
+            let next_order = next_order.ok_or_else(|| {
+                PersistBoundaryError::Authority(
+                    self.authority.stop_counter(turn, "RecordAdmissionOrder"),
+                )
+            })?;
+            self.authority.state.borrow_mut().record_admission_counter = next_order;
+            owner.cell.generated_stage_order.set(Some(next_order));
+        }
         let receipt = self.writer.persist(frame, gate).map_err(|error| {
             if let Ok(profile) = self.writer.checked_memory_profile() {
                 let _ = self.authority.update_backend_memory_profile(turn, profile);
@@ -1427,15 +1975,17 @@ impl BoundRecordSink {
         self.authority.confirm_persisted_frame(frame);
         if let (Some(owner), Some(confirmed_records)) = (owner, confirmed_records) {
             owner.cell.confirmed_records.set(confirmed_records);
-            match owned_progress {
+            match &owned_progress {
                 Some(OwnedProgress::Received(progress)) => {
-                    owner.cell.received_progress.set(progress)
+                    owner.cell.received_progress.set(*progress)
                 }
                 Some(OwnedProgress::Generated(progress)) => {
-                    owner.cell.generated_progress.set(progress)
+                    owner.cell.generated_progress.set(*progress);
+                    owner.cell.generated_stage_order.set(None);
                 }
                 None => {}
             }
+            self.commit_owned_effects(owner, &owned_progress, prepared_effects);
         }
         Ok(receipt)
     }
@@ -1452,6 +2002,29 @@ struct ScopeState {
     confirmed_subscription: Option<(SubscriptionEpoch, SubscriptionEpoch, RecordNo)>,
     confirmed_book: Option<(BookEpoch, BookEpoch, RecordNo)>,
     current_tag: Option<EpochTag>,
+    schedule: Option<(TimerKind, ConnectionEpoch, u64)>,
+    schedule_generation: u64,
+    timer_id: u64,
+    queued_timer: Option<(u64, u64)>,
+    frozen_timeout: Option<u64>,
+    pending_ping: Option<(WorkOwner, u64)>,
+}
+
+impl ScopeState {
+    fn revoke_ping(&mut self) {
+        if let Some((owner, _)) = self.pending_ping.take()
+            && let Some(mut timer) = owner.cell.timer.get()
+        {
+            timer.ping = PingTransfer::Revoked;
+            owner.cell.timer.set(Some(timer));
+        }
+    }
+
+    fn disable_schedule(&mut self) {
+        self.schedule = None;
+        self.queued_timer = None;
+        self.revoke_ping();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1473,6 +2046,8 @@ struct AuthorityState {
     marker: MarkerState,
     cut_sequence: Option<u64>,
     sequence: u64,
+    record_admission_counter: u64,
+    heartbeat_policy: HeartbeatPolicy,
     scopes: Vec<ScopeState>,
     work: Vec<Rc<WorkCell>>,
     budget: Option<RetentionBudget>,
@@ -1578,6 +2153,284 @@ impl SupervisorSessionHandle {
     ) -> Result<WorkOwner, AuthorityError> {
         self.authority.reserve_work(turn, kind)
     }
+    pub fn admit_due_timer(
+        &self,
+        turn: &mut SessionTurn,
+        stream: StreamId,
+        observed_stamp: ReceiveStamp,
+    ) -> Result<TimerAdmission, AuthorityError> {
+        self.authority.validate_turn(turn)?;
+        {
+            let state = self.authority.state.borrow();
+            if !state.registered {
+                return Err(AuthorityError::NotRegistered);
+            }
+            if !state
+                .scopes
+                .iter()
+                .any(|scope| scope.binding.stream == stream)
+            {
+                return Err(AuthorityError::InvalidBinding);
+            }
+        }
+        self.authority.synchronize_obligations(turn)?;
+        self.authority.ensure_admission_open(turn)?;
+        let mut state = self.authority.state.borrow_mut();
+        let index = state
+            .scopes
+            .iter()
+            .position(|scope| scope.binding.stream == stream)
+            .expect("validated scope");
+        let scope = &state.scopes[index];
+        if scope.failure.is_some() {
+            return Err(AuthorityError::CommandRevoked);
+        }
+        let Some((kind, epoch, deadline_ns)) = scope.schedule else {
+            return Ok(TimerAdmission::NotDue);
+        };
+        if observed_stamp.monotonic_ns < deadline_ns {
+            return Ok(TimerAdmission::NotDue);
+        }
+        if let Some((original_work_id, generation)) = scope.queued_timer
+            && generation == scope.schedule_generation
+        {
+            return Ok(TimerAdmission::AlreadyQueued { original_work_id });
+        }
+        let cell = state
+            .work
+            .iter()
+            .find(|cell| !cell.is_retained())
+            .cloned()
+            .ok_or(AuthorityError::WorkExhausted)?;
+        let generation = scope.schedule_generation;
+        let checked = (
+            state.sequence.checked_add(1),
+            state.record_admission_counter.checked_add(1),
+            scope.timer_id.checked_add(1),
+        );
+        let (sequence, order, timer_id) = match checked {
+            (Some(sequence), Some(order), Some(timer_id)) => (sequence, order, timer_id),
+            _ => {
+                let counter = if checked.0.is_none() {
+                    "AdmissionOrder"
+                } else if checked.1.is_none() {
+                    "RecordAdmissionOrder"
+                } else {
+                    "TimerId"
+                };
+                drop(state);
+                return Err(self.authority.stop_counter(turn, counter));
+            }
+        };
+        let identity = ObservationIdentity {
+            stream,
+            epoch,
+            stamp: observed_stamp,
+            class: ObservationClass::Timer {
+                timer_id,
+                deadline_ns,
+            },
+            tag: None,
+            attempts: None,
+            loss_count: None,
+        };
+        state.sequence = sequence;
+        state.record_admission_counter = order;
+        state.scopes[index].timer_id = timer_id;
+        state.scopes[index].queued_timer = Some((sequence, generation));
+        cell.sequence.set(sequence);
+        cell.close_scope.set(None);
+        cell.references.set(1);
+        cell.kind.set(WorkKind::QueuedObservation);
+        cell.cut_side.set(if state.failed {
+            CutSide::PostCut
+        } else {
+            CutSide::BeforeFailure
+        });
+        cell.obligation.set(ObservationObligation::Pending);
+        cell.obligation_origin.set(ObligationOrigin::Received);
+        cell.observation.set(Some(identity));
+        cell.confirmed_records.set(0);
+        cell.received_progress.set(ReceivedProgress::Unconfirmed);
+        cell.generated_plan.set(None);
+        cell.generated_progress.set(GeneratedProgress::Unconfirmed);
+        cell.abandoned_kind.set(None);
+        cell.record_admission_order.set(Some(order));
+        cell.generated_stage_order.set(None);
+        cell.timer.set(Some(TimerOriginal {
+            kind,
+            generation,
+            plan: TimerPlan::Unselected,
+            ping: PingTransfer::None,
+        }));
+        Ok(TimerAdmission::Admitted(AdmittedTimer {
+            owner: WorkOwner {
+                authority: Rc::downgrade(&self.authority.state),
+                cell,
+                sequence,
+            },
+        }))
+    }
+
+    pub fn timer_progress(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+    ) -> Result<TimerProgressView, AuthorityError> {
+        self.authority.validate_turn(turn)?;
+        self.validate_work(owner)?;
+        let timer = owner
+            .cell
+            .timer
+            .get()
+            .ok_or(AuthorityError::TimerAuthorityRequired)?;
+        let progress = owner.cell.received_progress.get();
+        let timer_confirmed = matches!(
+            progress,
+            ReceivedProgress::Timer | ReceivedProgress::TimerDown
+        );
+        Ok(match timer.plan {
+            TimerPlan::Unselected => TimerProgressView::Unselected,
+            TimerPlan::Ping { .. } => TimerProgressView::TimerOnlyPing {
+                timer_confirmed,
+                ping_taken: timer.ping == PingTransfer::Taken,
+            },
+            TimerPlan::Obsolete => TimerProgressView::TimerOnlyObsolete { timer_confirmed },
+            TimerPlan::Timeout => {
+                let state = self.authority.state.borrow();
+                let identity = owner
+                    .cell
+                    .observation
+                    .get()
+                    .ok_or(AuthorityError::InvalidOwner)?;
+                let scope = state
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.binding.stream == identity.stream)
+                    .ok_or(AuthorityError::InvalidBinding)?;
+                let close = scope
+                    .close
+                    .identity
+                    .get()
+                    .filter(|close| {
+                        close.storage == CloseStorage::WorkOwner(owner.id())
+                            && close.epoch == identity.epoch
+                    })
+                    .ok_or(AuthorityError::InvalidOwner)?;
+                TimerProgressView::TimerThenDown {
+                    timer_confirmed,
+                    down_confirmed: progress == ReceivedProgress::TimerDown,
+                    close: CloseOwnerView {
+                        owner: CloseOwnerRef {
+                            authority: self.authority.clone(),
+                            identity: close,
+                        },
+                        state: scope.close.state.get(),
+                        ready: scope.close.ready.get(),
+                    },
+                }
+            }
+        })
+    }
+
+    pub fn take_timer_ping(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+    ) -> Result<CommandLease, AuthorityError> {
+        self.authority.validate_turn(turn)?;
+        self.validate_work(owner)?;
+        let mut timer = owner
+            .cell
+            .timer
+            .get()
+            .ok_or(AuthorityError::TimerAuthorityRequired)?;
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        if timer.ping == PingTransfer::Taken {
+            return Err(AuthorityError::PingAlreadyTaken);
+        }
+        {
+            let state = self.authority.state.borrow();
+            if state.storage_stopped.is_some()
+                || !matches!(
+                    state.lifecycle,
+                    SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+                )
+                || state
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.binding.stream == identity.stream)
+                    .is_none_or(|scope| scope.failure.is_some())
+            {
+                return Err(AuthorityError::CommandRevoked);
+            }
+        }
+        if timer.ping == PingTransfer::Revoked
+            || timer.plan == TimerPlan::Obsolete
+            || timer.kind != TimerKind::Ping
+        {
+            return Err(AuthorityError::CommandRevoked);
+        }
+        if timer.ping != PingTransfer::Retained
+            || owner.cell.received_progress.get() != ReceivedProgress::Timer
+        {
+            return Err(AuthorityError::PingNotReady);
+        }
+        let TimerPlan::Ping {
+            next_generation, ..
+        } = timer.plan
+        else {
+            return Err(AuthorityError::PingNotReady);
+        };
+        let mut state = self.authority.state.borrow_mut();
+        let permitted = state.storage_stopped.is_none()
+            && matches!(
+                state.lifecycle,
+                SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+            );
+        let scope = state
+            .scopes
+            .iter_mut()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if !permitted
+            || scope.failure.is_some()
+            || scope.binding.epoch != identity.epoch
+            || scope.schedule_generation != next_generation
+            || !matches!(scope.schedule, Some((TimerKind::Timeout, epoch, _)) if epoch == identity.epoch)
+            || scope.frozen_timeout.is_some()
+        {
+            return Err(AuthorityError::CommandRevoked);
+        }
+        let Some((retained, generation)) = scope.pending_ping.as_ref() else {
+            return Err(AuthorityError::CommandRevoked);
+        };
+        if retained.id() != owner.id() || *generation != next_generation {
+            return Err(AuthorityError::InvalidOwner);
+        }
+        let (retained, _) = scope
+            .pending_ping
+            .take()
+            .expect("validated retained entitlement");
+        timer.ping = PingTransfer::Taken;
+        owner.cell.timer.set(Some(timer));
+        Ok(CommandLease {
+            authority: self.authority.clone(),
+            stream: identity.stream,
+            connection: scope.binding.connection,
+            epoch: identity.epoch,
+            kind: CommandKind::SendText {
+                text: "ping".to_owned(),
+            },
+            work: Some(retained),
+            close: None,
+            timer_ping: Some((owner.id(), next_generation)),
+        })
+    }
     /// Only this non-clonable registered supervisor handle can admit and
     /// complete its jobs; generic authority kind changes cannot settle them.
     pub fn admit_observation(
@@ -1588,9 +2441,24 @@ impl SupervisorSessionHandle {
     ) -> Result<(), AuthorityError> {
         self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
+        if matches!(identity.class, ObservationClass::Timer { .. }) {
+            return Err(AuthorityError::TimerAuthorityRequired);
+        }
+        {
+            let state = self.authority.state.borrow();
+            if owner.cell.obligation.get() != ObservationObligation::None
+                || owner.cell.kind.get() != WorkKind::QueuedObservation
+                || !state
+                    .scopes
+                    .iter()
+                    .any(|scope| scope.binding.stream == identity.stream)
+            {
+                return Err(AuthorityError::InvalidOwner);
+            }
+        }
         self.authority.synchronize_obligations(turn)?;
         self.authority.ensure_admission_open(turn)?;
-        let state = self.authority.state.borrow();
+        let mut state = self.authority.state.borrow_mut();
         if owner.cell.obligation.get() != ObservationObligation::None
             || owner.cell.kind.get() != WorkKind::QueuedObservation
             || !state
@@ -1600,6 +2468,13 @@ impl SupervisorSessionHandle {
         {
             return Err(AuthorityError::InvalidOwner);
         }
+        let Some(order) = state.record_admission_counter.checked_add(1) else {
+            drop(state);
+            self.authority.received_order_exhausted(turn, identity)?;
+            return Err(AuthorityError::CounterExhausted("RecordAdmissionOrder"));
+        };
+        state.record_admission_counter = order;
+        owner.cell.record_admission_order.set(Some(order));
         owner.cell.observation.set(Some(identity));
         owner.cell.confirmed_records.set(0);
         owner.cell.generated_plan.set(None);
@@ -1667,9 +2542,8 @@ impl SupervisorSessionHandle {
         Ok(())
     }
 
-    fn retain_received_down_close(
+    fn validate_received_down_close(
         &self,
-        turn: &mut SessionTurn,
         owner: &WorkOwner,
         identity: ObservationIdentity,
     ) -> Result<(), AuthorityError> {
@@ -1680,6 +2554,12 @@ impl SupervisorSessionHandle {
                 .iter()
                 .find(|scope| scope.binding.stream == identity.stream)
                 .ok_or(AuthorityError::InvalidBinding)?;
+            let installs_close = scope.close.identity.get().is_none_or(|close| {
+                close.epoch != identity.epoch && scope.close.state.get() == CloseState::Settled
+            });
+            if installs_close && owner.cell.references.get() >= MAX_WORK_SHARES {
+                return Err(AuthorityError::WorkShareExhausted);
+            }
             if let Some(close) = scope.close.identity.get()
                 && close.epoch == identity.epoch
             {
@@ -1726,6 +2606,16 @@ impl SupervisorSessionHandle {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn retain_received_down_close(
+        &self,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+        identity: ObservationIdentity,
+    ) -> Result<(), AuthorityError> {
+        self.validate_received_down_close(owner, identity)?;
         // This existing serialized R2 transition installs the first Close on
         // the original W or reuses a valid prior/terminal owner. All fallible
         // checks precede its mutation; a pending observation stays retryable.
@@ -1751,16 +2641,31 @@ impl SupervisorSessionHandle {
         if !self.authority.same_authority(&sink.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
-        self.authority.synchronize_obligations(turn)?;
         if owner.cell.obligation.get() != ObservationObligation::Pending {
             return Err(AuthorityError::InvalidOwner);
         }
-        self.authority.ensure_storage_writable()?;
+        self.authority.ensure_storage_overlay_writable()?;
         let identity = owner
             .cell
             .observation
             .get()
             .ok_or(AuthorityError::InvalidOwner)?;
+        if matches!(identity.class, ObservationClass::Timer { .. })
+            && owner.cell.timer.get().is_none()
+        {
+            return Err(AuthorityError::TimerAuthorityRequired);
+        }
+        if owner.cell.obligation_origin.get() == ObligationOrigin::Received
+            && matches!(
+                identity.class,
+                ObservationClass::Timer { .. }
+                    | ObservationClass::Connected
+                    | ObservationClass::Pong
+                    | ObservationClass::Disconnected
+            )
+        {
+            self.authority.validate_record_order(owner)?;
+        }
         let generated = owner.cell.obligation_origin.get() == ObligationOrigin::Generated;
         let authenticated = if generated {
             owner.cell.generated_progress.get() == GeneratedProgress::Book
@@ -1782,12 +2687,28 @@ impl SupervisorSessionHandle {
                 ObservationClass::Disconnected => {
                     owner.cell.received_progress.get() == ReceivedProgress::Down
                 }
-                // Admission does not distinguish Ping from active/inactive
-                // Timeout, so requiring/authorizing Down still needs an ADR.
-                ObservationClass::Timer { .. } => matches!(
-                    owner.cell.received_progress.get(),
-                    ReceivedProgress::Timer | ReceivedProgress::TimerDown
-                ),
+                ObservationClass::Timer { .. } => match owner
+                    .cell
+                    .timer
+                    .get()
+                    .expect("validated original Timer")
+                    .plan
+                {
+                    TimerPlan::Ping { .. } | TimerPlan::Obsolete => {
+                        owner.cell.received_progress.get() == ReceivedProgress::Timer
+                    }
+                    TimerPlan::Timeout => {
+                        owner.cell.received_progress.get() == ReceivedProgress::TimerDown
+                            && self.authority.state.borrow().scopes.iter().any(|scope| {
+                                scope.close.identity.get().is_some_and(|close| {
+                                    close.storage == CloseStorage::WorkOwner(owner.id())
+                                        && close.stream == identity.stream
+                                        && close.epoch == identity.epoch
+                                })
+                            })
+                    }
+                    TimerPlan::Unselected => false,
+                },
             }
         };
         if !authenticated
@@ -1809,6 +2730,11 @@ impl SupervisorSessionHandle {
             return Err(AuthorityError::NotQuiescent);
         }
         if !generated && identity.class == ObservationClass::Disconnected {
+            self.validate_received_down_close(owner, identity)?;
+        }
+        self.authority.synchronize_obligations(turn)?;
+        self.authority.ensure_storage_writable()?;
+        if !generated && identity.class == ObservationClass::Disconnected {
             // Reuse the existing R2 owner if this epoch already has a Close.
             // A first ordinary Down transfers retention into the same W; a
             // rejected installation leaves the admitted obligation Pending.
@@ -1825,12 +2751,23 @@ impl SupervisorSessionHandle {
     ) -> Result<(), AuthorityError> {
         self.authority.validate_turn(turn)?;
         self.validate_work(owner)?;
-        self.authority.synchronize_obligations(turn)?;
         if owner.cell.obligation.get() != ObservationObligation::Settled
             || owner.cell.kind.get() != WorkKind::PendingPlan
             || owner.cell.obligation_origin.get() != ObligationOrigin::Received
         {
             return Err(AuthorityError::InvalidOwner);
+        }
+        {
+            let state = self.authority.state.borrow();
+            if !matches!(
+                state.lifecycle,
+                SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+            ) {
+                return Err(AuthorityError::SessionClosing);
+            }
+            if state.storage_stopped.is_some() {
+                return Err(AuthorityError::StorageStopped);
+            }
         }
         let identity = owner
             .cell
@@ -1887,6 +2824,8 @@ impl SupervisorSessionHandle {
                 .map_err(|_| AuthorityError::CounterExhausted("BookEpoch"))?,
         };
         drop(state);
+        self.authority.synchronize_obligations(turn)?;
+        self.authority.ensure_storage_writable()?;
         owner.cell.obligation.set(ObservationObligation::Pending);
         owner
             .cell
@@ -1894,14 +2833,11 @@ impl SupervisorSessionHandle {
             .set(ObligationOrigin::Generated);
         owner.cell.confirmed_records.set(0);
         owner.cell.generated_plan.set(Some(plan));
+        owner.cell.generated_stage_order.set(None);
         owner
             .cell
             .generated_progress
             .set(GeneratedProgress::Unconfirmed);
-        owner
-            .cell
-            .received_progress
-            .set(ReceivedProgress::Unconfirmed);
         Ok(())
     }
 
@@ -2020,6 +2956,9 @@ impl fmt::Debug for QuiescenceProof {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnsettledSummary {
+    /// Received record jobs still requiring their settlement boundary. Close
+    /// retention and generated-plan reporting remain separate obligations.
+    pub record_jobs: usize,
     pub queued: usize,
     pub in_flight: usize,
     pub pending_plans: usize,
@@ -2359,6 +3298,243 @@ fn publication_relation(
 }
 
 impl CaptureSessionAuthority {
+    fn stop_counter(&self, turn: &mut SessionTurn, name: &'static str) -> AuthorityError {
+        let _ = self.storage_stopped(turn, PersistError::typed(PersistErrorKind::Counter, name));
+        AuthorityError::CounterExhausted(name)
+    }
+
+    fn stop_time(&self, turn: &mut SessionTurn) -> AuthorityError {
+        let _ = self.storage_stopped(
+            turn,
+            PersistError::typed(PersistErrorKind::Counter, "Timer deadline overflow"),
+        );
+        AuthorityError::TimeOverflow
+    }
+
+    fn received_order_exhausted(
+        &self,
+        turn: &mut SessionTurn,
+        identity: ObservationIdentity,
+    ) -> Result<(), AuthorityError> {
+        let state = self.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        let Some(mut observed_tag) = identity.tag.or(scope.current_tag) else {
+            // An epoch-only pure harness has no accepted full tag to invent.
+            // Preserve the original typed terminal boundary rather than guessing.
+            drop(state);
+            let _ = self.stop_counter(turn, "RecordAdmissionOrder");
+            return Ok(());
+        };
+        if identity.tag.is_none() {
+            observed_tag.connection = identity.epoch;
+        }
+        let failure = TerminalFailure {
+            stream: identity.stream,
+            connection: scope.binding.connection,
+            observed_tag,
+            current_epoch: scope.binding.epoch,
+            context: state.prefix.ok_or(AuthorityError::NotRegistered)?.context,
+            stamp: identity.stamp,
+            input_class: match identity.class {
+                ObservationClass::Connected => InputClass::Connected,
+                ObservationClass::Pong => InputClass::Pong,
+                ObservationClass::Disconnected => InputClass::Disconnected,
+                _ => InputClass::Raw,
+            },
+            attempt: identity
+                .attempts
+                .map_or(AttemptIdentity::NotRaw, |(_, last)| {
+                    AttemptIdentity::Candidate(last)
+                }),
+            cause: FailureCause::CounterExhausted("RecordAdmissionOrder"),
+        };
+        drop(state);
+        self.terminate(turn, failure)?;
+        Ok(())
+    }
+
+    fn validate_record_order(&self, owner: &WorkOwner) -> Result<(), AuthorityError> {
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let state = self.state.borrow();
+        let target = owner.cell.active_record_order();
+        let earlier = state
+            .work
+            .iter()
+            .filter(|cell| {
+                cell.sequence.get() != owner.id()
+                    && cell.required_record_pending()
+                    && cell
+                        .observation
+                        .get()
+                        .is_some_and(|original| original.stream == identity.stream)
+            })
+            .filter_map(|cell| {
+                cell.active_record_order()
+                    .filter(|order| target.is_none_or(|target| *order < target))
+                    .map(|order| (order, cell.sequence.get()))
+            })
+            .min_by_key(|(order, _)| *order);
+        if let Some((_, earlier_work_id)) = earlier {
+            return Err(AuthorityError::TimerOrderBlocked { earlier_work_id });
+        }
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if let Some(work_id) = scope.frozen_timeout
+            && work_id != owner.id()
+        {
+            return Err(AuthorityError::TimerPlanInProgress { work_id });
+        }
+        Ok(())
+    }
+
+    fn validate_scope_progress(&self, stream: StreamId) -> Result<(), AuthorityError> {
+        let state = self.state.borrow();
+        if let Some((_, earlier_work_id)) = state
+            .work
+            .iter()
+            .filter(|cell| {
+                cell.required_record_pending()
+                    && cell
+                        .observation
+                        .get()
+                        .is_some_and(|original| original.stream == stream)
+            })
+            .filter_map(|cell| {
+                cell.active_record_order()
+                    .map(|order| (order, cell.sequence.get()))
+            })
+            .min_by_key(|(order, _)| *order)
+        {
+            return Err(AuthorityError::TimerOrderBlocked { earlier_work_id });
+        }
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if let Some(work_id) = scope.frozen_timeout {
+            return Err(AuthorityError::TimerPlanInProgress { work_id });
+        }
+        Ok(())
+    }
+
+    fn timer_active(
+        &self,
+        owner: &WorkOwner,
+        timer: TimerOriginal,
+    ) -> Result<bool, AuthorityError> {
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let ObservationClass::Timer { deadline_ns, .. } = identity.class else {
+            return Err(AuthorityError::TimerAuthorityRequired);
+        };
+        let state = self.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        Ok(state.storage_stopped.is_none()
+            && matches!(
+                state.lifecycle,
+                SessionLifecycle::Open | SessionLifecycle::FailedDiagnostic
+            )
+            && scope.failure.is_none()
+            && scope.binding.epoch == identity.epoch
+            && scope.confirmed_down != Some(identity.epoch)
+            && scope.schedule_generation == timer.generation
+            && scope.schedule == Some((timer.kind, identity.epoch, deadline_ns))
+            && scope.queued_timer == Some((owner.id(), timer.generation)))
+    }
+
+    fn validate_timer_close(&self, owner: &WorkOwner) -> Result<(), AuthorityError> {
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let state = self.state.borrow();
+        let scope = state
+            .scopes
+            .iter()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        let installs_close = match scope.close.identity.get() {
+            None => true,
+            Some(close)
+                if close.stream == identity.stream
+                    && close.connection == scope.binding.connection
+                    && close.epoch == identity.epoch
+                    && close.storage == CloseStorage::WorkOwner(owner.id()) =>
+            {
+                false
+            }
+            Some(close)
+                if close.stream == identity.stream
+                    && close.connection == scope.binding.connection
+                    && close.epoch < identity.epoch
+                    && scope.close.state.get() == CloseState::Settled =>
+            {
+                true
+            }
+            Some(_) => return Err(AuthorityError::TimerCloseConflict),
+        };
+        if installs_close && owner.cell.references.get() >= MAX_WORK_SHARES {
+            return Err(AuthorityError::WorkShareExhausted);
+        }
+        Ok(())
+    }
+
+    fn reserve_timer_close(&self, owner: &WorkOwner) -> Result<(), AuthorityError> {
+        self.validate_timer_close(owner)?;
+        let identity = owner
+            .cell
+            .observation
+            .get()
+            .ok_or(AuthorityError::InvalidOwner)?;
+        let mut state = self.state.borrow_mut();
+        let scope = state
+            .scopes
+            .iter_mut()
+            .find(|scope| scope.binding.stream == identity.stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        if scope
+            .close
+            .identity
+            .get()
+            .is_none_or(|close| close.epoch < identity.epoch)
+        {
+            let retained = owner.share()?;
+            scope.close.identity.set(Some(CloseIdentity {
+                stream: identity.stream,
+                connection: scope.binding.connection,
+                epoch: identity.epoch,
+                storage: CloseStorage::WorkOwner(owner.id()),
+            }));
+            scope.close.state.set(CloseState::Pending);
+            scope.close.ready.set(false);
+            *scope.close.work.borrow_mut() = Some(retained);
+            owner.cell.close_scope.set(Some(identity.stream));
+        }
+        scope.frozen_timeout = Some(owner.id());
+        scope.revoke_ping();
+        Ok(())
+    }
+
     /// Construct a standalone pure authority with one mutation turn. Backend
     /// integration must supply a truthful accepted bootstrap prefix and trusted
     /// `SessionRecordWriter`; canonical filesystem capture uses the recording
@@ -2376,6 +3552,8 @@ impl CaptureSessionAuthority {
                 marker: MarkerState::NotRequired,
                 cut_sequence: None,
                 sequence: 0,
+                record_admission_counter: 0,
+                heartbeat_policy: HeartbeatPolicy::SupervisorV2,
                 scopes: Vec::new(),
                 work: Vec::new(),
                 budget: None,
@@ -2440,6 +3618,12 @@ impl CaptureSessionAuthority {
         if state.storage_stopped.is_none() {
             state.storage_stopped = Some(error);
         }
+        for scope in &mut state.scopes {
+            scope.disable_schedule();
+            if scope.frozen_timeout.is_some() {
+                scope.close.ready.set(true);
+            }
+        }
         if matches!(
             state.marker,
             MarkerState::Pending | MarkerState::NotRequired
@@ -2463,6 +3647,7 @@ impl CaptureSessionAuthority {
                     storage: CloseStorage::ReservedTerminal,
                 }));
                 scope.close.state.set(CloseState::Pending);
+                scope.close.ready.set(true);
             }
         }
         Ok(())
@@ -2567,7 +3752,31 @@ impl CaptureSessionAuthority {
         expected: ConnectionEpoch,
         next: ConnectionEpoch,
     ) -> Result<(), AuthorityError> {
-        self.synchronize_obligations(turn)?;
+        self.validate_turn(turn)?;
+        {
+            let state = self.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == stream)
+                .ok_or(AuthorityError::InvalidBinding)?;
+            if scope.binding.epoch != expected {
+                return Err(AuthorityError::CommandRevoked);
+            }
+            if state.storage_stopped.is_some() {
+                return Err(AuthorityError::StorageStopped);
+            }
+            if matches!(
+                state.lifecycle,
+                SessionLifecycle::DiagnosticClosed | SessionLifecycle::Finalized
+            ) {
+                return Err(AuthorityError::SessionClosed);
+            }
+            if let Some(work_id) = scope.frozen_timeout {
+                return Err(AuthorityError::TimerPlanInProgress { work_id });
+            }
+        }
+        self.validate_scope_progress(stream)?;
         if next.get()
             != expected
                 .get()
@@ -2617,13 +3826,24 @@ impl CaptureSessionAuthority {
         } else {
             None
         };
-        scope.current_tag = Some(EpochTag {
+        let next_tag = EpochTag {
             connection: next,
             subscription: subscription_next,
             book: book_next,
             ..tag
-        });
+        };
+        drop(state);
+        self.synchronize_obligations(turn)?;
+        self.ensure_storage_writable()?;
+        let mut state = self.state.borrow_mut();
+        let scope = state
+            .scopes
+            .iter_mut()
+            .find(|scope| scope.binding.stream == stream)
+            .ok_or(AuthorityError::InvalidBinding)?;
+        scope.current_tag = Some(next_tag);
         scope.binding.epoch = next;
+        scope.disable_schedule();
         Ok(())
     }
     pub fn scope_disposition(&self, stream: StreamId) -> Result<ScopeDisposition, AuthorityError> {
@@ -2647,8 +3867,12 @@ impl CaptureSessionAuthority {
         scopes: &[ScopeBinding],
         budget: RetentionBudget,
         prefix: PrefixBinding,
+        heartbeat_policy: HeartbeatPolicy,
     ) -> Result<SupervisorSessionHandle, AuthorityError> {
         self.validate_turn(turn)?;
+        if self.state.borrow().registered {
+            return Err(AuthorityError::AlreadyRegistered);
+        }
         let n = scopes.len();
         if n == 0
             || n > MAX_CAPTURE_SCOPES
@@ -2691,10 +3915,17 @@ impl CaptureSessionAuthority {
                 confirmed_subscription: None,
                 confirmed_book: None,
                 current_tag: None,
+                schedule: None,
+                schedule_generation: 0,
+                timer_id: 0,
+                queued_timer: None,
+                frozen_timeout: None,
+                pending_ping: None,
                 close: Rc::new(CloseCell {
                     identity: Cell::new(None),
                     state: Cell::new(CloseState::Pending),
                     work: RefCell::new(None),
+                    ready: Cell::new(true),
                 }),
             })
             .collect();
@@ -2714,10 +3945,14 @@ impl CaptureSessionAuthority {
                     generated_progress: Cell::new(GeneratedProgress::Unconfirmed),
                     abandoned_kind: Cell::new(None),
                     obligation_origin: Cell::new(ObligationOrigin::Received),
+                    record_admission_order: Cell::new(None),
+                    generated_stage_order: Cell::new(None),
+                    timer: Cell::new(None),
                 })
             })
             .collect();
         s.prefix = Some(prefix);
+        s.heartbeat_policy = heartbeat_policy;
         s.budget = Some(budget);
         s.registered = true;
         if let Some(through) = prefix
@@ -2935,6 +4170,20 @@ impl CaptureSessionAuthority {
             }
         }
     }
+    fn ensure_storage_overlay_writable(&self) -> Result<(), AuthorityError> {
+        let s = self.state.borrow();
+        if s.storage_stopped.is_some() {
+            return Err(AuthorityError::StorageStopped);
+        }
+        if matches!(
+            s.lifecycle,
+            SessionLifecycle::DiagnosticClosed | SessionLifecycle::Finalized
+        ) {
+            return Err(AuthorityError::SessionClosed);
+        }
+        Ok(())
+    }
+
     pub fn ensure_storage_writable(&self) -> Result<(), AuthorityError> {
         let s = self.state.borrow();
         if s.storage_stopped.is_some()
@@ -3010,6 +4259,9 @@ impl CaptureSessionAuthority {
         cell.generated_progress.set(GeneratedProgress::Unconfirmed);
         cell.abandoned_kind.set(None);
         cell.obligation_origin.set(ObligationOrigin::Received);
+        cell.record_admission_order.set(None);
+        cell.generated_stage_order.set(None);
+        cell.timer.set(None);
         cell.kind.set(kind);
         cell.cut_side.set(if s.failed {
             CutSide::PostCut
@@ -3091,6 +4343,10 @@ impl CaptureSessionAuthority {
                     s.first_failure = Some(failure);
                 }
                 s.scopes[index].failure = Some(failure);
+                s.scopes[index].disable_schedule();
+                if s.scopes[index].frozen_timeout.is_some() {
+                    s.scopes[index].close.ready.set(true);
+                }
                 Self::latch(&mut s);
             }
         }
@@ -3134,6 +4390,12 @@ impl CaptureSessionAuthority {
         if s.storage_stopped.is_none() {
             s.storage_stopped = Some(error);
         }
+        for scope in &mut s.scopes {
+            scope.disable_schedule();
+            if scope.frozen_timeout.is_some() {
+                scope.close.ready.set(true);
+            }
+        }
         Self::latch(&mut s);
         if matches!(s.marker, MarkerState::Pending | MarkerState::NotRequired) {
             s.marker = MarkerState::Unconfirmed(error);
@@ -3176,7 +4438,7 @@ impl CaptureSessionAuthority {
         epoch: ConnectionEpoch,
         work: Option<&WorkOwner>,
     ) -> Result<CloseOwnerRef, AuthorityError> {
-        self.synchronize_obligations(turn)?;
+        self.validate_turn(turn)?;
         if let Some(w) = work
             && !Weak::ptr_eq(&Rc::downgrade(&self.state), &w.authority)
         {
@@ -3194,7 +4456,33 @@ impl CaptureSessionAuthority {
             {
                 return Err(AuthorityError::InvalidOwner);
             }
+            if let Some(timer) = work.cell.timer.get() {
+                if timer.plan != TimerPlan::Timeout {
+                    return Err(AuthorityError::TimerAuthorityRequired);
+                }
+                let state = self.state.borrow();
+                let scope = state
+                    .scopes
+                    .iter()
+                    .find(|scope| scope.binding.stream == stream)
+                    .ok_or(AuthorityError::InvalidOwner)?;
+                let identity = scope
+                    .close
+                    .identity
+                    .get()
+                    .filter(|close| {
+                        close.stream == stream
+                            && close.epoch == epoch
+                            && close.storage == CloseStorage::WorkOwner(work.id())
+                    })
+                    .ok_or(AuthorityError::TimerCloseConflict)?;
+                return Ok(CloseOwnerRef {
+                    authority: self.clone(),
+                    identity,
+                });
+            }
         }
+        self.synchronize_obligations(turn)?;
         let s = self.state.borrow();
         let scope = s
             .scopes
@@ -3243,6 +4531,7 @@ impl CaptureSessionAuthority {
         *scope.close.work.borrow_mut() = retained;
         scope.close.identity.set(Some(identity));
         scope.close.state.set(CloseState::Pending);
+        scope.close.ready.set(true);
         Ok(CloseOwnerRef {
             authority: self.clone(),
             identity,
@@ -3277,6 +4566,7 @@ impl CaptureSessionAuthority {
                                 identity,
                             },
                             state: scope.close.state.get(),
+                            ready: scope.close.ready.get(),
                         })
                     })
             }),
@@ -3311,6 +4601,12 @@ impl CaptureSessionAuthority {
             Ok(cell) => cell,
             Err(e) => return CloseLeaseReport::Rejected(e),
         };
+        if cell.state.get() == CloseState::Settled {
+            return CloseLeaseReport::AlreadySettled;
+        }
+        if !cell.ready.get() {
+            return CloseLeaseReport::Rejected(AuthorityError::CloseNotReady);
+        }
         match cell.state.get() {
             CloseState::Pending => {
                 let work = match cell
@@ -3374,6 +4670,12 @@ impl CaptureSessionAuthority {
         if !Weak::ptr_eq(&Rc::downgrade(&self.state), &work.authority) {
             return Err(AuthorityError::AuthorityMismatch);
         }
+        if work.cell.sequence.get() != work.sequence || work.cell.references.get() == 0 {
+            return Err(AuthorityError::OwnerRetired);
+        }
+        if matches!(&kind, CommandKind::SendText { text } if text == "ping") {
+            return Err(AuthorityError::TimerAuthorityRequired);
+        }
         if kind == CommandKind::Close {
             return Err(AuthorityError::InvalidOwner);
         }
@@ -3391,11 +4693,6 @@ impl CaptureSessionAuthority {
             return Err(AuthorityError::CommandRevoked);
         }
         match &kind {
-            CommandKind::SendText { text } if text == "ping" => {
-                if scope.confirmed_timer.is_none() {
-                    return Err(AuthorityError::InvalidBinding);
-                }
-            }
             CommandKind::SendText { .. } => {
                 if scope.confirmed_up != Some(epoch) {
                     return Err(AuthorityError::InvalidBinding);
@@ -3421,6 +4718,7 @@ impl CaptureSessionAuthority {
             kind,
             work: Some(work.share()?),
             close: None,
+            timer_ping: None,
         })
     }
 
@@ -3438,6 +4736,28 @@ impl CaptureSessionAuthority {
                 reason: AuthorityError::AuthorityMismatch,
                 command,
             };
+        }
+        if let Some(close) = command.close.as_ref() {
+            if let Err(reason) = self.close_cell(&close.owner) {
+                return DispatchReport::Denied { reason, command };
+            }
+            if !close.cell.ready.get() {
+                return DispatchReport::Denied {
+                    reason: AuthorityError::CloseNotReady,
+                    command,
+                };
+            }
+        }
+        if let Some((work_id, generation)) = command.timer_ping {
+            let state = self.state.borrow();
+            let scope = state
+                .scopes
+                .iter()
+                .find(|scope| scope.binding.stream == command.stream);
+            if command.work.as_ref().is_none_or(|work| work.id() != work_id || work.cell.sequence.get() != work_id || work.cell.timer.get().is_none_or(|timer| !matches!(timer.plan, TimerPlan::Ping { next_generation, .. } if next_generation == generation)))
+                || scope.is_none_or(|scope| scope.schedule_generation != generation || !matches!(scope.schedule, Some((TimerKind::Timeout, epoch, _)) if epoch == command.epoch) || scope.frozen_timeout.is_some()) {
+                return DispatchReport::Revoked(AuthorityError::CommandRevoked);
+            }
         }
         if let Err(reason) = self.synchronize_obligations(turn) {
             return DispatchReport::Denied { reason, command };
@@ -3567,6 +4887,7 @@ impl CaptureSessionAuthority {
     pub fn unsettled_summary(&self) -> UnsettledSummary {
         let s = self.state.borrow();
         let mut r = UnsettledSummary {
+            record_jobs: s.work.iter().filter(|cell| cell.blocks_marker()).count(),
             queued: 0,
             in_flight: 0,
             pending_plans: 0,
@@ -3619,6 +4940,9 @@ impl CaptureSessionAuthority {
             return Err(AuthorityError::NotRegistered);
         }
         s.lifecycle = SessionLifecycle::Closing;
+        for scope in &mut s.scopes {
+            scope.disable_schedule();
+        }
         s.ticket = TicketState::Active;
         Ok(CloseTicket {
             authority: self.clone(),
@@ -3715,6 +5039,9 @@ impl CaptureSessionAuthority {
         match s.lifecycle {
             SessionLifecycle::FailedDiagnostic => {
                 s.lifecycle = SessionLifecycle::DiagnosticClosing;
+                for scope in &mut s.scopes {
+                    scope.disable_schedule();
+                }
                 Ok(s.lifecycle)
             }
             SessionLifecycle::DiagnosticClosing | SessionLifecycle::DiagnosticClosed => {
@@ -4106,6 +5433,7 @@ mod conformance {
                     segment: SegmentNo::new(0),
                     next_record: RecordNo::new(next).unwrap(),
                 },
+                HeartbeatPolicy::SupervisorV2,
             )
             .unwrap();
         (authority, turn, handle)
@@ -4163,6 +5491,147 @@ mod conformance {
                 }),
             }),
         }
+    }
+
+    fn admit_control(
+        handle: &SupervisorSessionHandle,
+        turn: &mut SessionTurn,
+        owner: &WorkOwner,
+        class: ObservationClass,
+        stamp: ReceiveStamp,
+    ) {
+        handle
+            .admit_observation(
+                turn,
+                owner,
+                ObservationIdentity {
+                    stream: StreamId::new(1).unwrap(),
+                    epoch: ConnectionEpoch::new(1).unwrap(),
+                    tag: None,
+                    class,
+                    stamp,
+                    attempts: None,
+                    loss_count: None,
+                },
+            )
+            .unwrap();
+        owner.set_kind(turn, WorkKind::InFlightObservation).unwrap();
+    }
+
+    fn observation_frame(
+        authority: &CaptureSessionAuthority,
+        identity: ObservationIdentity,
+        value: Control,
+    ) -> RecordFrame {
+        let prefix = authority.prefix().unwrap();
+        RecordFrame {
+            record_no: prefix.next_record,
+            segment_no: prefix.segment,
+            value: Record::Control(ControlRecord {
+                context: WireContext {
+                    unix_ns: LocalUnixNs::new(identity.stamp.unix_ns),
+                    monotonic_ns: MonotonicNs::new(identity.stamp.monotonic_ns),
+                    context: InputContext::Active(prefix.context),
+                },
+                value,
+            }),
+        }
+    }
+
+    fn timer_frame(authority: &CaptureSessionAuthority, owner: &WorkOwner) -> RecordFrame {
+        let identity = owner.cell.observation.get().unwrap();
+        let ObservationClass::Timer {
+            timer_id,
+            deadline_ns,
+        } = identity.class
+        else {
+            panic!("original Timer");
+        };
+        observation_frame(
+            authority,
+            identity,
+            Control::Timer {
+                stream: identity.stream,
+                timer_id,
+                deadline_ns,
+            },
+        )
+    }
+
+    fn timer_fixture() -> (
+        CaptureSessionAuthority,
+        SessionTurn,
+        SupervisorSessionHandle,
+        BoundRecordSink,
+        Rc<Cell<usize>>,
+    ) {
+        let (authority, mut turn, handle) = session(10);
+        authority
+            .set_accepted_stream_bindings(&mut turn, &[accepted_binding()])
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let mut sink = authority
+            .bind_sink(
+                &mut turn,
+                Box::new(Writer {
+                    calls: calls.clone(),
+                    mode: 0,
+                }),
+            )
+            .unwrap();
+        let up = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        admit_control(
+            &handle,
+            &mut turn,
+            &up,
+            ObservationClass::Connected,
+            ReceiveStamp {
+                unix_ns: 1,
+                monotonic_ns: 2,
+            },
+        );
+        let frame = observation_frame(
+            &authority,
+            up.cell.observation.get().unwrap(),
+            Control::Transport {
+                connection: ConnectionId::new(1).unwrap(),
+                epoch: ConnectionEpoch::new(1).unwrap(),
+                value: Transport::Up,
+            },
+        );
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &up)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &up, None)
+            .unwrap();
+        drop(up);
+        (authority, turn, handle, sink, calls)
+    }
+
+    fn due_timer(
+        authority: &CaptureSessionAuthority,
+        turn: &mut SessionTurn,
+        handle: &SupervisorSessionHandle,
+    ) -> WorkOwner {
+        let deadline = authority.state.borrow().scopes[0].schedule.unwrap().2;
+        let TimerAdmission::Admitted(timer) = handle
+            .admit_due_timer(
+                turn,
+                StreamId::new(1).unwrap(),
+                ReceiveStamp {
+                    unix_ns: 3,
+                    monotonic_ns: deadline,
+                },
+            )
+            .unwrap()
+        else {
+            panic!("original due Timer");
+        };
+        let owner = timer.into_owner();
+        owner.set_kind(turn, WorkKind::InFlightObservation).unwrap();
+        owner
     }
 
     #[test]
@@ -4262,6 +5731,1147 @@ mod conformance {
             AuthorityError::CounterExhausted("AdmissionOrder")
         );
         assert_eq!(authority.ownership_report().work_used, 0);
+    }
+
+    #[test]
+    fn timer_generated_admission_max_preserves_frontiers_without_received_failure() {
+        for counter in ["AdmissionOrder", "RecordAdmissionOrder", "TimerId"] {
+            let (authority, mut turn, handle, _sink, calls) = timer_fixture();
+            {
+                let mut state = authority.state.borrow_mut();
+                match counter {
+                    "AdmissionOrder" => state.sequence = u64::MAX,
+                    "RecordAdmissionOrder" => state.record_admission_counter = u64::MAX,
+                    _ => state.scopes[0].timer_id = u64::MAX,
+                }
+            }
+            let frontiers = {
+                let state = authority.state.borrow();
+                (
+                    state.sequence,
+                    state.record_admission_counter,
+                    state.scopes[0].timer_id,
+                    state.scopes[0].schedule_generation,
+                )
+            };
+            assert_eq!(
+                handle
+                    .admit_due_timer(
+                        &mut turn,
+                        StreamId::new(1).unwrap(),
+                        ReceiveStamp {
+                            unix_ns: 8,
+                            monotonic_ns: 30_000_000_002
+                        }
+                    )
+                    .unwrap_err(),
+                AuthorityError::CounterExhausted(counter)
+            );
+            let state = authority.state.borrow();
+            assert_eq!(
+                (
+                    state.sequence,
+                    state.record_admission_counter,
+                    state.scopes[0].timer_id,
+                    state.scopes[0].schedule_generation
+                ),
+                frontiers
+            );
+            assert!(state.scopes[0].queued_timer.is_none());
+            assert!(state.scopes[0].schedule.is_none());
+            assert!(state.storage_stopped.is_some());
+            assert!(state.first_failure.is_none());
+            assert!(state.scopes[0].failure.is_none());
+            assert_eq!(calls.get(), 1);
+            drop(state);
+            assert_eq!(authority.ownership_report().work_used, 0);
+        }
+    }
+
+    #[test]
+    fn received_record_order_max_retains_exact_terminal_original_without_fake_order() {
+        let (authority, mut turn, handle, _sink, calls) = timer_fixture();
+        let work = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        authority.state.borrow_mut().record_admission_counter = u64::MAX;
+        let identity = ObservationIdentity {
+            stream: StreamId::new(1).unwrap(),
+            epoch: ConnectionEpoch::new(1).unwrap(),
+            class: ObservationClass::Raw,
+            tag: Some(accepted_binding().tag),
+            stamp: ReceiveStamp {
+                unix_ns: 71,
+                monotonic_ns: 72,
+            },
+            attempts: Some((
+                CaptureAttemptNo::new(9).unwrap(),
+                CaptureAttemptNo::new(9).unwrap(),
+            )),
+            loss_count: None,
+        };
+        assert_eq!(
+            handle.admit_observation(&mut turn, &work, identity),
+            Err(AuthorityError::CounterExhausted("RecordAdmissionOrder"))
+        );
+        assert_eq!(work.cell.observation.get(), None);
+        assert_eq!(work.cell.record_admission_order.get(), None);
+        assert_eq!(work.cell.obligation.get(), ObservationObligation::None);
+        let failure = authority.terminal_failure(identity.stream).unwrap();
+        assert_eq!(failure.stamp, identity.stamp);
+        assert_eq!(failure.observed_tag, identity.tag.unwrap());
+        assert_eq!(
+            failure.attempt,
+            AttemptIdentity::Candidate(CaptureAttemptNo::new(9).unwrap())
+        );
+        assert_eq!(
+            failure.cause,
+            FailureCause::CounterExhausted("RecordAdmissionOrder")
+        );
+        assert_eq!(failure.input_class, InputClass::Raw);
+        assert_eq!(authority.state.borrow().record_admission_counter, u64::MAX);
+        assert!(authority.status().storage_stopped.is_none());
+        assert_eq!(
+            authority.state.borrow().scopes[0]
+                .close
+                .identity
+                .get()
+                .unwrap()
+                .storage,
+            CloseStorage::ReservedTerminal
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn received_control_order_max_with_accepted_registry_keeps_exact_terminal_provenance() {
+        for (class, input_class) in [
+            (ObservationClass::Connected, InputClass::Connected),
+            (ObservationClass::Pong, InputClass::Pong),
+            (ObservationClass::Disconnected, InputClass::Disconnected),
+        ] {
+            let (authority, mut turn, handle, _sink, calls) = timer_fixture();
+            let work = handle
+                .reserve_work(&mut turn, WorkKind::QueuedObservation)
+                .unwrap();
+            authority.state.borrow_mut().record_admission_counter = u64::MAX;
+            let identity = ObservationIdentity {
+                stream: StreamId::new(1).unwrap(),
+                epoch: ConnectionEpoch::new(1).unwrap(),
+                class,
+                tag: None,
+                stamp: ReceiveStamp {
+                    unix_ns: 81,
+                    monotonic_ns: 82,
+                },
+                attempts: None,
+                loss_count: None,
+            };
+            let prefix = authority.prefix().unwrap();
+            let watermark = authority.trusted_watermark(WatermarkKind::Durable);
+            assert_eq!(
+                handle.admit_observation(&mut turn, &work, identity),
+                Err(AuthorityError::CounterExhausted("RecordAdmissionOrder"))
+            );
+            assert_eq!(work.cell.observation.get(), None);
+            assert_eq!(work.cell.record_admission_order.get(), None);
+            assert_eq!(work.cell.obligation.get(), ObservationObligation::None);
+            let failure = authority.terminal_failure(identity.stream).unwrap();
+            assert_eq!(failure.input_class, input_class);
+            assert_eq!(failure.stamp, identity.stamp);
+            assert_eq!(failure.observed_tag, accepted_binding().tag);
+            assert_eq!(failure.current_epoch, identity.epoch);
+            assert_eq!(failure.context, prefix.context);
+            assert_eq!(failure.attempt, AttemptIdentity::NotRaw);
+            assert_eq!(
+                failure.cause,
+                FailureCause::CounterExhausted("RecordAdmissionOrder")
+            );
+            assert_eq!(
+                authority.state.borrow().scopes[0]
+                    .close
+                    .identity
+                    .get()
+                    .unwrap()
+                    .storage,
+                CloseStorage::ReservedTerminal
+            );
+            assert_eq!(authority.state.borrow().record_admission_counter, u64::MAX);
+            assert_eq!(authority.prefix().unwrap(), prefix);
+            assert_eq!(
+                authority.trusted_watermark(WatermarkKind::Durable),
+                watermark
+            );
+            assert_eq!(authority.status().storage_stopped, None);
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn timer_capacity_rejection_and_duplicate_due_preserve_scheduler_frontiers() {
+        let (authority, mut turn, handle, _sink, calls) = timer_fixture();
+        let blockers: Vec<_> = (0..authority.ownership_report().work_limit)
+            .map(|_| {
+                handle
+                    .reserve_work(&mut turn, WorkKind::PendingPlan)
+                    .unwrap()
+            })
+            .collect();
+        let before = authority.ownership_report();
+        let frontiers = {
+            let state = authority.state.borrow();
+            (
+                state.sequence,
+                state.record_admission_counter,
+                state.scopes[0].timer_id,
+                state.scopes[0].schedule_generation,
+                state.scopes[0].schedule,
+            )
+        };
+        let stamp = ReceiveStamp {
+            unix_ns: 80,
+            monotonic_ns: 30_000_000_002,
+        };
+        assert_eq!(
+            handle
+                .admit_due_timer(&mut turn, StreamId::new(1).unwrap(), stamp)
+                .unwrap_err(),
+            AuthorityError::WorkExhausted
+        );
+        assert_eq!(authority.ownership_report(), before);
+        assert_eq!(
+            {
+                let state = authority.state.borrow();
+                (
+                    state.sequence,
+                    state.record_admission_counter,
+                    state.scopes[0].timer_id,
+                    state.scopes[0].schedule_generation,
+                    state.scopes[0].schedule,
+                )
+            },
+            frontiers
+        );
+        assert_eq!(authority.status().storage_stopped, None);
+        drop(blockers);
+        let TimerAdmission::Admitted(timer) = handle
+            .admit_due_timer(&mut turn, StreamId::new(1).unwrap(), stamp)
+            .unwrap()
+        else {
+            panic!("retry due original");
+        };
+        let after = authority.ownership_report();
+        assert!(
+            matches!(handle.admit_due_timer(&mut turn, timer.identity().stream, stamp).unwrap(), TimerAdmission::AlreadyQueued { original_work_id } if original_work_id == timer.owner().id())
+        );
+        assert_eq!(authority.ownership_report(), after);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn timer_ping_schedule_and_receipt_max_stop_before_backend_without_entitlement() {
+        for counter in ["TimerScheduleGeneration", "WorkReceipt", "RecordNo"] {
+            let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+            if counter == "TimerScheduleGeneration" {
+                authority.state.borrow_mut().scopes[0].schedule_generation = u64::MAX;
+            }
+            let owner = due_timer(&authority, &mut turn, &handle);
+            if counter == "WorkReceipt" {
+                owner.cell.confirmed_records.set(usize::MAX);
+            }
+            if counter == "RecordNo" {
+                authority
+                    .state
+                    .borrow_mut()
+                    .prefix
+                    .as_mut()
+                    .unwrap()
+                    .next_record = RecordNo::new(u64::MAX).unwrap();
+            }
+            let before = authority.prefix().unwrap();
+            let frame = timer_frame(&authority, &owner);
+            assert_eq!(
+                sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner),
+                Err(PersistBoundaryError::Authority(
+                    AuthorityError::CounterExhausted(counter)
+                ))
+            );
+            assert_eq!(authority.prefix().unwrap(), before);
+            assert_eq!(calls.get(), 1);
+            assert_eq!(
+                owner.cell.received_progress.get(),
+                ReceivedProgress::Unconfirmed
+            );
+            assert_eq!(owner.cell.obligation.get(), ObservationObligation::Pending);
+            assert!(authority.status().storage_stopped.is_some());
+            assert_eq!(
+                handle.take_timer_ping(&mut turn, &owner).unwrap_err(),
+                AuthorityError::CommandRevoked
+            );
+            assert!(authority.state.borrow().scopes[0].pending_ping.is_none());
+            assert!(authority.state.borrow().scopes[0].schedule.is_none());
+        }
+    }
+
+    #[test]
+    fn timer_timeout_record_max_retains_same_ready_close_without_any_receipt() {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let ping = due_timer(&authority, &mut turn, &handle);
+        let frame = timer_frame(&authority, &ping);
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &ping)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &ping, None)
+            .unwrap();
+        let lease = handle.take_timer_ping(&mut turn, &ping).unwrap();
+        drop(lease);
+        drop(ping);
+        let timeout = due_timer(&authority, &mut turn, &handle);
+        authority
+            .state
+            .borrow_mut()
+            .prefix
+            .as_mut()
+            .unwrap()
+            .next_record = RecordNo::new(u64::MAX - 1).unwrap();
+        let before = authority.prefix().unwrap();
+        let frame = timer_frame(&authority, &timeout);
+        assert_eq!(
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &timeout),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::CounterExhausted("RecordNo")
+            ))
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(authority.prefix().unwrap(), before);
+        assert_eq!(
+            timeout.cell.received_progress.get(),
+            ReceivedProgress::Unconfirmed
+        );
+        let TimerProgressView::TimerThenDown {
+            timer_confirmed,
+            down_confirmed,
+            close,
+        } = handle.timer_progress(&mut turn, &timeout).unwrap()
+        else {
+            panic!("retained timeout plan");
+        };
+        assert!(!timer_confirmed && !down_confirmed && close.ready);
+        assert_eq!(close.owner.storage(), CloseStorage::WorkOwner(timeout.id()));
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &timeout, None),
+            Err(AuthorityError::StorageStopped)
+        );
+        let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close.owner)
+        else {
+            panic!("same terminal close ready");
+        };
+        assert!(matches!(
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(
+            timeout.cell.obligation.get(),
+            ObservationObligation::Pending
+        );
+    }
+
+    #[test]
+    fn timer_alias_preflight_rejection_is_retryable_without_plan_or_schedule_mutation() {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let owner = due_timer(&authority, &mut turn, &handle);
+        let aliases: Vec<_> = (1..MAX_WORK_SHARES)
+            .map(|_| owner.share().unwrap())
+            .collect();
+        let original_schedule = authority.state.borrow().scopes[0].schedule;
+        let before = authority.ownership_report();
+        let frame = timer_frame(&authority, &owner);
+        assert_eq!(
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::WorkShareExhausted
+            ))
+        );
+        assert_eq!(authority.ownership_report(), before);
+        assert_eq!(
+            authority.state.borrow().scopes[0].schedule,
+            original_schedule
+        );
+        assert_eq!(
+            handle.timer_progress(&mut turn, &owner).unwrap(),
+            TimerProgressView::Unselected
+        );
+        assert_eq!(authority.status().storage_stopped, None);
+        assert_eq!(calls.get(), 1);
+        drop(aliases);
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner)
+            .unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(matches!(
+            handle.timer_progress(&mut turn, &owner).unwrap(),
+            TimerProgressView::TimerOnlyPing {
+                timer_confirmed: true,
+                ping_taken: false
+            }
+        ));
+        assert!(handle.take_timer_ping(&mut turn, &owner).is_ok());
+    }
+
+    #[test]
+    fn timer_pure_bad_frame_and_incomplete_completion_preserve_unrelated_abandonment() {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let timer = due_timer(&authority, &mut turn, &handle);
+        let later = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(
+                &mut turn,
+                &later,
+                ObservationIdentity {
+                    stream: StreamId::new(1).unwrap(),
+                    epoch: ConnectionEpoch::new(1).unwrap(),
+                    tag: Some(accepted_binding().tag),
+                    class: ObservationClass::Raw,
+                    stamp: ReceiveStamp {
+                        unix_ns: 7,
+                        monotonic_ns: 8,
+                    },
+                    attempts: Some((
+                        CaptureAttemptNo::new(1).unwrap(),
+                        CaptureAttemptNo::new(1).unwrap(),
+                    )),
+                    loss_count: None,
+                },
+            )
+            .unwrap();
+        drop(later);
+        let before = authority.status();
+        let ledger = authority.ownership_report();
+        let mut wrong = timer_frame(&authority, &timer);
+        if let Record::Control(record) = &mut wrong.value {
+            record.context.unix_ns = LocalUnixNs::new(999);
+        }
+        assert_eq!(
+            sink.persist_owned(&mut turn, &wrong, RecordingGate::Durable, &timer),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::InvalidBinding
+            ))
+        );
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, &timer, None),
+            Err(AuthorityError::NotQuiescent)
+        );
+        assert_eq!(authority.status(), before);
+        assert_eq!(authority.ownership_report(), ledger);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            handle.timer_progress(&mut turn, &timer).unwrap(),
+            TimerProgressView::Unselected
+        );
+        authority.synchronize_obligations(&mut turn).unwrap();
+        assert!(authority.status().storage_stopped.is_some());
+        assert_eq!(authority.state.borrow().scopes[0].schedule, None);
+    }
+
+    fn retained_timeout_plan(
+        authority: &CaptureSessionAuthority,
+        turn: &mut SessionTurn,
+        handle: &SupervisorSessionHandle,
+        sink: &mut BoundRecordSink,
+    ) -> WorkOwner {
+        let (timeout, ping) = retained_timeout_plan_with_ping(authority, turn, handle, sink);
+        drop(ping);
+        timeout
+    }
+
+    fn retained_timeout_plan_with_ping(
+        authority: &CaptureSessionAuthority,
+        turn: &mut SessionTurn,
+        handle: &SupervisorSessionHandle,
+        sink: &mut BoundRecordSink,
+    ) -> (WorkOwner, CommandLease) {
+        let ping = due_timer(authority, turn, handle);
+        sink.persist_owned(
+            turn,
+            &timer_frame(authority, &ping),
+            RecordingGate::Durable,
+            &ping,
+        )
+        .unwrap();
+        handle
+            .complete_observation(turn, sink, &ping, None)
+            .unwrap();
+        let ping_lease = handle.take_timer_ping(turn, &ping).unwrap();
+        drop(ping);
+        let timeout = due_timer(authority, turn, handle);
+        sink.persist_owned(
+            turn,
+            &timer_frame(authority, &timeout),
+            RecordingGate::Durable,
+            &timeout,
+        )
+        .unwrap();
+        let identity = timeout.cell.observation.get().unwrap();
+        sink.persist_owned(
+            turn,
+            &observation_frame(
+                authority,
+                identity,
+                Control::Transport {
+                    connection: ConnectionId::new(1).unwrap(),
+                    epoch: identity.epoch,
+                    value: Transport::Down,
+                },
+            ),
+            RecordingGate::Durable,
+            &timeout,
+        )
+        .unwrap();
+        handle
+            .complete_observation(turn, sink, &timeout, None)
+            .unwrap();
+        timeout.set_kind(turn, WorkKind::PendingPlan).unwrap();
+        handle.retain_generated_plan(turn, &timeout).unwrap();
+        (timeout, ping_lease)
+    }
+
+    #[test]
+    fn generated_timer_h1_order_max_activates_only_after_original_close_and_keeps_provenance() {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let owner = retained_timeout_plan(&authority, &mut turn, &handle, &mut sink);
+        let identity = owner.cell.observation.get().unwrap();
+        let plan = owner.cell.generated_plan.get().unwrap();
+        let frame = observation_frame(
+            &authority,
+            identity,
+            Control::EpochAdvance {
+                change: EpochChange::Connection {
+                    owner: plan.connection,
+                    expected: plan.original.connection,
+                    next: plan.next_connection,
+                },
+                reason: Reason::Reconnect,
+            },
+        );
+        authority.state.borrow_mut().record_admission_counter = u64::MAX;
+        let before = authority.ownership_report();
+        assert_eq!(
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::NotQuiescent
+            ))
+        );
+        assert_eq!(authority.ownership_report(), before);
+        assert_eq!(owner.cell.generated_stage_order.get(), None);
+        assert_eq!(authority.status().storage_stopped, None);
+        let close = authority
+            .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&owner))
+            .unwrap();
+        let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close) else {
+            panic!("original Close");
+        };
+        assert!(matches!(
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::CounterExhausted("RecordAdmissionOrder")
+            ))
+        );
+        assert_eq!(calls.get(), 4);
+        assert_eq!(
+            owner.cell.generated_progress.get(),
+            GeneratedProgress::Unconfirmed
+        );
+        assert_eq!(owner.cell.generated_stage_order.get(), None);
+        assert_eq!(
+            owner.cell.received_progress.get(),
+            ReceivedProgress::TimerDown
+        );
+        assert!(authority.status().storage_stopped.is_some());
+        assert!(authority.status().first_failure.is_none());
+        assert_eq!(
+            handle.cancel_generated_plan(&mut turn, &owner),
+            Err(AuthorityError::StorageStopped)
+        );
+    }
+
+    #[test]
+    fn timer_frontiers_survive_three_fresh_h1_receipts_and_actual_epoch_replacement() {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let (owner, old_ping) =
+            retained_timeout_plan_with_ping(&authority, &mut turn, &handle, &mut sink);
+        let identity = owner.cell.observation.get().unwrap();
+        let plan = owner.cell.generated_plan.get().unwrap();
+        let close = authority
+            .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&owner))
+            .unwrap();
+        let retired_close = close.clone();
+        let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close) else {
+            panic!("original Close");
+        };
+        assert!(matches!(
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        let generation = authority.state.borrow().scopes[0].schedule_generation;
+        let original_timer_id = authority.state.borrow().scopes[0].timer_id;
+        let first_order = authority.state.borrow().record_admission_counter;
+        for (index, change) in [
+            EpochChange::Connection {
+                owner: plan.connection,
+                expected: plan.original.connection,
+                next: plan.next_connection,
+            },
+            EpochChange::Subscription {
+                owner: identity.stream,
+                expected: plan.original.subscription,
+                next: plan.next_subscription,
+            },
+            EpochChange::Book {
+                owner: plan.book,
+                expected: plan.original.book.unwrap(),
+                next: plan.next_book,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let frame = observation_frame(
+                &authority,
+                identity,
+                Control::EpochAdvance {
+                    change,
+                    reason: Reason::Reconnect,
+                },
+            );
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner)
+                .unwrap();
+            assert_eq!(
+                authority.state.borrow().record_admission_counter,
+                first_order + index as u64 + 1
+            );
+            assert_eq!(owner.cell.generated_stage_order.get(), None);
+        }
+        handle
+            .complete_observation(&mut turn, &sink, &owner, None)
+            .unwrap();
+        authority
+            .advance_epoch(
+                &mut turn,
+                identity.stream,
+                identity.epoch,
+                plan.next_connection,
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 7);
+        assert_eq!(
+            authority.state.borrow().scopes[0].schedule_generation,
+            generation
+        );
+        assert_eq!(
+            authority.state.borrow().scopes[0].timer_id,
+            original_timer_id
+        );
+        assert!(authority.state.borrow().scopes[0].schedule.is_none());
+        assert_eq!(
+            owner.cell.received_progress.get(),
+            ReceivedProgress::TimerDown
+        );
+        let before_old_ping = authority.ownership_report();
+        let prefix_before_old_ping = authority.prefix().unwrap();
+        let status_before_old_ping = authority.status();
+        let mut ping_callbacks = 0;
+        assert!(matches!(
+            authority.dispatch(&mut turn, old_ping, |_| {
+                ping_callbacks += 1;
+                Ok::<_, ()>(())
+            }),
+            DispatchReport::Revoked(AuthorityError::CommandRevoked)
+        ));
+        assert_eq!(ping_callbacks, 0);
+        assert_eq!(
+            authority.ownership_report().work_used,
+            before_old_ping.work_used - 1
+        );
+        assert_eq!(
+            authority.ownership_report().work_references,
+            before_old_ping.work_references - 1
+        );
+        assert_eq!(authority.prefix().unwrap(), prefix_before_old_ping);
+        assert_eq!(authority.status(), status_before_old_ping);
+        assert_eq!(calls.get(), 7);
+        drop(owner);
+        let up = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        let new_identity = ObservationIdentity {
+            epoch: plan.next_connection,
+            class: ObservationClass::Connected,
+            stamp: ReceiveStamp {
+                unix_ns: 90,
+                monotonic_ns: 91,
+            },
+            tag: None,
+            attempts: None,
+            loss_count: None,
+            stream: identity.stream,
+        };
+        handle
+            .admit_observation(&mut turn, &up, new_identity)
+            .unwrap();
+        up.set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let frame = observation_frame(
+            &authority,
+            new_identity,
+            Control::Transport {
+                connection: plan.connection,
+                epoch: plan.next_connection,
+                value: Transport::Up,
+            },
+        );
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &up)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &up, None)
+            .unwrap();
+        drop(up);
+        let TimerAdmission::Admitted(next) = handle
+            .admit_due_timer(
+                &mut turn,
+                identity.stream,
+                ReceiveStamp {
+                    unix_ns: 92,
+                    monotonic_ns: 30_000_000_091,
+                },
+            )
+            .unwrap()
+        else {
+            panic!("next epoch original");
+        };
+        assert!(
+            matches!(next.identity().class, ObservationClass::Timer { timer_id, .. } if timer_id == original_timer_id + 1)
+        );
+        assert_eq!(
+            authority.state.borrow().scopes[0].schedule_generation,
+            generation + 1
+        );
+        assert_eq!(next.identity().epoch, plan.next_connection);
+        assert_eq!(
+            authority.state.borrow().record_admission_counter,
+            first_order + 5
+        );
+        let ping = next.into_owner();
+        ping.set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        sink.persist_owned(
+            &mut turn,
+            &timer_frame(&authority, &ping),
+            RecordingGate::Durable,
+            &ping,
+        )
+        .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &ping, None)
+            .unwrap();
+        let current_ping = handle.take_timer_ping(&mut turn, &ping).unwrap();
+        let mut current_ping_callbacks = 0;
+        assert!(matches!(
+            authority.dispatch(&mut turn, current_ping, |command| {
+                assert_eq!(command.epoch, plan.next_connection);
+                assert!(matches!(command.kind, CommandKind::SendText { text } if text == "ping"));
+                current_ping_callbacks += 1;
+                Ok::<_, ()>(())
+            }),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(current_ping_callbacks, 1);
+        drop(ping);
+        let second = due_timer(&authority, &mut turn, &handle);
+        sink.persist_owned(
+            &mut turn,
+            &timer_frame(&authority, &second),
+            RecordingGate::Durable,
+            &second,
+        )
+        .unwrap();
+        let TimerProgressView::TimerThenDown {
+            close,
+            down_confirmed,
+            ..
+        } = handle.timer_progress(&mut turn, &second).unwrap()
+        else {
+            panic!("second active Timeout");
+        };
+        assert!(!close.ready && !down_confirmed);
+        assert_eq!(close.owner.storage(), CloseStorage::WorkOwner(second.id()));
+        assert_eq!(close.owner.epoch(), plan.next_connection);
+        assert_ne!(close.owner, retired_close);
+        assert!(matches!(
+            authority.reclaim_close(&mut turn, retired_close),
+            CloseLeaseReport::Rejected(AuthorityError::OwnerRetired)
+        ));
+        let second_identity = second.cell.observation.get().unwrap();
+        let down = observation_frame(
+            &authority,
+            second_identity,
+            Control::Transport {
+                connection: plan.connection,
+                epoch: plan.next_connection,
+                value: Transport::Down,
+            },
+        );
+        sink.persist_owned(&mut turn, &down, RecordingGate::Durable, &second)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &second, None)
+            .unwrap();
+        second.set_kind(&mut turn, WorkKind::PendingPlan).unwrap();
+        handle.retain_generated_plan(&mut turn, &second).unwrap();
+        let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close.owner)
+        else {
+            panic!("second original ready Close");
+        };
+        assert!(matches!(
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        let second_plan = second.cell.generated_plan.get().unwrap();
+        for change in [
+            EpochChange::Connection {
+                owner: second_plan.connection,
+                expected: second_plan.original.connection,
+                next: second_plan.next_connection,
+            },
+            EpochChange::Subscription {
+                owner: second_identity.stream,
+                expected: second_plan.original.subscription,
+                next: second_plan.next_subscription,
+            },
+            EpochChange::Book {
+                owner: second_plan.book,
+                expected: second_plan.original.book.unwrap(),
+                next: second_plan.next_book,
+            },
+        ] {
+            let frame = observation_frame(
+                &authority,
+                second_identity,
+                Control::EpochAdvance {
+                    change,
+                    reason: Reason::Reconnect,
+                },
+            );
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &second)
+                .unwrap();
+        }
+        handle
+            .complete_observation(&mut turn, &sink, &second, None)
+            .unwrap();
+        authority
+            .advance_epoch(
+                &mut turn,
+                second_identity.stream,
+                second_identity.epoch,
+                second_plan.next_connection,
+            )
+            .unwrap();
+        assert_eq!(second_plan.next_connection.get(), 3);
+        assert_eq!(calls.get(), 14);
+        assert_eq!(
+            authority.state.borrow().scopes[0].timer_id,
+            original_timer_id + 2
+        );
+        assert_eq!(
+            authority.state.borrow().scopes[0].schedule_generation,
+            generation + 2
+        );
+        assert_eq!(
+            authority.state.borrow().record_admission_counter,
+            first_order + 9
+        );
+        assert_eq!(authority.unsettled_summary().record_jobs, 0);
+        assert_eq!(authority.status().storage_stopped, None);
+    }
+
+    #[test]
+    fn timer_closing_and_scoped_revocation_at_max_confirm_only_original_obsolete_timer() {
+        for closing in [false, true] {
+            let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+            {
+                let mut state = authority.state.borrow_mut();
+                state.scopes[0].schedule_generation = u64::MAX;
+                state.scopes[0].timer_id = u64::MAX - 1;
+            }
+            let owner = due_timer(&authority, &mut turn, &handle);
+            assert!(matches!(
+                owner.cell.observation.get().unwrap().class,
+                ObservationClass::Timer {
+                    timer_id: u64::MAX,
+                    ..
+                }
+            ));
+            assert_eq!(owner.cell.timer.get().unwrap().generation, u64::MAX);
+            if closing {
+                let _ticket = authority.begin_finalization(&mut turn).unwrap();
+            } else {
+                let failure = TerminalFailure {
+                    stream: StreamId::new(1).unwrap(),
+                    connection: ConnectionId::new(1).unwrap(),
+                    observed_tag: accepted_binding().tag,
+                    current_epoch: ConnectionEpoch::new(1).unwrap(),
+                    context: handle.prefix().context,
+                    stamp: ReceiveStamp {
+                        unix_ns: 101,
+                        monotonic_ns: 102,
+                    },
+                    input_class: InputClass::Raw,
+                    attempt: AttemptIdentity::Candidate(CaptureAttemptNo::new(1).unwrap()),
+                    cause: FailureCause::QueueOverflow,
+                };
+                drop(handle.terminate(&mut turn, failure).unwrap().close);
+            }
+            let frame = timer_frame(&authority, &owner);
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner)
+                .unwrap();
+            handle
+                .complete_observation(&mut turn, &sink, &owner, None)
+                .unwrap();
+            assert!(matches!(
+                handle.timer_progress(&mut turn, &owner).unwrap(),
+                TimerProgressView::TimerOnlyObsolete {
+                    timer_confirmed: true
+                }
+            ));
+            assert_eq!(
+                handle.take_timer_ping(&mut turn, &owner).unwrap_err(),
+                AuthorityError::CommandRevoked
+            );
+            assert_eq!(
+                authority.state.borrow().scopes[0].schedule_generation,
+                u64::MAX
+            );
+            assert_eq!(authority.state.borrow().scopes[0].timer_id, u64::MAX);
+            assert_eq!(authority.status().storage_stopped, None);
+            assert_eq!(calls.get(), 2);
+            assert_eq!(owner.cell.received_progress.get(), ReceivedProgress::Timer);
+            assert_eq!(owner.cell.obligation.get(), ObservationObligation::Settled);
+        }
+    }
+
+    #[test]
+    fn timer_backend_observes_same_work_unready_close_and_conversion_cannot_bypass_down() {
+        struct Observer {
+            authority: CaptureSessionAuthority,
+            calls: Rc<Cell<usize>>,
+            observed: Rc<Cell<Option<u64>>>,
+        }
+        impl SessionRecordWriter for Observer {
+            fn persist(
+                &mut self,
+                frame: &RecordFrame,
+                gate: RecordingGate,
+            ) -> Result<PersistenceReceipt, PersistError> {
+                self.calls.set(self.calls.get() + 1);
+                let state = self.authority.state.borrow();
+                let scope = &state.scopes[0];
+                let work_id = scope
+                    .frozen_timeout
+                    .expect("Timeout selected before backend");
+                let close = scope
+                    .close
+                    .identity
+                    .get()
+                    .expect("Close reserved before backend");
+                assert_eq!(close.storage, CloseStorage::WorkOwner(work_id));
+                assert_eq!(scope.close.state.get(), CloseState::Pending);
+                assert!(!scope.close.ready.get());
+                assert_eq!(scope.close.work.borrow().as_ref().unwrap().id(), work_id);
+                let cell = state
+                    .work
+                    .iter()
+                    .find(|cell| cell.sequence.get() == work_id)
+                    .unwrap();
+                assert_eq!(cell.received_progress.get(), ReceivedProgress::Unconfirmed);
+                assert!(
+                    matches!(&frame.value, Record::Control(record) if matches!(record.value, Control::Timer { .. }))
+                );
+                self.observed.set(Some(work_id));
+                Ok(PersistenceReceipt {
+                    through: frame.record_no,
+                    achieved_gate: gate,
+                })
+            }
+        }
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let ping = due_timer(&authority, &mut turn, &handle);
+        sink.persist_owned(
+            &mut turn,
+            &timer_frame(&authority, &ping),
+            RecordingGate::Durable,
+            &ping,
+        )
+        .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &ping, None)
+            .unwrap();
+        drop(handle.take_timer_ping(&mut turn, &ping).unwrap());
+        drop(ping);
+        let timeout = due_timer(&authority, &mut turn, &handle);
+        let observed = Rc::new(Cell::new(None));
+        sink.writer = Box::new(Observer {
+            authority: authority.clone(),
+            calls: calls.clone(),
+            observed: observed.clone(),
+        });
+        sink.persist_owned(
+            &mut turn,
+            &timer_frame(&authority, &timeout),
+            RecordingGate::Durable,
+            &timeout,
+        )
+        .unwrap();
+        assert_eq!(observed.get(), Some(timeout.id()));
+        let TimerProgressView::TimerThenDown {
+            timer_confirmed,
+            down_confirmed,
+            close,
+        } = handle.timer_progress(&mut turn, &timeout).unwrap()
+        else {
+            panic!("selected Timeout");
+        };
+        assert!(timer_confirmed && !down_confirmed && !close.ready);
+        assert!(matches!(
+            authority.reclaim_close(&mut turn, close.owner.clone()),
+            CloseLeaseReport::Rejected(AuthorityError::CloseNotReady)
+        ));
+        // A trusted private fixture exercises the conversion guard separately;
+        // public issuance cannot produce this unready lease.
+        let cell = authority.close_cell(&close.owner).unwrap();
+        let lease = CloseLease {
+            owner: close.owner,
+            cell,
+            work: None,
+            armed: false,
+        };
+        let before = authority.ownership_report();
+        assert_eq!(
+            lease.into_command().unwrap_err(),
+            AuthorityError::CloseNotReady
+        );
+        assert_eq!(authority.ownership_report(), before);
+        assert_eq!(calls.get(), 3);
+        assert_eq!(
+            timeout.cell.received_progress.get(),
+            ReceivedProgress::Timer
+        );
+        assert_eq!(
+            timeout.cell.obligation.get(),
+            ObservationObligation::Pending
+        );
+        assert_eq!(authority.status().storage_stopped, None);
+    }
+
+    #[test]
+    fn activated_generated_stage_order_blocks_later_control_then_receipt_removes_only_that_barrier()
+    {
+        let (authority, mut turn, handle, mut sink, calls) = timer_fixture();
+        let owner = retained_timeout_plan(&authority, &mut turn, &handle, &mut sink);
+        let identity = owner.cell.observation.get().unwrap();
+        let plan = owner.cell.generated_plan.get().unwrap();
+        let close = authority
+            .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&owner))
+            .unwrap();
+        let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close) else {
+            panic!("same settled dependency");
+        };
+        assert!(matches!(
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        assert!(!owner.cell.required_record_pending());
+        assert_eq!(owner.cell.active_record_order(), None);
+        // Represent the private in-flight activation point. SessionTurn makes
+        // this point unobservable to a concurrent public admission.
+        let activation = authority.state.borrow().record_admission_counter + 1;
+        authority.state.borrow_mut().record_admission_counter = activation;
+        owner.cell.generated_stage_order.set(Some(activation));
+        let later = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        admit_control(
+            &handle,
+            &mut turn,
+            &later,
+            ObservationClass::Pong,
+            ReceiveStamp {
+                unix_ns: 80,
+                monotonic_ns: 81,
+            },
+        );
+        assert_eq!(
+            authority.validate_record_order(&later),
+            Err(AuthorityError::TimerOrderBlocked {
+                earlier_work_id: owner.id()
+            })
+        );
+        assert_eq!(owner.cell.active_record_order(), Some(activation));
+        let frame = observation_frame(
+            &authority,
+            identity,
+            Control::EpochAdvance {
+                change: EpochChange::Connection {
+                    owner: plan.connection,
+                    expected: plan.original.connection,
+                    next: plan.next_connection,
+                },
+                reason: Reason::Reconnect,
+            },
+        );
+        sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &owner)
+            .unwrap();
+        assert_eq!(owner.cell.generated_stage_order.get(), None);
+        assert!(!owner.cell.required_record_pending());
+        assert_eq!(authority.validate_record_order(&later), Ok(()));
+        handle
+            .complete_observation(
+                &mut turn,
+                &sink,
+                &later,
+                Some((identity.stream, identity.epoch)),
+            )
+            .unwrap();
+        assert_eq!(calls.get(), 5);
+        assert_eq!(
+            owner.cell.generated_progress.get(),
+            GeneratedProgress::Connection
+        );
+        assert_eq!(owner.cell.obligation.get(), ObservationObligation::Pending);
+        assert_eq!(authority.status().storage_stopped, None);
     }
 
     fn accepted_binding() -> StreamBinding {
@@ -4691,9 +7301,11 @@ mod conformance {
             CloseSettlementReport::Settled
         );
         assert!(matches!(
-            authority.dispatch(&mut turn, lease.into_command(), |_| -> Result<(), ()> {
-                panic!("settled Close effect")
-            }),
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| -> Result<(), ()> { panic!("settled Close effect") }
+            ),
             DispatchReport::AlreadySettled
         ));
         assert!(matches!(
@@ -4864,8 +7476,18 @@ mod conformance {
             .unwrap();
         for number in 10..=11 {
             let work = handle
-                .reserve_work(&mut turn, WorkKind::InFlightObservation)
+                .reserve_work(&mut turn, WorkKind::QueuedObservation)
                 .unwrap();
+            admit_control(
+                &handle,
+                &mut turn,
+                &work,
+                ObservationClass::Connected,
+                ReceiveStamp {
+                    unix_ns: 1,
+                    monotonic_ns: 2,
+                },
+            );
             let frame = RecordFrame {
                 record_no: RecordNo::new(number).unwrap(),
                 segment_no: SegmentNo::new(0),
@@ -4883,6 +7505,9 @@ mod conformance {
                 }),
             };
             sink.persist_owned(&mut turn, &frame, RecordingGate::Written, &work)
+                .unwrap();
+            handle
+                .complete_observation(&mut turn, &sink, &work, None)
                 .unwrap();
             drop(work);
         }
@@ -5104,6 +7729,7 @@ mod conformance {
                     segment: SegmentNo::new(0),
                     next_record: RecordNo::new(10).unwrap(),
                 },
+                HeartbeatPolicy::SupervisorV2,
             )
             .unwrap();
         let work = handle
@@ -5140,9 +7766,11 @@ mod conformance {
             CloseLeaseReport::AlreadySettled
         ));
         assert!(matches!(
-            authority.dispatch(&mut turn, lease.into_command(), |_| -> Result<(), ()> {
-                panic!("settled Close effect")
-            }),
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| -> Result<(), ()> { panic!("settled Close effect") }
+            ),
             DispatchReport::AlreadySettled
         ));
         assert_eq!(authority.ownership_report().work_used, 1);
@@ -5184,7 +7812,11 @@ mod conformance {
             other => panic!("{other:?}"),
         };
         assert!(matches!(
-            authority.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            authority.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
             DispatchReport::Dispatched
         ));
     }
@@ -5194,6 +7826,16 @@ mod conformance {
         let work = handle
             .reserve_work(&mut turn, WorkKind::QueuedObservation)
             .unwrap();
+        admit_control(
+            &handle,
+            &mut turn,
+            &work,
+            ObservationClass::Connected,
+            ReceiveStamp {
+                unix_ns: 3,
+                monotonic_ns: 4,
+            },
+        );
         let calls = Rc::new(Cell::new(0));
         let mut sink = authority
             .bind_sink(
@@ -5286,6 +7928,9 @@ mod conformance {
             }),
         };
         sink.persist_owned(&mut turn, &prefix, RecordingGate::Durable, &work)
+            .unwrap();
+        handle
+            .complete_observation(&mut turn, &sink, &work, None)
             .unwrap();
         drop(work);
         let retry = RecordFrame {

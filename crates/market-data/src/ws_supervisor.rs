@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 
 use domain::capture_session as session;
-pub use domain::capture_session::{PersistError, PersistenceReceipt};
+pub use domain::capture_session::{HeartbeatPolicy, PersistError, PersistenceReceipt};
 use domain::event::{ActiveContext, InputContext};
 use domain::identity::{
     BookEpoch, BookId, CaptureAttemptNo, Channel, ConnectionEpoch, ConnectionId, EpochTag,
@@ -93,10 +93,10 @@ impl<K: Ord, V> std::ops::Index<&K> for FixedRegistry<K, V> {
 }
 
 pub const BITGET_PUBLIC_WS_ENDPOINT: &str = "wss://ws.bitget.com/v3/ws/public";
-pub const SUPERVISOR_POLICY_VERSION: u32 = 2;
+pub const SUPERVISOR_POLICY_VERSION: u32 = HeartbeatPolicy::SupervisorV2.revision();
 pub const MAX_CONFIGURED_STREAMS: usize = 4;
-pub const HEARTBEAT_INTERVAL_NS: u64 = 30_000_000_000;
-pub const PONG_TIMEOUT_NS_V1: u64 = 15_000_000_000;
+pub const HEARTBEAT_INTERVAL_NS: u64 = HeartbeatPolicy::SupervisorV2.ping_interval_ns();
+pub const PONG_TIMEOUT_NS_V1: u64 = HeartbeatPolicy::SupervisorV2.pong_timeout_ns();
 pub const RECONNECT_BASE_NS_V1: u64 = 6_000_000_000;
 pub const RECONNECT_MAX_NS_V1: u64 = 60_000_000_000;
 
@@ -380,11 +380,6 @@ struct StreamRuntime {
     queued_raw_bytes: usize,
     reconnect_failures: u32,
     reconnect_not_before_ns: Option<u64>,
-    next_ping_due_ns: Option<u64>,
-    pong_deadline_ns: Option<u64>,
-    ping_timer_owner: Option<u64>,
-    pong_timeout_owner: Option<u64>,
-    timer_frontier: u64,
     last_market_record: Option<RecordNo>,
     pending_disconnect: Option<PendingDisconnect>,
     close_settled: bool,
@@ -544,6 +539,10 @@ struct SupervisorCore {
     queue: VecDeque<Ingress>,
     started: bool,
     halted: bool,
+    // The bound public path derives heartbeat entitlement at the authority's
+    // exact receipt boundary. Local protocol fields are only mirrors there.
+    authority_heartbeat: bool,
+    allow_generated_disconnect: bool,
 }
 
 impl SupervisorCore {
@@ -612,11 +611,6 @@ impl SupervisorCore {
                     queued_raw_bytes: 0,
                     reconnect_failures: 0,
                     reconnect_not_before_ns: None,
-                    next_ping_due_ns: None,
-                    pong_deadline_ns: None,
-                    ping_timer_owner: None,
-                    pong_timeout_owner: None,
-                    timer_frontier: 0,
                     last_market_record: None,
                     pending_disconnect: None,
                     close_settled: false,
@@ -642,6 +636,8 @@ impl SupervisorCore {
             queue: VecDeque::with_capacity(queue_policy.max_total_items - stream_ids.len() - 1),
             started: false,
             halted: false,
+            authority_heartbeat: false,
+            allow_generated_disconnect: true,
         })
     }
 
@@ -832,86 +828,6 @@ impl SupervisorCore {
         Ok(())
     }
 
-    pub fn queue_tick(&mut self, stamp: ReceiveStamp) -> Result<(), SupervisorError> {
-        self.ensure_started()?;
-        let stream_ids: [Option<StreamId>; MAX_CONFIGURED_STREAMS] =
-            std::array::from_fn(|index| self.streams.keys().nth(index).copied());
-        for stream in stream_ids.into_iter().flatten() {
-            let candidate = {
-                let runtime = self
-                    .streams
-                    .get(&stream)
-                    .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
-                if runtime.capture_terminated || runtime.transport != Transport::Up {
-                    None
-                } else if runtime
-                    .pong_deadline_ns
-                    .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                    && runtime.pong_timeout_owner.is_none()
-                {
-                    Some((
-                        true,
-                        runtime.binding.tag.connection,
-                        runtime.pong_deadline_ns.unwrap_or(stamp.monotonic_ns),
-                        runtime.timer_frontier,
-                    ))
-                } else if runtime.pong_deadline_ns.is_none()
-                    && runtime
-                        .next_ping_due_ns
-                        .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                    && runtime.ping_timer_owner.is_none()
-                {
-                    Some((
-                        false,
-                        runtime.binding.tag.connection,
-                        runtime.next_ping_due_ns.unwrap_or(stamp.monotonic_ns),
-                        runtime.timer_frontier,
-                    ))
-                } else {
-                    None
-                }
-            };
-
-            let Some((is_timeout, epoch, deadline_ns, timer_frontier)) = candidate else {
-                continue;
-            };
-            let Some(timer_id) = timer_frontier.checked_add(1) else {
-                self.halted = true;
-                return Err(SupervisorError::CounterExhausted("TimerId"));
-            };
-            let ingress = if is_timeout {
-                Ingress::PongTimeout {
-                    stream,
-                    epoch,
-                    stamp,
-                    timer_id,
-                    deadline_ns,
-                }
-            } else {
-                Ingress::PingTimer {
-                    stream,
-                    epoch,
-                    stamp,
-                    timer_id,
-                    deadline_ns,
-                }
-            };
-            self.push_ingress(stream, ingress)?;
-
-            let runtime = self
-                .streams
-                .get_mut(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration("missing stream"))?;
-            runtime.timer_frontier = timer_id;
-            if is_timeout {
-                runtime.pong_timeout_owner = Some(timer_id);
-            } else {
-                runtime.ping_timer_owner = Some(timer_id);
-            }
-        }
-        Ok(())
-    }
-
     /// Returns one ingress outcome or one ready disconnect completion.
     /// A durable terminal Down and its Close are returned before any fallible
     /// epoch completion. Call again, even with empty ingress, to finish pending
@@ -991,20 +907,11 @@ impl SupervisorCore {
                 epoch,
                 stamp,
             } => self.handle_pong(stream, epoch, stamp, sink)?,
-            Ingress::PingTimer {
-                stream,
-                epoch,
-                stamp,
-                timer_id,
-                deadline_ns,
-            } => self.handle_ping_timer(stream, epoch, stamp, timer_id, deadline_ns, sink)?,
-            Ingress::PongTimeout {
-                stream,
-                epoch,
-                stamp,
-                timer_id,
-                deadline_ns,
-            } => self.handle_pong_timeout(stream, epoch, stamp, timer_id, deadline_ns, sink)?,
+            Ingress::PingTimer { .. } | Ingress::PongTimeout { .. } => {
+                return Err(SupervisorError::Authority(
+                    session::AuthorityError::TimerAuthorityRequired,
+                ));
+            }
         };
         Ok(Some(result))
     }
@@ -1071,8 +978,11 @@ impl SupervisorCore {
             });
         }
 
-        let next_ping_due_ns =
-            self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?;
+        let _next_ping_due_ns = if self.authority_heartbeat {
+            None
+        } else {
+            Some(self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?)
+        };
 
         let record = self.persist_record(
             stamp,
@@ -1097,10 +1007,6 @@ impl SupervisorCore {
         runtime.subscription = SubscriptionState::AwaitingAck;
         runtime.reconnect_failures = 0;
         runtime.reconnect_not_before_ns = None;
-        runtime.next_ping_due_ns = Some(next_ping_due_ns);
-        runtime.pong_deadline_ns = None;
-        runtime.ping_timer_owner = None;
-        runtime.pong_timeout_owner = None;
 
         Ok(CoreDrainResult {
             records: vec![record],
@@ -1183,8 +1089,11 @@ impl SupervisorCore {
             });
         }
 
-        let next_ping_due_ns =
-            self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?;
+        let _next_ping_due_ns = if self.authority_heartbeat {
+            None
+        } else {
+            Some(self.checked_time_add_or_halt(stamp.monotonic_ns, HEARTBEAT_INTERVAL_NS)?)
+        };
 
         let record = self.persist_record(
             stamp,
@@ -1203,13 +1112,6 @@ impl SupervisorCore {
             .get_mut(&stream)
             .ok_or(SupervisorError::InvalidConfiguration("missing pong stream"))?;
         runtime.transport = Transport::Up;
-        runtime.pong_deadline_ns = None;
-        runtime.next_ping_due_ns = Some(next_ping_due_ns);
-        // FIFO observation order is the local policy: an accepted Pong before
-        // a queued timeout replaces the schedule, even at/after its deadline.
-        // Once terminal Down was accepted, the earlier guard suppresses Pong.
-        runtime.ping_timer_owner = None;
-        runtime.pong_timeout_owner = None;
 
         Ok(CoreDrainResult {
             records: vec![record],
@@ -1223,106 +1125,6 @@ impl SupervisorCore {
                 SupervisorEvent::PongRecorded { stream, record },
             ],
         })
-    }
-
-    fn handle_ping_timer(
-        &mut self,
-        stream: StreamId,
-        epoch: ConnectionEpoch,
-        stamp: ReceiveStamp,
-        timer_id: u64,
-        deadline_ns: u64,
-        sink: &mut impl RecordSink,
-    ) -> Result<CoreDrainResult, SupervisorError> {
-        let (connection, current_epoch, active) = {
-            let runtime =
-                self.streams
-                    .get(&stream)
-                    .ok_or(SupervisorError::InvalidConfiguration(
-                        "missing timer stream",
-                    ))?;
-            (
-                runtime.binding.connection_id,
-                runtime.binding.tag.connection,
-                !runtime.capture_terminated
-                    && runtime.transport == Transport::Up
-                    && runtime.pending_disconnect.is_none()
-                    && runtime.pong_deadline_ns.is_none()
-                    && runtime.next_ping_due_ns == Some(deadline_ns)
-                    && runtime.ping_timer_owner == Some(timer_id),
-            )
-        };
-        if epoch != current_epoch {
-            return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
-        }
-
-        if !active {
-            return self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink);
-        }
-
-        let pong_deadline_ns =
-            self.checked_time_add_or_halt(stamp.monotonic_ns, PONG_TIMEOUT_NS_V1)?;
-
-        let mut result =
-            self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink)?;
-        let runtime =
-            self.streams
-                .get_mut(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration(
-                    "missing timer stream",
-                ))?;
-        runtime.ping_timer_owner = None;
-        runtime.next_ping_due_ns = None;
-        runtime.pong_deadline_ns = Some(pong_deadline_ns);
-
-        result.commands.push(TransportCommand::SendText {
-            connection,
-            epoch,
-            text: "ping".to_owned(),
-        });
-        Ok(result)
-    }
-
-    fn handle_pong_timeout(
-        &mut self,
-        stream: StreamId,
-        epoch: ConnectionEpoch,
-        stamp: ReceiveStamp,
-        timer_id: u64,
-        deadline_ns: u64,
-        sink: &mut impl RecordSink,
-    ) -> Result<CoreDrainResult, SupervisorError> {
-        let (connection, current_epoch, active) = {
-            let runtime =
-                self.streams
-                    .get(&stream)
-                    .ok_or(SupervisorError::InvalidConfiguration(
-                        "missing timer stream",
-                    ))?;
-            (
-                runtime.binding.connection_id,
-                runtime.binding.tag.connection,
-                !runtime.capture_terminated
-                    && runtime.transport == Transport::Up
-                    && runtime.pending_disconnect.is_none()
-                    && runtime.pong_deadline_ns == Some(deadline_ns)
-                    && runtime.pong_timeout_owner == Some(timer_id),
-            )
-        };
-        if epoch != current_epoch {
-            return Err(SupervisorError::UnknownConnectionEpoch { connection, epoch });
-        }
-        if !active {
-            return self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink);
-        }
-        let plan = self.preflight_disconnect(stream, epoch, stamp, 1)?;
-        let mut result =
-            self.persist_timer_observation(stream, stamp, timer_id, deadline_ns, sink)?;
-        let down = self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)?;
-        result.records.extend(down.records);
-        result.commands.extend(down.commands);
-        result.events.extend(down.events);
-        Ok(result)
     }
 
     // A queued timer remains a truthful recorded observation after cancellation.
@@ -1671,7 +1473,11 @@ impl SupervisorCore {
         stamp: ReceiveStamp,
         sink: &mut impl RecordSink,
     ) -> Result<CoreDrainResult, SupervisorError> {
-        let plan = self.preflight_disconnect(stream, epoch, stamp, 0)?;
+        let plan = if self.authority_heartbeat && !self.allow_generated_disconnect {
+            None
+        } else {
+            self.preflight_disconnect(stream, epoch, stamp, 0, false)?
+        };
         self.persist_disconnect_observation(stream, epoch, stamp, plan, sink)
     }
 
@@ -1681,6 +1487,7 @@ impl SupervisorCore {
         epoch: ConnectionEpoch,
         stamp: ReceiveStamp,
         records_before_down: u64,
+        down_already_confirmed: bool,
     ) -> Result<Option<PendingDisconnect>, SupervisorError> {
         let (connection, old_tag, book_id, reconnect_failures, duplicate_pending) = {
             let runtime =
@@ -1703,15 +1510,22 @@ impl SupervisorCore {
                     .book_id
                     .ok_or(SupervisorError::InvalidConfiguration("missing book id"))?,
                 runtime.reconnect_failures,
-                runtime.terminal_down_epoch == Some(epoch),
+                runtime.terminal_down_epoch == Some(epoch) && !down_already_confirmed,
             )
         };
 
         if self.streams[&stream].capture_terminated {
-            self.ensure_record_capacity(records_before_down + 1)?;
+            self.ensure_record_capacity(records_before_down + u64::from(!down_already_confirmed))?;
             return Ok(None);
         }
-        let required_records = records_before_down + if duplicate_pending { 1 } else { 4 };
+        let required_records = records_before_down
+            + if down_already_confirmed {
+                3
+            } else if duplicate_pending {
+                1
+            } else {
+                4
+            };
         self.ensure_record_capacity(required_records)?;
         if duplicate_pending {
             return Ok(None);
@@ -1784,14 +1598,20 @@ impl SupervisorCore {
             sink,
         )?;
 
-        self.streams
-            .get_mut(&stream)
-            .expect("recorded Down scope")
-            .terminal_down_epoch = Some(epoch);
+        let runtime = self.streams.get_mut(&stream).expect("recorded Down scope");
+        runtime.terminal_down_epoch = Some(epoch);
+        runtime.transport = Transport::Down;
+        runtime.subscription = SubscriptionState::Degraded;
+        runtime.continuity.clear_for_new_generation();
+        runtime.last_market_record = None;
         let Some(plan) = plan else {
             return Ok(CoreDrainResult {
                 records: vec![down_record],
-                commands: Vec::new(),
+                commands: if self.authority_heartbeat {
+                    vec![TransportCommand::Close { connection, epoch }]
+                } else {
+                    Vec::new()
+                },
                 events: vec![SupervisorEvent::TransportRecorded {
                     stream,
                     record: down_record,
@@ -1800,22 +1620,7 @@ impl SupervisorCore {
             });
         };
 
-        let runtime =
-            self.streams
-                .get_mut(&stream)
-                .ok_or(SupervisorError::InvalidConfiguration(
-                    "missing disconnected stream",
-                ))?;
-        runtime.transport = Transport::Down;
-        runtime.subscription = SubscriptionState::Degraded;
-        runtime.continuity.clear_for_new_generation();
-        runtime.next_ping_due_ns = None;
-        runtime.pong_deadline_ns = None;
-        runtime.ping_timer_owner = None;
-        runtime.pong_timeout_owner = None;
-        runtime.last_market_record = None;
-        runtime.pending_disconnect = Some(plan);
-        runtime.close_settled = false;
+        self.install_disconnect_plan(stream, plan)?;
 
         Ok(CoreDrainResult {
             records: vec![down_record],
@@ -1826,6 +1631,27 @@ impl SupervisorCore {
                 value: Transport::Down,
             }],
         })
+    }
+
+    fn install_disconnect_plan(
+        &mut self,
+        stream: StreamId,
+        plan: PendingDisconnect,
+    ) -> Result<(), SupervisorError> {
+        let runtime =
+            self.streams
+                .get_mut(&stream)
+                .ok_or(SupervisorError::InvalidConfiguration(
+                    "missing disconnected stream",
+                ))?;
+        runtime.transport = Transport::Down;
+        runtime.subscription = SubscriptionState::Degraded;
+        runtime.continuity.clear_for_new_generation();
+        runtime.last_market_record = None;
+        runtime.pending_disconnect = Some(plan);
+        runtime.close_settled = false;
+
+        Ok(())
     }
 
     fn disconnect_ready(&self, stream: StreamId) -> bool {
@@ -1973,10 +1799,6 @@ impl SupervisorCore {
             runtime.transport = Transport::Unknown;
             runtime.subscription = SubscriptionState::Backoff;
             runtime.continuity.clear_for_new_generation();
-            runtime.next_ping_due_ns = None;
-            runtime.pong_deadline_ns = None;
-            runtime.ping_timer_owner = None;
-            runtime.pong_timeout_owner = None;
             runtime.last_market_record = None;
             runtime.pending_disconnect = None;
             runtime.reconnect_failures = pending.reconnect_attempt;
@@ -2034,9 +1856,13 @@ impl SupervisorCore {
         let record_no = self
             .next_record_no
             .ok_or(SupervisorError::CounterExhausted("RecordNo"))?;
-        let next_record_no = match record_no.checked_next() {
-            Ok(value) => value,
-            Err(_) => return self.halt_with(SupervisorError::CounterExhausted("RecordNo")),
+        let next_record_no = if self.authority_heartbeat {
+            None
+        } else {
+            Some(match record_no.checked_next() {
+                Ok(value) => value,
+                Err(_) => return self.halt_with(SupervisorError::CounterExhausted("RecordNo")),
+            })
         };
         let frame = RecordFrame {
             record_no,
@@ -2079,7 +1905,11 @@ impl SupervisorCore {
         {
             runtime.accounted_attempt_frontier = frontier;
         }
-        self.next_record_no = Some(next_record_no);
+        self.next_record_no = Some(next_record_no.unwrap_or_else(|| {
+            record_no
+                .checked_next()
+                .expect("bound receipt checked RecordNo")
+        }));
         Ok(record_no)
     }
 
@@ -2204,6 +2034,9 @@ impl SupervisorCore {
     }
 
     fn ensure_record_capacity(&mut self, count: u64) -> Result<(), SupervisorError> {
+        if self.authority_heartbeat {
+            return Ok(());
+        }
         let Some(record_no) = self.next_record_no else {
             return self.halt_with(SupervisorError::CounterExhausted("RecordNo"));
         };
@@ -2409,7 +2242,8 @@ impl PublicWsSupervisor {
                 session::AuthorityError::InvalidBinding,
             ));
         }
-        let core = SupervisorCore::new(config)?;
+        let mut core = SupervisorCore::new(config)?;
+        core.authority_heartbeat = true;
         let work_limit = core.work_limit;
         let supervisor = Self {
             core,
@@ -2466,10 +2300,6 @@ impl PublicWsSupervisor {
                 runtime.capture_terminated = true;
                 runtime.subscription = SubscriptionState::Degraded;
                 runtime.last_market_record = None;
-                runtime.next_ping_due_ns = None;
-                runtime.pong_deadline_ns = None;
-                runtime.ping_timer_owner = None;
-                runtime.pong_timeout_owner = None;
                 match failure.attempt {
                     session::AttemptIdentity::Candidate(attempt) => {
                         runtime.capture_attempt_frontier =
@@ -2879,7 +2709,95 @@ impl PublicWsSupervisor {
         turn: &mut session::SessionTurn,
         stamp: ReceiveStamp,
     ) -> AdmissionReport {
-        self.admit(turn, None, None, stamp, ReceivedCall::Tick)
+        self.admit_due_timers(turn, stamp)
+    }
+
+    fn admit_due_timers(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        stamp: ReceiveStamp,
+    ) -> AdmissionReport {
+        let result = (|| {
+            self.handle
+                .authority()
+                .validate_turn(turn)
+                .map_err(SupervisorError::Authority)?;
+            self.synchronize_authority(turn)?;
+            self.core.ensure_started()?;
+            self.handle
+                .authority()
+                .ensure_admission_open(turn)
+                .map_err(SupervisorError::Authority)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            return self.admission_report(None, Err(error), Vec::new());
+        }
+        let streams: [Option<StreamId>; MAX_CONFIGURED_STREAMS] =
+            std::array::from_fn(|index| self.core.streams.keys().nth(index).copied());
+        let mut admitted_scopes = [None; MAX_CONFIGURED_STREAMS];
+        let mut admitted_count = 0;
+        let mut outcome = Ok(AdmissionOutcome::Admitted);
+        for stream in streams.into_iter().flatten() {
+            if self.terminal_failure(stream).is_some() {
+                continue;
+            }
+            let admission = self.handle.admit_due_timer(
+                turn,
+                stream,
+                session::ReceiveStamp {
+                    unix_ns: stamp.unix_ns,
+                    monotonic_ns: stamp.monotonic_ns,
+                },
+            );
+            let timer = match admission {
+                Ok(session::TimerAdmission::Admitted(timer)) => timer,
+                Ok(
+                    session::TimerAdmission::NotDue | session::TimerAdmission::AlreadyQueued { .. },
+                ) => continue,
+                Err(error) => {
+                    outcome = Err(SupervisorError::Authority(error));
+                    break;
+                }
+            };
+            let identity = timer.identity();
+            let session::ObservationClass::Timer {
+                timer_id,
+                deadline_ns,
+            } = identity.class
+            else {
+                unreachable!("authority admitted an original Timer")
+            };
+            let original_stamp = ReceiveStamp {
+                unix_ns: identity.stamp.unix_ns,
+                monotonic_ns: identity.stamp.monotonic_ns,
+            };
+            let ingress = match timer.kind() {
+                session::TimerKind::Ping => Ingress::PingTimer {
+                    stream: identity.stream,
+                    epoch: identity.epoch,
+                    stamp: original_stamp,
+                    timer_id,
+                    deadline_ns,
+                },
+                session::TimerKind::Timeout => Ingress::PongTimeout {
+                    stream: identity.stream,
+                    epoch: identity.epoch,
+                    stamp: original_stamp,
+                    timer_id,
+                    deadline_ns,
+                },
+            };
+            // Authority admission already reserved this exact W and ordinal.
+            // Queue transfer has no fallible counter, mirror or second owner.
+            self.core.queue.push_back(ingress);
+            self.queued_owners.push_back(timer.into_owner());
+            admitted_scopes[admitted_count] = Some(stream);
+            admitted_count += 1;
+        }
+        let mut report = self.admission_report(None, outcome, Vec::new());
+        report.admitted_scopes = admitted_scopes;
+        report
     }
 
     fn admit(
@@ -2950,13 +2868,6 @@ impl PublicWsSupervisor {
                 Vec::new(),
             );
         }
-        if matches!(call, ReceivedCall::Tick) {
-            for (stream, runtime) in self.core.streams.iter_mut() {
-                if self.handle.authority().terminal_failure(*stream).is_some() {
-                    runtime.capture_terminated = true;
-                }
-            }
-        }
         let before = self.core.queue.len();
         let ownership = self.handle.authority().ownership_report();
         let free = ownership.work_limit - ownership.work_used;
@@ -2997,29 +2908,7 @@ impl PublicWsSupervisor {
             }
             _ => false,
         };
-        let proposed = if reuses_loss_owner {
-            0
-        } else if matches!(call, ReceivedCall::Tick) {
-            self.core
-                .streams
-                .values()
-                .filter(|runtime| {
-                    !runtime.capture_terminated
-                        && runtime.transport == Transport::Up
-                        && ((runtime
-                            .pong_deadline_ns
-                            .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                            && runtime.pong_timeout_owner.is_none())
-                            || (runtime.pong_deadline_ns.is_none()
-                                && runtime
-                                    .next_ping_due_ns
-                                    .is_some_and(|deadline| stamp.monotonic_ns >= deadline)
-                                && runtime.ping_timer_owner.is_none()))
-                })
-                .count()
-        } else {
-            1
-        };
+        let proposed = usize::from(!reuses_loss_owner);
         let stage_count = free.min(proposed);
         let mut staged = VecDeque::with_capacity(stage_count);
         for _ in 0..stage_count {
@@ -3029,8 +2918,7 @@ impl PublicWsSupervisor {
                     if matches!(
                         error,
                         session::AuthorityError::CounterExhausted("AdmissionOrder")
-                    ) && !matches!(call, ReceivedCall::Tick)
-                    {
+                    ) {
                         return self.install_received_failure(
                             turn,
                             stream.expect("validated received scope"),
@@ -3075,18 +2963,54 @@ impl PublicWsSupervisor {
                 epoch.expect("received epoch"),
                 stamp,
             ),
-            ReceivedCall::Tick => self.core.queue_tick(stamp),
         };
         let added = self.core.queue.len() - before;
         let mut admitted = [None; MAX_CONFIGURED_STREAMS];
-        for (index, ingress) in self.core.queue.iter().skip(before).enumerate() {
-            admitted[index] = Some(ingress.stream());
+        for (index, admitted_stream) in admitted.iter_mut().enumerate().take(added) {
+            let ingress = &self.core.queue[before + index];
+            let observed_stream = ingress.stream();
             let work = staged
                 .pop_front()
                 .expect("reserved work for admitted ingress");
-            self.handle
-                .admit_observation(turn, &work, ingress.observation_identity())
-                .expect("validated scope and newly reserved observation owner");
+            if let Err(error) =
+                self.handle
+                    .admit_observation(turn, &work, ingress.observation_identity())
+            {
+                // A checked identity-admission failure keeps the represented
+                // input in the authority's terminal slot, not an unowned queue.
+                while self.core.queue.len() > before {
+                    if let Some(Ingress::Raw { stream, bytes, .. }) = self.core.queue.pop_back() {
+                        let runtime = self.core.streams.get_mut(&stream).expect("received scope");
+                        runtime.queued_raw_frames -= 1;
+                        runtime.queued_raw_bytes -= bytes.len();
+                        self.core.queued_raw_items -= 1;
+                    }
+                }
+                drop(work);
+                let mut report = self.admission_report(
+                    Some(observed_stream),
+                    Err(SupervisorError::Authority(error)),
+                    Vec::new(),
+                );
+                if report.failure.is_some() {
+                    report.close_owner = self
+                        .handle
+                        .authority()
+                        .outstanding_close_owners()
+                        .iter()
+                        .find(|view| view.owner.stream() == observed_stream)
+                        .map(|view| view.owner.clone());
+                    if let Some(close) = report.close_owner.clone()
+                        && let session::CloseLeaseReport::Leased(lease) =
+                            self.handle.authority().reclaim_close(turn, close)
+                        && let Ok(command) = lease.into_command()
+                    {
+                        report.commands = BoundedList::from_vec(vec![command]);
+                    }
+                }
+                return report;
+            }
+            *admitted_stream = Some(observed_stream);
             self.queued_owners.push_back(work);
         }
         if added == 0 && reuses_loss_owner {
@@ -3101,7 +3025,6 @@ impl PublicWsSupervisor {
             ref error @ (SupervisorError::QueueExhausted { .. }
             | SupervisorError::CounterExhausted("CaptureAttemptNo")),
         ) = outcome
-            && !matches!(call, ReceivedCall::Tick)
         {
             let mut report = self.install_received_failure(
                 turn,
@@ -3174,7 +3097,6 @@ impl PublicWsSupervisor {
                 ReceivedCall::Text(_) => session::InputClass::Raw,
                 ReceivedCall::Connected => session::InputClass::Connected,
                 ReceivedCall::Disconnected => session::InputClass::Disconnected,
-                ReceivedCall::Tick => unreachable!(),
             },
             attempt,
             cause: match error {
@@ -3201,7 +3123,8 @@ impl PublicWsSupervisor {
                     None => {
                         let commands = terminated
                             .close
-                            .map(|lease| vec![lease.into_command()])
+                            .and_then(|lease| lease.into_command().ok())
+                            .map(|command| vec![command])
                             .unwrap_or_default();
                         let mut report = self.admission_report(
                             Some(stream),
@@ -3220,13 +3143,10 @@ impl PublicWsSupervisor {
                 if let session::AttemptIdentity::Candidate(attempt) = attempt {
                     runtime.capture_attempt_frontier = attempt.get();
                 }
-                runtime.next_ping_due_ns = None;
-                runtime.pong_deadline_ns = None;
-                runtime.ping_timer_owner = None;
-                runtime.pong_timeout_owner = None;
                 let commands = terminated
                     .close
-                    .map(|lease| vec![lease.into_command()])
+                    .and_then(|lease| lease.into_command().ok())
+                    .map(|command| vec![command])
                     .unwrap_or_default();
                 let (outcome, cancelled_plan) = match cancellation {
                     Ok(cancelled) => (Err(error), cancelled),
@@ -3264,6 +3184,16 @@ impl PublicWsSupervisor {
         view: TransportCommand,
         work: &session::WorkOwner,
     ) -> Result<Option<session::CommandLease>, SupervisorError> {
+        if matches!(&view, TransportCommand::SendText { text, .. } if text == "ping") {
+            return match self.handle.take_timer_ping(turn, work) {
+                Ok(command) => Ok(Some(command)),
+                Err(
+                    session::AuthorityError::CommandRevoked
+                    | session::AuthorityError::PingAlreadyTaken,
+                ) => Ok(None),
+                Err(error) => Err(SupervisorError::Authority(error)),
+            };
+        }
         let (connection, epoch, kind) = match view {
             TransportCommand::Connect {
                 connection,
@@ -3295,7 +3225,10 @@ impl PublicWsSupervisor {
                     .mandatory_close(turn, stream, epoch, Some(work))
                     .map_err(SupervisorError::Authority)?;
                 return match self.handle.authority().reclaim_close(turn, owner) {
-                    session::CloseLeaseReport::Leased(lease) => Ok(Some(lease.into_command())),
+                    session::CloseLeaseReport::Leased(lease) => lease
+                        .into_command()
+                        .map(Some)
+                        .map_err(SupervisorError::Authority),
                     session::CloseLeaseReport::AlreadyLeased
                     | session::CloseLeaseReport::AlreadySettled => Ok(None),
                     session::CloseLeaseReport::Rejected(error) => {
@@ -3326,6 +3259,142 @@ impl PublicWsSupervisor {
             session_disposition: self.handle.authority().disposition(),
             outcome,
         }
+    }
+
+    fn drain_authority_timer(
+        &mut self,
+        turn: &mut session::SessionTurn,
+        sink: &mut session::BoundRecordSink,
+        owner: &session::WorkOwner,
+        original: &Ingress,
+    ) -> Result<CoreDrainResult, SupervisorError> {
+        let identity = original.observation_identity();
+        let session::ObservationClass::Timer {
+            timer_id,
+            deadline_ns,
+        } = identity.class
+        else {
+            return Err(SupervisorError::Authority(
+                session::AuthorityError::InvalidOwner,
+            ));
+        };
+        let stream = identity.stream;
+        let stamp = ReceiveStamp {
+            unix_ns: identity.stamp.unix_ns,
+            monotonic_ns: identity.stamp.monotonic_ns,
+        };
+        self.core.queue.pop_front().expect("queued original Timer");
+        if let Some(remaining) = self.core.cut_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(1);
+        }
+        let before = self
+            .handle
+            .timer_progress(turn, owner)
+            .map_err(SupervisorError::Authority)?;
+        let timer_confirmed = match before {
+            session::TimerProgressView::Unselected => false,
+            session::TimerProgressView::TimerOnlyPing {
+                timer_confirmed, ..
+            }
+            | session::TimerProgressView::TimerOnlyObsolete { timer_confirmed }
+            | session::TimerProgressView::TimerThenDown {
+                timer_confirmed, ..
+            } => timer_confirmed,
+        };
+        let mut result = CoreDrainResult::default();
+        if !timer_confirmed {
+            let mut adapter = BoundAdapter {
+                turn,
+                sink,
+                error: None,
+                owner: Some(owner),
+            };
+            let recorded = self.core.persist_timer_observation(
+                stream,
+                stamp,
+                timer_id,
+                deadline_ns,
+                &mut adapter,
+            );
+            result = recorded.map_err(|error| map_boundary(error, adapter.error))?;
+        }
+        let progress = self
+            .handle
+            .timer_progress(turn, owner)
+            .map_err(SupervisorError::Authority)?;
+        match progress {
+            session::TimerProgressView::TimerOnlyPing {
+                timer_confirmed: true,
+                ping_taken: false,
+            } => {
+                let connection = self.core.streams[&stream].binding.connection_id;
+                result.commands.push(TransportCommand::SendText {
+                    connection,
+                    epoch: identity.epoch,
+                    text: "ping".to_owned(),
+                });
+            }
+            session::TimerProgressView::TimerOnlyPing {
+                timer_confirmed: true,
+                ping_taken: true,
+            }
+            | session::TimerProgressView::TimerOnlyObsolete {
+                timer_confirmed: true,
+            } => {}
+            session::TimerProgressView::TimerThenDown {
+                timer_confirmed: true,
+                down_confirmed,
+                ..
+            } => {
+                if !down_confirmed {
+                    let was_down =
+                        self.core.streams[&stream].terminal_down_epoch == Some(identity.epoch);
+                    let mut adapter = BoundAdapter {
+                        turn,
+                        sink,
+                        error: None,
+                        owner: Some(owner),
+                    };
+                    let recorded = self.core.persist_disconnect_observation(
+                        stream,
+                        identity.epoch,
+                        stamp,
+                        None,
+                        &mut adapter,
+                    );
+                    let down = recorded.map_err(|error| map_boundary(error, adapter.error))?;
+                    result.records.extend(down.records);
+                    result.commands.extend(down.commands);
+                    result.events.extend(down.events);
+                    // The authority has already frozen the timeout and confirmed
+                    // its original Down/Close. Future H1 arithmetic is a later
+                    // phase and cannot retract that accepted obligation.
+                    if self.core.allow_generated_disconnect
+                        && !was_down
+                        && let Some(plan) = self.core.preflight_disconnect(
+                            stream,
+                            identity.epoch,
+                            stamp,
+                            0,
+                            true,
+                        )?
+                    {
+                        self.core.install_disconnect_plan(stream, plan)?;
+                    }
+                } else {
+                    result.commands.push(TransportCommand::Close {
+                        connection: self.core.streams[&stream].binding.connection_id,
+                        epoch: identity.epoch,
+                    });
+                }
+            }
+            _ => {
+                return Err(SupervisorError::Authority(
+                    session::AuthorityError::NotQuiescent,
+                ));
+            }
+        }
+        Ok(result)
     }
 
     fn drain_bound(
@@ -3360,19 +3429,10 @@ impl PublicWsSupervisor {
             }
         }
         let status = self.session_status();
-        if matches!(
+        self.core.allow_generated_disconnect = matches!(
             status.lifecycle,
-            session::SessionLifecycle::Closing
-                | session::SessionLifecycle::DiagnosticClosing
-                | session::SessionLifecycle::DiagnosticClosed
-        ) {
-            for runtime in self.core.streams.values_mut() {
-                runtime.next_ping_due_ns = None;
-                runtime.pong_deadline_ns = None;
-                runtime.ping_timer_owner = None;
-                runtime.pong_timeout_owner = None;
-            }
-        }
+            session::SessionLifecycle::Open | session::SessionLifecycle::FailedDiagnostic
+        );
         if matches!(
             status.lifecycle,
             session::SessionLifecycle::DiagnosticClosing
@@ -3485,6 +3545,38 @@ impl PublicWsSupervisor {
         if retained_owner.is_none() {
             return Ok(None);
         }
+        // This existing completion boundary validates FIFO/frozen-plan order
+        // before the private core's fallible operational preflight. It grants
+        // no Timer plan; missing exact records remain NotQuiescent.
+        let mut precompleted_obsolete = false;
+        let mut precompleted_down = false;
+        if let (Some(original), Some(owner)) = (original.as_ref(), retained_owner) {
+            let identity = original.observation_identity();
+            if matches!(
+                identity.class,
+                session::ObservationClass::Connected
+                    | session::ObservationClass::Pong
+                    | session::ObservationClass::Disconnected
+            ) {
+                let obsolete = matches!(
+                    identity.class,
+                    session::ObservationClass::Connected | session::ObservationClass::Pong
+                )
+                .then_some((identity.stream, identity.epoch));
+                match self
+                    .handle
+                    .complete_observation(turn, sink, owner, obsolete)
+                {
+                    Ok(()) => {
+                        precompleted_down =
+                            identity.class == session::ObservationClass::Disconnected;
+                        precompleted_obsolete = !precompleted_down;
+                    }
+                    Err(session::AuthorityError::NotQuiescent) => {}
+                    Err(error) => return Err(SupervisorError::Authority(error)),
+                }
+            }
+        }
         if let Some(owner) = retained_owner {
             owner
                 .set_kind(
@@ -3502,14 +3594,66 @@ impl PublicWsSupervisor {
         } else {
             self.queued_owners.pop_front()
         };
-        let mut adapter = BoundAdapter {
-            turn,
-            sink,
-            error: None,
-            owner: owner.as_ref(),
+        let halted_before = self.core.halted;
+        let (result, boundary_error) = if precompleted_obsolete || precompleted_down {
+            let original = self
+                .core
+                .queue
+                .pop_front()
+                .expect("obsolete original control");
+            if let Some(remaining) = self.core.cut_remaining.as_mut() {
+                *remaining = remaining.saturating_sub(1);
+            }
+            let identity = original.observation_identity();
+            (
+                Ok(Some(CoreDrainResult {
+                    records: Vec::new(),
+                    commands: if precompleted_down {
+                        vec![TransportCommand::Close {
+                            connection: self.core.streams[&identity.stream].binding.connection_id,
+                            epoch: identity.epoch,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    events: if precompleted_down {
+                        Vec::new()
+                    } else {
+                        vec![SupervisorEvent::ObsoleteControl {
+                            stream: identity.stream,
+                            epoch: identity.epoch,
+                        }]
+                    },
+                })),
+                None,
+            )
+        } else if let (Some(original), Some(owner)) = (original.as_ref(), owner.as_ref())
+            && matches!(
+                original,
+                Ingress::PingTimer { .. } | Ingress::PongTimeout { .. }
+            )
+        {
+            let result = self
+                .drain_authority_timer(turn, sink, owner, original)
+                .map(Some);
+            let boundary_error = result.as_ref().err().and_then(|error| {
+                if let SupervisorError::Authority(error) = error {
+                    Some(session::PersistBoundaryError::Authority(*error))
+                } else {
+                    None
+                }
+            });
+            (result, boundary_error)
+        } else {
+            let mut adapter = BoundAdapter {
+                turn,
+                sink,
+                error: None,
+                owner: owner.as_ref(),
+            };
+            let result = self.core.drain_one(&mut adapter);
+            (result, adapter.error)
         };
-        let result = self.core.drain_one(&mut adapter);
-        let boundary_error = adapter.error;
         let result = match result {
             Ok(result) => result,
             Err(error) => {
@@ -3542,7 +3686,15 @@ impl PublicWsSupervisor {
                         }
                     }
                 }
-                self.latch_hard_stop(turn);
+                if matches!(
+                    boundary_error,
+                    Some(session::PersistBoundaryError::Authority(_))
+                ) && self.handle.authority().status().storage_stopped.is_none()
+                {
+                    self.core.halted = halted_before;
+                } else {
+                    self.latch_hard_stop(turn);
+                }
                 return Err(map_boundary(error, boundary_error));
             }
         };
@@ -3559,9 +3711,29 @@ impl PublicWsSupervisor {
                 None
             }
         });
-        self.handle
-            .complete_observation(turn, sink, &owner, obsolete)
-            .map_err(SupervisorError::Authority)?;
+        if !precompleted_obsolete
+            && !precompleted_down
+            && let Err(error) = self
+                .handle
+                .complete_observation(turn, sink, &owner, obsolete)
+        {
+            // A successful receipt does not surrender the original steward
+            // when its remaining completion/Close validation rejects.
+            if let Some(stream) = completing {
+                owner
+                    .set_kind(turn, session::WorkKind::PendingPlan)
+                    .map_err(SupervisorError::Authority)?;
+                self.pending_owners.insert(stream, owner);
+            } else if let Some(original) = original {
+                owner
+                    .set_kind(turn, session::WorkKind::QueuedObservation)
+                    .map_err(SupervisorError::Authority)?;
+                self.core.queue.push_front(original);
+                self.core.cut_remaining = cut_before;
+                self.queued_owners.push_front(owner);
+            }
+            return Err(SupervisorError::Authority(error));
+        }
         for event in &result.events {
             if let SupervisorEvent::EpochAdvanced { stream, tag, .. } = event {
                 let previous = self.core.streams[stream]
@@ -3578,24 +3750,49 @@ impl PublicWsSupervisor {
         for view in result.commands {
             commands.extend(self.lease_command(turn, view, &owner)?);
         }
-        for event in &result.events {
-            if let SupervisorEvent::TransportRecorded {
-                stream,
-                value: Transport::Down,
-                ..
-            } = event
-                && self.core.streams[stream].pending_disconnect.is_some()
-                && !self.pending_owners.contains_key(stream)
-            {
-                self.pending_owners
-                    .insert(*stream, owner.share().map_err(SupervisorError::Authority)?);
-            }
+        let down_stream = result
+            .events
+            .iter()
+            .find_map(|event| {
+                if let SupervisorEvent::TransportRecorded {
+                    stream,
+                    value: Transport::Down,
+                    ..
+                } = event
+                {
+                    Some(*stream)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                precompleted_down.then(|| original.as_ref().expect("retried Down").stream())
+            });
+        if let Some(stream) = down_stream
+            && self.core.streams[&stream].pending_disconnect.is_some()
+            && !self.pending_owners.contains_key(&stream)
+        {
+            self.pending_owners
+                .insert(stream, owner.share().map_err(SupervisorError::Authority)?);
         }
-        owner.set_kind(turn, if result.events.iter().any(|event| matches!(event, SupervisorEvent::TransportRecorded { stream, value: Transport::Down, .. } if self.pending_owners.get(stream).is_some_and(|pending| pending.id() == owner.id()))) {
-            session::WorkKind::PendingPlan
-        } else { session::WorkKind::Result }).map_err(SupervisorError::Authority)?;
-        if result.events.iter().any(|event| matches!(event, SupervisorEvent::TransportRecorded { stream, value: Transport::Down, .. } if self.pending_owners.get(stream).is_some_and(|pending| pending.id() == owner.id()))) {
-            self.handle.retain_generated_plan(turn, &owner)
+        let retains_plan = down_stream.is_some_and(|stream| {
+            self.pending_owners
+                .get(&stream)
+                .is_some_and(|pending| pending.id() == owner.id())
+        });
+        owner
+            .set_kind(
+                turn,
+                if retains_plan {
+                    session::WorkKind::PendingPlan
+                } else {
+                    session::WorkKind::Result
+                },
+            )
+            .map_err(SupervisorError::Authority)?;
+        if retains_plan {
+            self.handle
+                .retain_generated_plan(turn, &owner)
                 .map_err(SupervisorError::Authority)?;
         }
         Ok(Some(DrainResult {
@@ -3612,7 +3809,6 @@ enum ReceivedCall<'a> {
     Text(&'a [u8]),
     Connected,
     Disconnected,
-    Tick,
 }
 
 impl Ingress {
@@ -3770,6 +3966,9 @@ fn map_boundary(
     error: Option<session::PersistBoundaryError>,
 ) -> SupervisorError {
     match error {
+        Some(session::PersistBoundaryError::Authority(session::AuthorityError::TimeOverflow)) => {
+            SupervisorError::TimeOverflow
+        }
         Some(session::PersistBoundaryError::Authority(error)) => SupervisorError::Authority(error),
         Some(session::PersistBoundaryError::Persistence(error)) => {
             SupervisorError::Persistence(error)
@@ -4294,6 +4493,21 @@ mod tests {
         Vec<StreamBinding>,
         std::path::PathBuf,
     ) {
+        unconstructed_boundary_fixture_with_gate(policy, RecordingGate::Durable)
+    }
+
+    fn unconstructed_boundary_fixture_with_gate(
+        policy: QueuePolicy,
+        gate: RecordingGate,
+    ) -> (
+        WsSupervisorConfig,
+        session::SupervisorSessionHandle,
+        recording::CaptureSessionOwner,
+        session::SessionTurn,
+        session::BoundRecordSink,
+        Vec<StreamBinding>,
+        std::path::PathBuf,
+    ) {
         use domain::identity::{ArchiveId, CaptureSessionId, ClockId};
         use domain::numeric::ExactDecimal;
         use domain::policy::{DurabilityMode, PolicyFields, SilenceRule};
@@ -4378,7 +4592,7 @@ mod tests {
                     warmup_min_elapsed_ns: Some(0),
                     allow_quiet_with_proof: false,
                     require_two_sided_snapshot: true,
-                    recording_gate: RecordingGate::Durable,
+                    recording_gate: gate,
                 },
             }),
         });
@@ -4430,11 +4644,12 @@ mod tests {
                     raw_byte_limit: policy.max_raw_bytes_per_stream,
                     max_message_bytes: policy.max_raw_message_bytes,
                 },
+                HeartbeatPolicy::SupervisorV2,
             )
             .expect("bound registration");
         let config = WsSupervisorConfig {
             active_context: core.active_context,
-            recording_gate: RecordingGate::Durable,
+            recording_gate: gate,
             segment_no: SegmentNo::new(0),
             next_record_no: RecordNo::new(7).expect("next"),
             queue_policy: policy,
@@ -4454,6 +4669,237 @@ mod tests {
                 session::DispatchReport::Dispatched
             ));
         }
+    }
+
+    fn timer_a_authority_scheduler_order_retry(gate: RecordingGate) {
+        // Private supervisor setup exposes the already owner-minted handle;
+        // all admission/write/settlement operations use its public boundary.
+        // The authority's accepted Up is deliberately absent from the core.
+        for with_cut in [false, true] {
+            let (mut config, handle, mut owner, mut turn, mut sink, bindings, path) =
+                unconstructed_boundary_fixture_with_gate(QueuePolicy::default(), gate);
+            let a = &bindings[0];
+            let up_owner = handle
+                .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+                .unwrap();
+            handle
+                .admit_observation(
+                    &mut turn,
+                    &up_owner,
+                    session::ObservationIdentity {
+                        stream: a.id,
+                        epoch: a.tag.connection,
+                        stamp: session::ReceiveStamp {
+                            unix_ns: stamp(1).unix_ns,
+                            monotonic_ns: 1,
+                        },
+                        class: session::ObservationClass::Connected,
+                        tag: None,
+                        attempts: None,
+                        loss_count: None,
+                    },
+                )
+                .unwrap();
+            up_owner
+                .set_kind(&mut turn, session::WorkKind::InFlightObservation)
+                .unwrap();
+            sink.persist_owned(
+                &mut turn,
+                &RecordFrame {
+                    record_no: handle.prefix().next_record,
+                    segment_no: handle.prefix().segment,
+                    value: Record::Control(ControlRecord {
+                        context: stamp(1).wire_context(config.active_context),
+                        value: Control::Transport {
+                            connection: a.connection_id,
+                            epoch: a.tag.connection,
+                            value: Transport::Up,
+                        },
+                    }),
+                },
+                gate,
+                &up_owner,
+            )
+            .unwrap();
+            handle
+                .complete_observation(&mut turn, &sink, &up_owner, None)
+                .unwrap();
+            drop(up_owner);
+            config.next_record_no = handle.prefix().next_record;
+            let mut supervisor = PublicWsSupervisor::new(config, handle).unwrap();
+            let start = supervisor.start_commands(&mut turn);
+            start.outcome.unwrap();
+            dispatch_boundary(&mut owner, &mut turn, start.commands);
+            assert_eq!(
+                supervisor.snapshot(a.id).unwrap().transport,
+                Transport::Unknown
+            );
+            let earlier = supervisor
+                .handle
+                .reserve_work(&mut turn, session::WorkKind::QueuedObservation)
+                .unwrap();
+            let attempt = CaptureAttemptNo::new(1).unwrap();
+            supervisor
+                .handle
+                .admit_observation(
+                    &mut turn,
+                    &earlier,
+                    session::ObservationIdentity {
+                        stream: a.id,
+                        epoch: a.tag.connection,
+                        stamp: session::ReceiveStamp {
+                            unix_ns: stamp(2).unix_ns,
+                            monotonic_ns: 2,
+                        },
+                        class: session::ObservationClass::Raw,
+                        tag: Some(a.tag),
+                        attempts: Some((attempt, attempt)),
+                        loss_count: None,
+                    },
+                )
+                .unwrap();
+            let due = 1 + HEARTBEAT_INTERVAL_NS;
+            let admitted = supervisor.queue_tick(&mut turn, stamp(due));
+            assert_eq!(admitted.outcome, Ok(AdmissionOutcome::Admitted));
+            assert_eq!(admitted.admitted_scopes, [Some(a.id), None, None, None]);
+            assert_eq!(
+                supervisor.queued_items(),
+                1,
+                "authority Up schedules Timer even while the core transport is Unknown"
+            );
+            if with_cut {
+                let b = &bindings[1];
+                let failure = supervisor
+                    .handle
+                    .terminate(
+                        &mut turn,
+                        session::TerminalFailure {
+                            stream: b.id,
+                            connection: b.connection_id,
+                            current_epoch: b.tag.connection,
+                            observed_tag: b.tag,
+                            context: supervisor.core.active_context,
+                            stamp: session::ReceiveStamp {
+                                unix_ns: stamp(due + 1).unix_ns,
+                                monotonic_ns: due + 1,
+                            },
+                            input_class: session::InputClass::Connected,
+                            attempt: session::AttemptIdentity::NotRaw,
+                            cause: session::FailureCause::QueueOverflow,
+                        },
+                    )
+                    .unwrap();
+                drop(failure.close);
+            }
+            supervisor.synchronize_authority(&mut turn).unwrap();
+            let ownership = supervisor.handle.authority().ownership_report();
+            let cut = supervisor.core.cut_remaining;
+            let queued = supervisor
+                .core
+                .queue
+                .front()
+                .unwrap()
+                .observation_identity();
+            let queued_owner_id = supervisor.queued_owners.front().unwrap().id();
+            let status = supervisor.session_status();
+            let close = supervisor.handle.authority().outstanding_close_owners();
+            let prefix = std::fs::read(&path).unwrap();
+            for _ in 0..3 {
+                let blocked = supervisor.drain_one(&mut turn, &mut sink);
+                assert!(matches!(blocked.outcome,
+                    Err(SupervisorError::Authority(session::AuthorityError::TimerOrderBlocked {
+                        earlier_work_id,
+                    })) if earlier_work_id == earlier.id()));
+                assert_eq!(
+                    supervisor
+                        .core
+                        .queue
+                        .front()
+                        .unwrap()
+                        .observation_identity(),
+                    queued
+                );
+                assert_eq!(
+                    supervisor.queued_owners.front().unwrap().id(),
+                    queued_owner_id
+                );
+                assert_eq!(supervisor.handle.authority().ownership_report(), ownership);
+                assert_eq!(supervisor.core.cut_remaining, cut);
+                assert_eq!(supervisor.session_status(), status);
+                assert_eq!(
+                    supervisor.handle.authority().outstanding_close_owners(),
+                    close
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), prefix);
+                assert!(!supervisor.is_halted());
+            }
+            earlier
+                .set_kind(&mut turn, session::WorkKind::InFlightObservation)
+                .unwrap();
+            sink.persist_owned(
+                &mut turn,
+                &RecordFrame {
+                    record_no: supervisor.handle.prefix().next_record,
+                    segment_no: supervisor.handle.prefix().segment,
+                    value: Record::RawInput(RawInput {
+                        context: stamp(2).wire_context(supervisor.core.active_context),
+                        stream: a.id,
+                        tag: a.tag,
+                        attempt,
+                        bytes: b"original".to_vec(),
+                    }),
+                },
+                gate,
+                &earlier,
+            )
+            .unwrap();
+            supervisor
+                .handle
+                .complete_observation(&mut turn, &sink, &earlier, None)
+                .unwrap();
+            drop(earlier);
+            // The external boundary write was not emitted by the private core.
+            supervisor.core.next_record_no = Some(supervisor.handle.prefix().next_record);
+            let mut result = supervisor
+                .drain_one(&mut turn, &mut sink)
+                .outcome
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.records.len(), 1);
+            assert_eq!(result.commands.len(), 1);
+            let ping = std::mem::take(&mut result.commands)
+                .into_iter()
+                .next()
+                .unwrap();
+            assert_eq!(ping.work_owner_id(), Some(queued_owner_id));
+            assert!(matches!(
+                owner.dispatch(&mut turn, ping, |_| Ok::<(), ()>(())),
+                session::DispatchReport::Dispatched
+            ));
+            drop(result);
+            assert_eq!(
+                supervisor.handle.authority().ownership_report().work_used,
+                0
+            );
+            assert_eq!(
+                supervisor
+                    .handle
+                    .authority()
+                    .ownership_report()
+                    .pending_observations,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn timer_a_supervisor_authority_schedule_and_order_retry_durable() {
+        timer_a_authority_scheduler_order_retry(RecordingGate::Durable);
+    }
+
+    #[test]
+    fn timer_a_supervisor_authority_schedule_and_order_retry_written() {
+        timer_a_authority_scheduler_order_retry(RecordingGate::Written);
     }
 
     fn drain_boundary(
@@ -5488,7 +5934,7 @@ mod tests {
         dispatch_boundary(
             &mut owner,
             &mut turn,
-            terminated.close.map(session::CloseLease::into_command),
+            terminated.close.map(|close| close.into_command().unwrap()),
         );
         let report = supervisor.drain_one(&mut turn, &mut sink);
         assert!(matches!(

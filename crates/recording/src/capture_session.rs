@@ -200,6 +200,7 @@ pub struct CaptureSessionOwner {
     accepted_bindings: Vec<StreamBinding>,
     memory: OwnerMemoryReport,
     sink_fault: Rc<Cell<Option<SinkFault>>>,
+    sink_persist_calls: Rc<Cell<u64>>,
     storage_memory_authority: Option<StorageMemoryAuthority>,
     diagnostic_close_error: Option<PersistError>,
 }
@@ -319,6 +320,8 @@ impl CaptureSessionOwner {
                 checked_budget_product(2, size_of::<usize>())?,
                 size_of::<Cell<Option<SinkFault>>>(),
                 checked_budget_product(2, size_of::<usize>())?,
+                size_of::<Cell<u64>>(),
+                checked_budget_product(2, size_of::<usize>())?,
                 checked_budget_product(accepted_scopes.capacity(), size_of::<ScopeBinding>())?,
                 checked_budget_product(accepted_bindings.capacity(), size_of::<StreamBinding>())?,
                 binding_text_bytes,
@@ -366,6 +369,7 @@ impl CaptureSessionOwner {
                 accepted_bindings,
                 memory,
                 sink_fault: Rc::new(Cell::new(None)),
+                sink_persist_calls: Rc::new(Cell::new(0)),
                 storage_memory_authority: None,
                 diagnostic_close_error: None,
             },
@@ -425,8 +429,15 @@ impl CaptureSessionOwner {
         turn: &mut SessionTurn,
         bindings: &[ScopeBinding],
         budget: RetentionBudget,
+        heartbeat_policy: HeartbeatPolicy,
     ) -> Result<(SupervisorSessionHandle, BoundRecordSink), OwnerError> {
-        self.register_supervisor_with_fault(turn, bindings, budget, None)
+        self.register_supervisor_with_policy_and_fault(
+            turn,
+            bindings,
+            budget,
+            heartbeat_policy,
+            None,
+        )
     }
 
     pub fn register_supervisor_with_fault(
@@ -436,14 +447,35 @@ impl CaptureSessionOwner {
         budget: RetentionBudget,
         fault: Option<SinkFault>,
     ) -> Result<(SupervisorSessionHandle, BoundRecordSink), OwnerError> {
+        self.register_supervisor_with_policy_and_fault(
+            turn,
+            bindings,
+            budget,
+            HeartbeatPolicy::SupervisorV2,
+            fault,
+        )
+    }
+
+    fn register_supervisor_with_policy_and_fault(
+        &mut self,
+        turn: &mut SessionTurn,
+        bindings: &[ScopeBinding],
+        budget: RetentionBudget,
+        heartbeat_policy: HeartbeatPolicy,
+        fault: Option<SinkFault>,
+    ) -> Result<(SupervisorSessionHandle, BoundRecordSink), OwnerError> {
         if bindings != self.accepted_scopes.as_slice() {
             return Err(OwnerError::InvalidProfile(
                 "registry must match accepted stream definitions",
             ));
         }
-        let handle = self
-            .authority
-            .register_supervisor(turn, bindings, budget, self.prefix)?;
+        let handle = self.authority.register_supervisor(
+            turn,
+            bindings,
+            budget,
+            self.prefix,
+            heartbeat_policy,
+        )?;
         self.authority
             .set_accepted_stream_bindings(turn, &self.accepted_bindings)?;
         self.sink_fault.set(fault);
@@ -451,6 +483,7 @@ impl CaptureSessionOwner {
             writer: Rc::clone(&self.writer),
             max_frame_len: self.memory.max_frame_len,
             fault: Rc::clone(&self.sink_fault),
+            persist_calls: Rc::clone(&self.sink_persist_calls),
             memory: self.memory,
         });
         let (sink, storage_memory_authority) = self
@@ -462,6 +495,11 @@ impl CaptureSessionOwner {
 
     pub fn outstanding_close_owners(&self) -> CloseOwnerSnapshot {
         self.authority.outstanding_close_owners()
+    }
+
+    /// Diagnostic count of concrete sink invocations, including rejected backend writes.
+    pub fn sink_persist_calls(&self) -> u64 {
+        self.sink_persist_calls.get()
     }
     pub fn reclaim_close(
         &mut self,
@@ -572,8 +610,7 @@ impl CaptureSessionOwner {
             Ok(_) => {
                 let unsettled = self.authority.unsettled_summary();
                 if self.authority.ensure_storage_writable().is_ok()
-                    && (unsettled.queued + unsettled.in_flight != 0
-                        || unsettled.marker == MarkerState::Pending)
+                    && (unsettled.record_jobs != 0 || unsettled.marker == MarkerState::Pending)
                 {
                     Ok(DiagnosticCloseState::Closing)
                 } else {
@@ -648,6 +685,7 @@ struct FileSink {
     writer: Rc<RefCell<WalWriter>>,
     max_frame_len: usize,
     fault: Rc<Cell<Option<SinkFault>>>,
+    persist_calls: Rc<Cell<u64>>,
     memory: OwnerMemoryReport,
 }
 impl SessionRecordWriter for FileSink {
@@ -665,6 +703,15 @@ impl SessionRecordWriter for FileSink {
         frame: &RecordFrame,
         required_gate: RecordingGate,
     ) -> Result<PersistenceReceipt, PersistError> {
+        let next_call = self
+            .persist_calls
+            .get()
+            .checked_add(1)
+            .ok_or(PersistError {
+                kind: PersistErrorKind::Validation,
+                detail: "sink invocation counter exhausted",
+            })?;
+        self.persist_calls.set(next_call);
         if let Some(SinkFault {
             at,
             kind: SinkFaultKind::BeforeWrite(error),
@@ -1050,7 +1097,12 @@ mod finalization_tests {
         )
         .unwrap();
         let (handle, _sink) = owner
-            .register_supervisor(&mut turn, &[scope()], budget())
+            .register_supervisor(
+                &mut turn,
+                &[scope()],
+                budget(),
+                HeartbeatPolicy::SupervisorV2,
+            )
             .unwrap();
         let ticket = owner.begin_finalization(&mut turn).unwrap();
         let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {

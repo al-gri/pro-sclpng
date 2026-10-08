@@ -2626,3 +2626,104 @@ Live commit/tree/parent, actual main and open/Draft/unmerged PR34 were independe
 Review method: source/contract analysis with independent FIFO/API, lifecycle/Close and bounds subreviews. No Rust tests, reproduction or production changes were performed. d85 debug425 PASS/release NOT_RUN and residual Down/Close status are supplied Integrator/worker evidence, not new Architecture QA. ENV-01 Linux/Durable release, fresh independent implementation QA, Integrator acceptance, owner merge and post-merge CI remain separate gates.
 
 Existing lineage only: Issue20 / parent5 / claim6024304772 / recovery6025249885 / feat/REC-001D-ws-supervisor / DraftPR34. Worker and Integrator MUST preserve this exact decision ID/addendum hash in ADR/handoff and durable decision records, copy the complete accepted text rather than a summary, and identify the later implementation head independently.
+
+## Timer A bounded implementation handoff — 2026-10-08
+
+Current disposition: IMPLEMENTED / QA_PENDING / PARTIAL_VERIFICATION.
+Architecture approval ARCH-REC-001D-TIMER-A-20261008 is DESIGN_APPROVED_A, not
+Integrator acceptance, READY or merge authorization. The complete approved
+33986-byte addendum above remains exact, SHA256
+cf585a92e3bd8372caf90326c67436274fef5abb5a8d163b389aa0a42ab838ba.
+Docs-only approval/provenance commit982a23d14e3bbc41bb51a7b213fe4e900aaf9e09 /
+tree8a42f3075bb882c50e551c1c9d81fe4740f9e1e2 was published before production
+edits. Its parent8e4e2b49930d38e16d5b48bb165ee0d8d69dd690, original
+18937c96de95648ba5254203be6f0c2e274da5dd head and f80ea219 Down/Close fix remain
+in this lineage. The full immutable implementation SHA/tree, exact byte diffs,
+source inventory and fresh CI identity are supplied in existing Issue20/PR34 and
+the accompanying implementation report. Historical d85/c9/Down debug passes and
+this approval SHA do not certify the new implementation head.
+
+The seven source/test paths changed are domain capture_session source/tests;
+market-data ws_supervisor source/tests and lib exports; recording capture_session
+source/tests. ADR/handoff are the two additional permitted paths. No dependency,
+manifest, Cargo.lock, workflow, toolchain, accepted WAL/reader/decoder/DataHealth,
+application or governance file is changed. All original31 §9 families, §8 table,
+prior acceptance requirements and evidence remain identifiable. Existing claim,
+Issue20/parent5/recovery, branch and DraftPR34 are preserved. U09/U10 remain
+UNKNOWN/BLOCKED, U20 NOT_PROVEN/FORBIDDEN, C01 BLOCKED and C03 UNKNOWN.
+
+Implemented A1–A5 boundaries:
+
+- Successful actual record admission assigns the checked FIFO ordinal; capacity
+  rejection preserves rejected frontiers. Original Timer and authenticated control
+  stages cannot pass earlier required receipts. Pure wrong identity/stage/order or
+  epoch proof rejects before abandonment reconciliation and sink I/O; rightful
+  retry remains possible. Frozen Timeout holds its original stages across Closing.
+- Fixed SupervisorV2 revision2 (Ping30e9/Pong15e9 ns) owns scheduling, original
+  Timer identity and active/obsolete selection. Genuine due admission exposes an
+  opaque admitted Timer; caller kind/disposition/boolean/plan is absent. Legacy
+  Timer and generic SendText("ping") paths fail TimerAuthorityRequired.
+- Active Ping reserves its affine command alias before backend I/O and commits
+  entitlement with its exact receipt. Original stamp supplies the deadline;
+  one-shot extraction, Drop and dispatch revalidation keep W/revocation truthful.
+  Obsolete Timer skips active preflight and has no Down or command entitlement.
+- Active Timeout reserves one same-W original Close before Timer I/O, initially
+  unready. Original Down, storage stop or genuine scoped fail-safe makes that same
+  Close ready. All owner/lease conversion, reclaim and dispatch routes enforce the
+  guard. Timer/Down and exact Close settlement are needed for completion/H1.
+  A settled strictly older same-scope Close may retire for the next genuine epoch;
+  live/current/future/foreign conflicts stay preserving rejections.
+- Later completion failure retains prior Down/Close. Diagnostic descriptor closure
+  uses unfinished record-stage count, retaining Close-only W service/reporting.
+  Actual sink calls are counted; before-write errors, postwrite mismatch and weak
+  gates stop storage with truthful confirmed/physical prefix and original error.
+  Closed/stopped authority rejects epoch revival. Metadata counters, aliases,
+  Close and schedule use checked fixed storage with W+N+1<=M.
+
+Regression additions retain all previous test function names:13 private domain,
+36 recording integration and8 supervisor functions (6 integration,2 private).
+The T01–T16 matrix maps public paired Durable/Written cases, variant loops,
+private counter/backend-observer tests and explicit type/source constraints.
+Private generated-stage modeling is a predicate test, not a claim of concurrent
+public staging. Canonical Recording installs all accepted full bindings before
+returning operational handles; received-control counter exhaustion therefore has
+the original accepted tag/stamp/class provenance. The low-level epoch-only domain
+harness lacks a full tag and conservatively hard-stops rather than inventing one.
+No canonical accepted received-input claim is based on that low-level fallback.
+
+Supplemental dirty-source Windows evidence has complete source fingerprints:
+fmt/strict Clippy/workspace build and domain pure tests pass; latest Recording
+Written debug has33 PASS and2 failures at Unix-only final metadata sync/its
+StorageStopped overlay. These failures remain failures and the genuine Linux
+assertions are preserved. Requested-layout cap5/cap9 tests exercise100 Ping,
+obsolete Timer and Close cycles with zero tracked live bytes after teardown;
+successful values/logs remain separate from required Linux/Durable measurements.
+Neither dirty approval-head labels nor worker peer reviews are immutable-head
+runtime evidence or the new independent QA gate.
+
+Owner confirmed Docker context desktop-linux, Engine29.3.1, Linux amd64, WSL2 and
+rust:1.98.1-bookworm. Worker repeated both owner-requested require_escalated
+version/info probes; granular sandbox_approval=false rejected both before process
+launch. There is no invented process exit/stdout for those tool-level refusals.
+Earlier genuine sandbox named-pipe access failure remains separately preserved.
+Linux release is NOT_RUN until actual execution on the new full immutable head.
+Prepared runner uses clean detached exact SHA, verifies clean source and Cargo.lock
+before/after, installs rustfmt/clippy in the temporary container and uses bash -c,
+never bash -lc or TCP2375. Canonical commands remain exactly:
+
+```text
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo test --workspace --release --locked
+```
+
+Separate focused debug/release requested-allocation runs expose actual cap5/cap9
+values without replacing those commands. Save complete stdout/stderr, actual
+exits, exact SHA/tree, Rust/Cargo and executor identity. Label worker-local or
+owner-executed truthfully. Existing GitHub Linux debug CI is a separate execution
+source and must be checked against this implementation head. Fresh independent QA
+must follow implementation and cannot be replaced by author tests or peer source
+analysis. Integrator acceptance, READY, merge/auto-merge and post-merge CI remain
+unissued; no such actions were performed.

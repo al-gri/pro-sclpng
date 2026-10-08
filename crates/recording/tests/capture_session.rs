@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use domain::artifact::ArtifactRef;
 use domain::capture_session::{
-    AmbiguousEffect, AttemptIdentity, AuthorityError, BoundRecordSink, CloseLease,
+    AdmittedTimer, AmbiguousEffect, AttemptIdentity, AuthorityError, BoundRecordSink, CloseLease,
     CloseLeaseReport, CloseOwnerRef, CloseState, CloseStorage, CommandKind, DispatchReport,
-    FailureCause, InputClass, MarkerState, ObservationClass, ObservationIdentity,
+    FailureCause, HeartbeatPolicy, InputClass, MarkerState, ObservationClass, ObservationIdentity,
     PersistBoundaryError, PersistError, PersistErrorKind, QuiescenceReport, ReceiveStamp,
     RetentionBudget, ScopeBinding, SessionLifecycle, SessionTurn, SupervisorSessionHandle,
-    TerminalFailure, WorkKind, WorkOwner,
+    TerminalFailure, TimerAdmission, TimerKind, TimerProgressView, WorkKind, WorkOwner,
 };
 use domain::event::{ActiveContext, InputContext};
 use domain::identity::*;
@@ -473,6 +473,7 @@ fn owner_two_scopes_with_gate(
                 item_cap: 9,
                 ..budget()
             },
+            HeartbeatPolicy::SupervisorV2,
         )
         .expect("fixed two-scope registry");
     (owner, turn, handle, sink)
@@ -767,7 +768,7 @@ fn diagnostic_close_is_pollable_and_close_survives_descriptor_closure() {
         after_descriptor_close
     );
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |command| {
+        owner.dispatch(&mut turn, lease.into_command().unwrap(), |command| {
             assert_eq!(command.kind, &CommandKind::Close);
             assert_eq!(command.epoch, binding().tag.connection);
             Ok::<_, ()>(())
@@ -836,7 +837,7 @@ fn down_close_drop_error_double_reclaim_and_terminal_reuse_preserve_owner() {
     assert_eq!(handle.authority().ownership_report(), before);
     let retry = leased(owner.reclaim_close(&mut turn, close.clone()));
     assert!(matches!(
-        owner.dispatch(&mut turn, retry.into_command(), |_| Err::<(), _>(
+        owner.dispatch(&mut turn, retry.into_command().unwrap(), |_| Err::<(), _>(
             "ambiguous effect"
         )),
         DispatchReport::DispatchFailed {
@@ -864,7 +865,11 @@ fn down_close_drop_error_double_reclaim_and_terminal_reuse_preserve_owner() {
     assert_eq!(handle.authority().ownership_report(), pending_after_cut);
     let retry = leased(owner.reclaim_close(&mut turn, close.clone()));
     assert!(matches!(
-        owner.dispatch(&mut turn, retry.into_command(), |_| Ok::<_, ()>(())),
+        owner.dispatch(
+            &mut turn,
+            retry.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
         DispatchReport::Dispatched
     ));
     assert_eq!(close_state(&owner, &close), None);
@@ -886,7 +891,11 @@ fn foreign_dispatch_returns_the_same_valid_close_lease_without_effect() {
         .terminate(&mut turn_a, terminal())
         .expect("close a");
     let close = termination.close_owner;
-    let command = termination.close.expect("initial close").into_command();
+    let command = termination
+        .close
+        .expect("initial close")
+        .into_command()
+        .unwrap();
     let before = handle_a.authority().ownership_report();
     assert!(matches!(
         owner_a.reclaim_close(&mut turn_b, close.clone()),
@@ -976,7 +985,11 @@ fn closing_keeps_down_close_reclaimable_until_explicit_settlement() {
     let reclaimed = leased(owner.reclaim_close(&mut turn, close.clone()));
     assert_eq!(handle.authority().ownership_report(), before);
     assert!(matches!(
-        owner.dispatch(&mut turn, reclaimed.into_command(), |_| Ok::<_, ()>(())),
+        owner.dispatch(
+            &mut turn,
+            reclaimed.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
         DispatchReport::Dispatched
     ));
     assert_eq!(
@@ -1155,7 +1168,11 @@ fn marker_error_mismatch_and_weak_gate_stop_storage_without_promising_absent_byt
             after_descriptor_close
         );
         assert!(matches!(
-            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            owner.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
             DispatchReport::Dispatched
         ));
         assert!(matches!(
@@ -1630,13 +1647,26 @@ fn qa_reject_preserving(
     let close = owner.outstanding_close_owners();
     let watermarks = owner.watermarks();
     let physical = fs::read(&wal.0).unwrap();
+    let backend_calls = owner.sink_persist_calls();
+    let rejection = sink.persist_owned(turn, submitted, gate, work);
+    let tokenless_timer = matches!(
+        submitted.value,
+        Record::Control(ControlRecord {
+            value: Control::Timer { .. },
+            ..
+        })
+    ) && handle.timer_progress(turn, work).is_err();
     assert!(
         matches!(
-            sink.persist_owned(turn, submitted, gate, work),
+            rejection,
             Err(PersistBoundaryError::Authority(
                 AuthorityError::InvalidBinding | AuthorityError::InvalidOwner
             ))
-        ),
+        ) || (tokenless_timer
+            && rejection
+                == Err(PersistBoundaryError::Authority(
+                    AuthorityError::TimerAuthorityRequired
+                ))),
         "metadata/stage substitution must reject before backend write: {submitted:?}"
     );
     assert_eq!(handle.authority().ownership_report(), ledger);
@@ -1645,6 +1675,7 @@ fn qa_reject_preserving(
     assert_eq!(owner.outstanding_close_owners(), close);
     assert_eq!(owner.watermarks(), watermarks);
     assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    assert_eq!(owner.sink_persist_calls(), backend_calls);
 }
 
 fn qa_settle_once(
@@ -2306,7 +2337,11 @@ fn qa_received_control_metadata(gate: RecordingGate) {
             assert_eq!(handle.authority().ownership_report().work_used, 1);
             let lease = leased(owner.reclaim_close(&mut turn, close));
             assert!(matches!(
-                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
                 DispatchReport::Dispatched
             ));
         }
@@ -2397,7 +2432,11 @@ fn qa_obsolete_control_no_write(gate: RecordingGate) {
         ));
         let lease = leased(owner.reclaim_close(&mut turn, close));
         assert!(matches!(
-            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            owner.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
             DispatchReport::Dispatched
         ));
         assert_eq!(handle.authority().ownership_report().work_used, 0);
@@ -2479,26 +2518,16 @@ fn qa_new_durable_rightful_raw_after_rejection_finalizes_once_with_physical_comp
 }
 
 fn qa_timer_identity_only(gate: RecordingGate) {
-    // This authenticates the common Timer observation only. It makes no claim
-    // about the unresolved Ping/Timeout active/obsolete effect-plan contract.
+    // The old identity probes now exercise the authority's genuine due Ping;
+    // authenticated Up is an additional, explicitly checked setup record.
     let wal = TempWal::new("qa-new-timer-identity");
     let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
-    let identity = qa_original_identity(ObservationClass::Timer {
-        timer_id: 99,
-        deadline_ns: 5,
-    });
-    let work = qa_admit(&handle, &mut turn, identity);
-    let original = frame(
-        5,
-        Record::Control(ControlRecord {
-            context: qa_context(identity),
-            value: Control::Timer {
-                stream: identity.stream,
-                timer_id: 99,
-                deadline_ns: 5,
-            },
-        }),
-    );
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    let admitted = qa_timer_due(&handle, &mut turn, binding().id, 30_000_000_005);
+    assert_eq!(admitted.kind(), TimerKind::Ping);
+    let identity = admitted.identity();
+    let work = admitted.into_owner();
+    let original = qa_timer_frame(6, identity);
     for variant in 0..6 {
         let mut wrong = original.clone();
         let Record::Control(control) = &mut wrong.value else {
@@ -2513,10 +2542,10 @@ fn qa_timer_identity_only(gate: RecordingGate) {
             unreachable!()
         };
         match variant {
-            0 => *timer_id = 100,
-            1 => *deadline_ns = 4,
-            2 => control.context.unix_ns = LocalUnixNs::new(6),
-            3 => control.context.monotonic_ns = MonotonicNs::new(6),
+            0 => *timer_id += 1,
+            1 => *deadline_ns -= 1,
+            2 => control.context.unix_ns = LocalUnixNs::new(identity.stamp.unix_ns + 1),
+            3 => control.context.monotonic_ns = MonotonicNs::new(identity.stamp.monotonic_ns + 1),
             4 => *stream = positive(StreamId::new(2)),
             5 => {
                 control.value = Control::Transport {
@@ -2543,7 +2572,7 @@ fn qa_timer_identity_only(gate: RecordingGate) {
     sink.persist_owned(&mut turn, &original, gate, &work)
         .unwrap();
     let mut repeated = original.clone();
-    repeated.record_no = record(6);
+    repeated.record_no = record(7);
     qa_reject_preserving(
         (&wal, &owner, &handle),
         &mut turn,
@@ -2553,7 +2582,19 @@ fn qa_timer_identity_only(gate: RecordingGate) {
         &repeated,
     );
     qa_settle_once(&handle, &mut turn, &sink, &work);
-    assert_eq!(read_all(&wal.0).0.len(), 5);
+    let ping = handle.take_timer_ping(&mut turn, &work).unwrap();
+    drop(ping);
+    assert_eq!(read_all(&wal.0).0.len(), 6);
+    assert!(matches!(
+        read_all(&wal.0).0[4].value,
+        Record::Control(ControlRecord {
+            value: Control::Transport {
+                value: Transport::Up,
+                ..
+            },
+            ..
+        })
+    ));
     assert_eq!(read_all(&wal.0).0.last(), Some(&original));
 }
 
@@ -2702,7 +2743,11 @@ fn qa_generated_original_stages(gate: RecordingGate) {
     drop(held_close);
     let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
         DispatchReport::Dispatched
     ));
     let connection_record = qa_epoch(6, identity, connection.clone());
@@ -2953,7 +2998,7 @@ fn qa_integrator_down_completion_keeps_original_close(gate: RecordingGate) {
     let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
     let mut dispatched = 0;
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |command| {
+        owner.dispatch(&mut turn, lease.into_command().unwrap(), |command| {
             assert_eq!(command.stream, identity.stream);
             assert_eq!(command.connection, binding().connection_id);
             assert_eq!(command.epoch, identity.epoch);
@@ -3092,7 +3137,7 @@ fn qa_down_close_foreign_and_dispatch_lifecycle(gate: RecordingGate) {
     assert_eq!(handle.authority().ownership_report(), leased_ledger);
     let command = match owner.dispatch(
         &mut foreign_turn,
-        lease.into_command(),
+        lease.into_command().unwrap(),
         |_| -> Result<(), ()> { panic!("foreign turn cannot invoke the Close effect") },
     ) {
         DispatchReport::Denied {
@@ -3122,7 +3167,7 @@ fn qa_down_close_foreign_and_dispatch_lifecycle(gate: RecordingGate) {
     assert_eq!(handle.authority().ownership_report(), retained);
     let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |_| Err::<(), _>(
+        owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Err::<(), _>(
             "ambiguous original Close"
         )),
         DispatchReport::DispatchFailed {
@@ -3142,7 +3187,7 @@ fn qa_down_close_foreign_and_dispatch_lifecycle(gate: RecordingGate) {
     let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
     let mut dispatched = 0;
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |command| {
+        owner.dispatch(&mut turn, lease.into_command().unwrap(), |command| {
             assert_eq!(command.stream, identity.stream);
             assert_eq!(command.connection, binding().connection_id);
             assert_eq!(command.epoch, identity.epoch);
@@ -3263,7 +3308,11 @@ fn qa_down_close_alias_exhaustion(gate: RecordingGate) {
     ));
     let lease = leased(owner.reclaim_close(&mut turn, close));
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
         DispatchReport::Dispatched
     ));
     assert_eq!(handle.authority().ownership_report().work_used, 0);
@@ -3310,7 +3359,11 @@ fn qa_down_close_duplicate_prior_and_terminal_reuse(gate: RecordingGate) {
             let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
             if variant == 2 {
                 assert!(matches!(
-                    owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                    owner.dispatch(
+                        &mut turn,
+                        lease.into_command().unwrap(),
+                        |_| Ok::<_, ()>(())
+                    ),
                     DispatchReport::Dispatched
                 ));
             } else {
@@ -3379,7 +3432,11 @@ fn qa_down_close_duplicate_prior_and_terminal_reuse(gate: RecordingGate) {
             assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
             let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
             assert!(matches!(
-                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
                 DispatchReport::Dispatched
             ));
         }
@@ -3422,16 +3479,15 @@ fn qa_down_durable_duplicate_prior_and_terminal_close_reuse_preserves_one_owner(
 
 fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
     for variant in 0..4 {
+        if variant == 3 {
+            // Approved Timer A closes the former generic Timer-only mint route.
+            // Check its preserving rejection and a genuine Down/Close control.
+            qa_timer_ping_cannot_mint_close(gate);
+            continue;
+        }
         let wal = TempWal::new("qa-down-close-unrelated-owner");
         let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
-        let other_identity = qa_original_identity(if variant == 3 {
-            ObservationClass::Timer {
-                timer_id: 99,
-                deadline_ns: 5,
-            }
-        } else {
-            ObservationClass::Raw
-        });
+        let other_identity = qa_original_identity(ObservationClass::Raw);
         let other = if variant == 0 {
             handle
                 .reserve_work(&mut turn, WorkKind::PendingPlan)
@@ -3440,22 +3496,8 @@ fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
             qa_admit(&handle, &mut turn, other_identity)
         };
         let mut down_no = 5;
-        if variant >= 2 {
-            let other_record = if variant == 2 {
-                qa_raw(5, other_identity, false)
-            } else {
-                frame(
-                    5,
-                    Record::Control(ControlRecord {
-                        context: qa_context(other_identity),
-                        value: Control::Timer {
-                            stream: other_identity.stream,
-                            timer_id: 99,
-                            deadline_ns: 5,
-                        },
-                    }),
-                )
-            };
+        if variant == 2 {
+            let other_record = qa_raw(5, other_identity, false);
             sink.persist_owned(&mut turn, &other_record, gate, &other)
                 .unwrap();
             qa_settle_once(&handle, &mut turn, &sink, &other);
@@ -3472,6 +3514,25 @@ fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
         let held = leased(owner.reclaim_close(&mut turn, close.clone()));
         let identity = qa_original_identity(ObservationClass::Disconnected);
         let down = qa_admit(&handle, &mut turn, identity);
+        if variant == 1 {
+            qa_timer_reject(
+                (&wal, &owner, &handle),
+                &mut turn,
+                &mut sink,
+                &down,
+                gate,
+                &qa_transport(5, identity, Transport::Down),
+                AuthorityError::TimerOrderBlocked {
+                    earlier_work_id: other.id(),
+                },
+            );
+            // The earlier original Raw receipt removes the FIFO barrier while
+            // its completion remains Pending. Its unrelated live Close still
+            // cannot account for the later received Down's completion.
+            sink.persist_owned(&mut turn, &qa_raw(5, other_identity, false), gate, &other)
+                .unwrap();
+            down_no = 6;
+        }
         let original = qa_transport(down_no, identity, Transport::Down);
         sink.persist_owned(&mut turn, &original, gate, &down)
             .unwrap();
@@ -3501,7 +3562,7 @@ fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
             QuiescenceReport::NotReady(_)
         ));
         assert!(matches!(
-            owner.dispatch(&mut turn, held.into_command(), |_| Ok::<_, ()>(())),
+            owner.dispatch(&mut turn, held.into_command().unwrap(), |_| Ok::<_, ()>(())),
             DispatchReport::Dispatched
         ));
         // The earlier Close is now actually fulfilled; retry reuses its settled
@@ -3521,13 +3582,6 @@ fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
         );
         assert_eq!(fs::read(&wal.0).unwrap(), bytes);
         if variant == 1 {
-            sink.persist_owned(
-                &mut turn,
-                &qa_raw(down_no + 1, other_identity, false),
-                gate,
-                &other,
-            )
-            .unwrap();
             qa_settle_once(&handle, &mut turn, &sink, &other);
         }
         drop(other);
@@ -3538,7 +3592,10 @@ fn qa_down_close_rejects_unrelated_live_owner(gate: RecordingGate) {
             QuiescenceReport::Ready(_)
         ));
         let records = read_all(&wal.0).0;
-        assert_eq!(records.len(), (down_no + u64::from(variant == 1)) as usize);
+        assert_eq!(records.len(), down_no as usize);
+        if variant == 1 {
+            assert_eq!(&records[4..], &[qa_raw(5, other_identity, false), original]);
+        }
         assert!(!records.iter().any(|record| matches!(
             record.value,
             Record::SegmentSeal(_) | Record::ArchiveSeal(_)
@@ -3649,7 +3706,11 @@ fn qa_down_close_failure_cut_neighbor_and_abandonment(gate: RecordingGate) {
         assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
         let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
         assert!(matches!(
-            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+            owner.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
             DispatchReport::Dispatched
         ));
         assert_eq!(handle.authority().ownership_report().work_used, 0);
@@ -3712,7 +3773,11 @@ fn qa_down_close_failure_cut_neighbor_and_abandonment(gate: RecordingGate) {
     assert_eq!(close.storage(), CloseStorage::ReservedTerminal);
     let lease = leased(owner.reclaim_close(&mut turn, close));
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
         DispatchReport::Dispatched
     ));
     assert_eq!(handle.authority().ownership_report().work_used, 1);
@@ -3754,19 +3819,22 @@ fn qa_down_close_reserved_terminal_reuse(gate: RecordingGate) {
             .close
             .expect("one original reserved terminal lease");
         assert_eq!(lease.work_owner_id(), None);
-        let held = if variant == 1 {
-            Some(lease)
-        } else {
-            if variant == 2 {
-                assert!(matches!(
-                    owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
-                    DispatchReport::Dispatched
-                ));
+        let held =
+            if variant == 1 {
+                Some(lease)
             } else {
-                drop(lease);
-            }
-            None
-        };
+                if variant == 2 {
+                    assert!(matches!(
+                        owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Ok::<_, ()>(
+                            ()
+                        )),
+                        DispatchReport::Dispatched
+                    ));
+                } else {
+                    drop(lease);
+                }
+                None
+            };
         let expected_state = match variant {
             0 => CloseState::Pending,
             1 => CloseState::Leased,
@@ -3817,7 +3885,11 @@ fn qa_down_close_reserved_terminal_reuse(gate: RecordingGate) {
                 CloseLeaseReport::AlreadyLeased
             ));
             assert!(matches!(
-                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<_, ()>(())),
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
                 DispatchReport::Dispatched
             ));
         }
@@ -3850,4 +3922,2654 @@ fn qa_down_written_preexisting_reserved_terminal_close_is_reused_in_all_states()
 #[test]
 fn qa_down_durable_preexisting_reserved_terminal_close_is_reused_in_all_states() {
     qa_down_close_reserved_terminal_reuse(RecordingGate::Durable);
+}
+
+// ARCH-REC-001D-TIMER-A-20261008: public owner/bound-sink integration probes.
+// Durable entries use the real file backend and original authority capabilities.
+// Written entries are supplemental controls.
+const QA_PING_NS: u64 = 30_000_000_000;
+const QA_PONG_NS: u64 = 15_000_000_000;
+
+fn qa_timer_stamp(monotonic_ns: u64) -> ReceiveStamp {
+    ReceiveStamp {
+        unix_ns: 17,
+        monotonic_ns,
+    }
+}
+
+fn qa_timer_frame(number: u64, identity: ObservationIdentity) -> RecordFrame {
+    let ObservationClass::Timer {
+        timer_id,
+        deadline_ns,
+    } = identity.class
+    else {
+        panic!("original authority Timer required");
+    };
+    frame(
+        number,
+        Record::Control(ControlRecord {
+            context: qa_context(identity),
+            value: Control::Timer {
+                stream: identity.stream,
+                timer_id,
+                deadline_ns,
+            },
+        }),
+    )
+}
+
+fn qa_timer_transport(number: u64, identity: ObservationIdentity, value: Transport) -> RecordFrame {
+    let mut original = qa_transport(number, identity, value);
+    let Record::Control(ControlRecord {
+        value: Control::Transport { connection, .. },
+        ..
+    }) = &mut original.value
+    else {
+        unreachable!();
+    };
+    *connection = positive(ConnectionId::new(identity.stream.get()));
+    original
+}
+
+fn qa_timer_install_up(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+    stream: StreamId,
+    stamp: u64,
+) {
+    let mut identity = qa_original_identity(ObservationClass::Connected);
+    identity.stream = stream;
+    identity.stamp = qa_timer_stamp(stamp);
+    let work = qa_admit(handle, turn, identity);
+    sink.persist_owned(
+        turn,
+        &qa_timer_transport(handle.prefix().next_record.get(), identity, Transport::Up),
+        gate,
+        &work,
+    )
+    .unwrap();
+    qa_settle_once(handle, turn, sink, &work);
+    drop(work);
+}
+
+fn qa_timer_due(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    stream: StreamId,
+    stamp: u64,
+) -> AdmittedTimer {
+    let TimerAdmission::Admitted(timer) = handle
+        .admit_due_timer(turn, stream, qa_timer_stamp(stamp))
+        .unwrap()
+    else {
+        panic!("one genuine original due Timer required");
+    };
+    timer
+        .owner()
+        .set_kind(turn, WorkKind::InFlightObservation)
+        .unwrap();
+    timer
+}
+
+fn qa_timer_arm_timeout(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+    stream: StreamId,
+) {
+    qa_timer_install_up(handle, turn, sink, gate, stream, 5);
+    let ping = qa_timer_due(handle, turn, stream, 5 + QA_PING_NS);
+    assert_eq!(ping.kind(), TimerKind::Ping);
+    sink.persist_owned(
+        turn,
+        &qa_timer_frame(handle.prefix().next_record.get(), ping.identity()),
+        gate,
+        ping.owner(),
+    )
+    .unwrap();
+    let lease = handle.take_timer_ping(turn, ping.owner()).unwrap();
+    qa_settle_once(handle, turn, sink, ping.owner());
+    assert!(matches!(
+        handle
+            .authority()
+            .dispatch(turn, lease, |_| Ok::<_, ()>(())),
+        DispatchReport::Dispatched
+    ));
+    drop(ping);
+}
+
+fn qa_timer_timeout(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+    stream: StreamId,
+) -> AdmittedTimer {
+    qa_timer_arm_timeout(handle, turn, sink, gate, stream);
+    let timeout = qa_timer_due(handle, turn, stream, 5 + QA_PING_NS + QA_PONG_NS);
+    assert_eq!(timeout.kind(), TimerKind::Timeout);
+    timeout
+}
+
+fn qa_timer_reject(
+    boundary: (&TempWal, &CaptureSessionOwner, &SupervisorSessionHandle),
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    work: &WorkOwner,
+    gate: RecordingGate,
+    submitted: &RecordFrame,
+    expected: AuthorityError,
+) {
+    let (wal, owner, handle) = boundary;
+    let ledger = handle.authority().ownership_report();
+    let status = owner.session_status();
+    let prefix = handle.prefix();
+    let closes = owner.outstanding_close_owners();
+    let watermarks = owner.watermarks();
+    let progress = handle.timer_progress(turn, work);
+    let physical = fs::read(&wal.0).unwrap();
+    let inventory = read_all(&wal.0).0;
+    let backend_calls = owner.sink_persist_calls();
+    assert_eq!(
+        sink.persist_owned(turn, submitted, gate, work),
+        Err(PersistBoundaryError::Authority(expected))
+    );
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(owner.session_status(), status);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.outstanding_close_owners(), closes);
+    assert_eq!(owner.watermarks(), watermarks);
+    assert_eq!(handle.timer_progress(turn, work), progress);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    assert_eq!(read_all(&wal.0).0, inventory);
+    assert_eq!(owner.sink_persist_calls(), backend_calls);
+}
+
+fn qa_timer_selected_close(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    work: &WorkOwner,
+) -> CloseOwnerRef {
+    let TimerProgressView::TimerThenDown {
+        timer_confirmed,
+        down_confirmed,
+        close,
+    } = handle.timer_progress(turn, work).unwrap()
+    else {
+        panic!("private original Timeout plan expected");
+    };
+    assert!(timer_confirmed);
+    assert!(!down_confirmed);
+    assert!(!close.ready);
+    assert_eq!(close.state, CloseState::Pending);
+    assert_eq!(close.owner.storage(), CloseStorage::WorkOwner(work.id()));
+    close.owner
+}
+
+fn qa_timer_commit_down(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+    timer: &AdmittedTimer,
+) -> RecordFrame {
+    let down = qa_timer_transport(
+        handle.prefix().next_record.get(),
+        timer.identity(),
+        Transport::Down,
+    );
+    sink.persist_owned(turn, &down, gate, timer.owner())
+        .unwrap();
+    let TimerProgressView::TimerThenDown {
+        timer_confirmed,
+        down_confirmed,
+        close,
+    } = handle.timer_progress(turn, timer.owner()).unwrap()
+    else {
+        panic!("original Timeout stages expected");
+    };
+    assert!(timer_confirmed && down_confirmed && close.ready);
+    assert_eq!(
+        close.owner.storage(),
+        CloseStorage::WorkOwner(timer.owner().id())
+    );
+    down
+}
+
+fn qa_timer_ping_cannot_mint_close(gate: RecordingGate) {
+    let wal = TempWal::new("timer-ping-close-mint");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    let ping = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let before = handle.authority().ownership_report();
+    let physical = fs::read(&wal.0).unwrap();
+    assert_eq!(
+        handle.mandatory_close(
+            &mut turn,
+            binding().id,
+            binding().tag.connection,
+            Some(ping.owner())
+        ),
+        Err(AuthorityError::TimerAuthorityRequired)
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(fs::read(&wal.0).unwrap(), physical);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    sink.persist_owned(
+        &mut turn,
+        &qa_timer_frame(6, ping.identity()),
+        gate,
+        ping.owner(),
+    )
+    .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, ping.owner());
+    let command = handle.take_timer_ping(&mut turn, ping.owner()).unwrap();
+    drop(command);
+    drop(ping);
+    let identity = qa_original_identity(ObservationClass::Disconnected);
+    let down = qa_admit(&handle, &mut turn, identity);
+    sink.persist_owned(
+        &mut turn,
+        &qa_transport(7, identity, Transport::Down),
+        gate,
+        &down,
+    )
+    .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &down);
+    let close = qa_pending_down_close(&owner, identity, &down);
+    assert_eq!(close.storage(), CloseStorage::WorkOwner(down.id()));
+    assert_eq!(read_all(&wal.0).0.len(), 7);
+}
+
+fn qa_timer_t01_admission_order(gate: RecordingGate) {
+    for class in [ObservationClass::Pong, ObservationClass::Connected] {
+        for offset in [-1_i64, 0, 1] {
+            for timer_first in [false, true] {
+                let wal = TempWal::new("timer-t01-order");
+                let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+                qa_timer_arm_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+                let deadline = 5 + QA_PING_NS + QA_PONG_NS;
+                let mut identity = qa_original_identity(class);
+                identity.stamp = qa_timer_stamp(deadline.checked_add_signed(offset).unwrap());
+                let earlier = (!timer_first).then(|| qa_admit(&handle, &mut turn, identity));
+                let timer = qa_timer_due(&handle, &mut turn, binding().id, deadline);
+                let received = earlier.unwrap_or_else(|| qa_admit(&handle, &mut turn, identity));
+                let original_timer = qa_timer_frame(7, timer.identity());
+                let original_up = qa_timer_transport(7, identity, Transport::Up);
+                if timer_first {
+                    qa_timer_reject(
+                        (&wal, &owner, &handle),
+                        &mut turn,
+                        &mut sink,
+                        &received,
+                        gate,
+                        &original_up,
+                        AuthorityError::TimerOrderBlocked {
+                            earlier_work_id: timer.owner().id(),
+                        },
+                    );
+                    sink.persist_owned(&mut turn, &original_timer, gate, timer.owner())
+                        .unwrap();
+                    let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+                    assert!(matches!(
+                        owner.reclaim_close(&mut turn, close.clone()),
+                        CloseLeaseReport::Rejected(AuthorityError::CloseNotReady)
+                    ));
+                    assert_eq!(
+                        handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                        Err(AuthorityError::NotQuiescent)
+                    );
+                    let down = qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+                    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+                    let before_calls = owner.sink_persist_calls();
+                    let before_bytes = fs::read(&wal.0).unwrap();
+                    handle
+                        .complete_observation(
+                            &mut turn,
+                            &sink,
+                            &received,
+                            Some((identity.stream, identity.epoch)),
+                        )
+                        .unwrap();
+                    assert_eq!(owner.sink_persist_calls(), before_calls);
+                    assert_eq!(fs::read(&wal.0).unwrap(), before_bytes);
+                    assert_eq!(&read_all(&wal.0).0[6..], &[original_timer, down]);
+                } else {
+                    qa_timer_reject(
+                        (&wal, &owner, &handle),
+                        &mut turn,
+                        &mut sink,
+                        timer.owner(),
+                        gate,
+                        &original_timer,
+                        AuthorityError::TimerOrderBlocked {
+                            earlier_work_id: received.id(),
+                        },
+                    );
+                    sink.persist_owned(&mut turn, &original_up, gate, &received)
+                        .unwrap();
+                    qa_settle_once(&handle, &mut turn, &sink, &received);
+                    let obsolete = qa_timer_frame(8, timer.identity());
+                    sink.persist_owned(&mut turn, &obsolete, gate, timer.owner())
+                        .unwrap();
+                    assert_eq!(
+                        handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+                        TimerProgressView::TimerOnlyObsolete {
+                            timer_confirmed: true
+                        }
+                    );
+                    assert!(matches!(
+                        handle.take_timer_ping(&mut turn, timer.owner()),
+                        Err(AuthorityError::CommandRevoked)
+                    ));
+                    qa_timer_reject(
+                        (&wal, &owner, &handle),
+                        &mut turn,
+                        &mut sink,
+                        timer.owner(),
+                        gate,
+                        &qa_timer_transport(9, timer.identity(), Transport::Down),
+                        AuthorityError::InvalidBinding,
+                    );
+                    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+                    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+                    assert_eq!(&read_all(&wal.0).0[6..], &[original_up, obsolete]);
+                }
+                assert_eq!(
+                    read_all(&wal.0).1.status,
+                    ArchiveStatus::ValidPrefixIncomplete
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn timer_a_t01_durable_original_admission_order_wins_pong_and_connected_deadline_ties() {
+    qa_timer_t01_admission_order(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t01_written_original_admission_order_wins_pong_and_connected_deadline_ties() {
+    qa_timer_t01_admission_order(RecordingGate::Written);
+}
+
+fn qa_timer_t02_record_order(gate: RecordingGate) {
+    for class in [
+        ObservationClass::Raw,
+        ObservationClass::Gap,
+        ObservationClass::RejectedStaleRaw,
+    ] {
+        for raw_first in [false, true] {
+            let wal = TempWal::new("timer-t02-record-order");
+            let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+            qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+            // Reservation ID predates Timer; only successful record admission
+            // determines whether this obligation is actually an earlier barrier.
+            let raw = handle
+                .reserve_work(&mut turn, WorkKind::QueuedObservation)
+                .unwrap();
+            let identity = qa_original_identity(class);
+            if raw_first {
+                handle.admit_observation(&mut turn, &raw, identity).unwrap();
+            }
+            let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+            assert!(raw.id() < timer.owner().id());
+            if !raw_first {
+                handle.admit_observation(&mut turn, &raw, identity).unwrap();
+            }
+            raw.set_kind(&mut turn, WorkKind::InFlightObservation)
+                .unwrap();
+            let timer_record = qa_timer_frame(6, timer.identity());
+            if raw_first {
+                qa_timer_reject(
+                    (&wal, &owner, &handle),
+                    &mut turn,
+                    &mut sink,
+                    timer.owner(),
+                    gate,
+                    &timer_record,
+                    AuthorityError::TimerOrderBlocked {
+                        earlier_work_id: raw.id(),
+                    },
+                );
+                let first = if class == ObservationClass::Gap {
+                    qa_gap(6, identity, Reason::QueueOverflow)
+                } else {
+                    qa_raw(6, identity, class == ObservationClass::RejectedStaleRaw)
+                };
+                sink.persist_owned(&mut turn, &first, gate, &raw).unwrap();
+                if class == ObservationClass::RejectedStaleRaw {
+                    qa_timer_reject(
+                        (&wal, &owner, &handle),
+                        &mut turn,
+                        &mut sink,
+                        timer.owner(),
+                        gate,
+                        &qa_timer_frame(7, timer.identity()),
+                        AuthorityError::TimerOrderBlocked {
+                            earlier_work_id: raw.id(),
+                        },
+                    );
+                    sink.persist_owned(
+                        &mut turn,
+                        &qa_gap(7, identity, Reason::Unknown),
+                        gate,
+                        &raw,
+                    )
+                    .unwrap();
+                }
+                // Exact receipts, with the original Raw alias still held, cease
+                // to block the later Timer even before queue completion.
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_frame(handle.prefix().next_record.get(), timer.identity()),
+                    gate,
+                    timer.owner(),
+                )
+                .unwrap();
+            } else {
+                sink.persist_owned(&mut turn, &timer_record, gate, timer.owner())
+                    .unwrap();
+                let first = if class == ObservationClass::Gap {
+                    qa_gap(7, identity, Reason::QueueOverflow)
+                } else {
+                    qa_raw(7, identity, class == ObservationClass::RejectedStaleRaw)
+                };
+                sink.persist_owned(&mut turn, &first, gate, &raw).unwrap();
+                if class == ObservationClass::RejectedStaleRaw {
+                    sink.persist_owned(
+                        &mut turn,
+                        &qa_gap(8, identity, Reason::Unknown),
+                        gate,
+                        &raw,
+                    )
+                    .unwrap();
+                }
+            }
+            qa_settle_once(&handle, &mut turn, &sink, &raw);
+            qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+            drop(handle.take_timer_ping(&mut turn, timer.owner()).unwrap());
+            assert_eq!(
+                owner.sink_persist_calls(),
+                if class == ObservationClass::RejectedStaleRaw {
+                    4
+                } else {
+                    3
+                }
+            );
+            assert_eq!(
+                read_all(&wal.0).1.status,
+                ArchiveStatus::ValidPrefixIncomplete
+            );
+        }
+    }
+}
+
+#[test]
+fn timer_a_t02_durable_fifo_uses_admission_order_and_all_original_raw_gap_stages() {
+    qa_timer_t02_record_order(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t02_written_fifo_uses_admission_order_and_all_original_raw_gap_stages() {
+    qa_timer_t02_record_order(RecordingGate::Written);
+}
+
+fn qa_timer_t03_frozen_interstage(gate: RecordingGate) {
+    for class in [
+        ObservationClass::Pong,
+        ObservationClass::Connected,
+        ObservationClass::Disconnected,
+    ] {
+        let wal = TempWal::new("timer-t03-frozen-plan");
+        let (owner, mut turn, handle, mut sink) = owner_two_scopes_with_gate(&wal.0, gate);
+        let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+        sink.persist_owned(
+            &mut turn,
+            &qa_timer_frame(9, timer.identity()),
+            gate,
+            timer.owner(),
+        )
+        .unwrap();
+        let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+        let mut identity = qa_original_identity(class);
+        identity.stamp = qa_timer_stamp(timer.identity().stamp.monotonic_ns + 1);
+        let received = qa_admit(&handle, &mut turn, identity);
+        let proposed = qa_timer_transport(
+            10,
+            identity,
+            if class == ObservationClass::Disconnected {
+                Transport::Down
+            } else {
+                Transport::Up
+            },
+        );
+        qa_timer_reject(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &received,
+            gate,
+            &proposed,
+            AuthorityError::TimerOrderBlocked {
+                earlier_work_id: timer.owner().id(),
+            },
+        );
+        let before = handle.authority().ownership_report();
+        assert_eq!(
+            handle.authority().advance_epoch(
+                &mut turn,
+                binding().id,
+                binding().tag.connection,
+                positive(ConnectionEpoch::new(2))
+            ),
+            Err(AuthorityError::TimerPlanInProgress {
+                work_id: timer.owner().id()
+            })
+        );
+        assert_eq!(handle.authority().ownership_report(), before);
+        // A neighboring scope remains independently eligible during the freeze.
+        qa_timer_install_up(
+            &handle,
+            &mut turn,
+            &mut sink,
+            gate,
+            positive(StreamId::new(2)),
+            7,
+        );
+        assert_eq!(
+            qa_timer_selected_close(&handle, &mut turn, timer.owner()),
+            close
+        );
+        let down = qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        assert_eq!(down.record_no, record(11));
+        assert_eq!(
+            read_all(&wal.0).1.status,
+            ArchiveStatus::ValidPrefixIncomplete
+        );
+        if class != ObservationClass::Disconnected {
+            let bytes = fs::read(&wal.0).unwrap();
+            let calls = owner.sink_persist_calls();
+            handle
+                .complete_observation(
+                    &mut turn,
+                    &sink,
+                    &received,
+                    Some((identity.stream, identity.epoch)),
+                )
+                .unwrap();
+            assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+            assert_eq!(owner.sink_persist_calls(), calls);
+        }
+    }
+}
+
+#[test]
+fn timer_a_t03_durable_timeout_plan_freezes_same_scope_and_allows_neighbor() {
+    qa_timer_t03_frozen_interstage(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t03_written_timeout_plan_freezes_same_scope_and_allows_neighbor() {
+    qa_timer_t03_frozen_interstage(RecordingGate::Written);
+}
+
+fn qa_timer_t04_closed_legacy_routes(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t04-legacy-closure");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let work = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    let identity = qa_original_identity(ObservationClass::Timer {
+        timer_id: 99,
+        deadline_ns: 5,
+    });
+    let before = handle.authority().ownership_report();
+    assert_eq!(
+        handle.admit_observation(&mut turn, &work, identity),
+        Err(AuthorityError::TimerAuthorityRequired)
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        &work,
+        gate,
+        &qa_timer_frame(5, identity),
+        AuthorityError::TimerAuthorityRequired,
+    );
+    assert!(matches!(
+        handle.command(
+            &mut turn,
+            identity.stream,
+            identity.epoch,
+            CommandKind::SendText {
+                text: "ping".to_owned()
+            },
+            &work
+        ),
+        Err(AuthorityError::TimerAuthorityRequired)
+    ));
+    assert_eq!(handle.authority().ownership_report(), before);
+    // Rejecting the forged Timer preserves a caller's rightful unused W.
+    let raw_identity = qa_original_identity(ObservationClass::Raw);
+    handle
+        .admit_observation(&mut turn, &work, raw_identity)
+        .unwrap();
+    work.set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    sink.persist_owned(&mut turn, &qa_raw(5, raw_identity, false), gate, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    assert!(matches!(
+        handle.command(
+            &mut turn,
+            identity.stream,
+            identity.epoch,
+            CommandKind::SendText {
+                text: "ping".to_owned()
+            },
+            &work
+        ),
+        Err(AuthorityError::TimerAuthorityRequired)
+    ));
+    assert_eq!(owner.sink_persist_calls(), 1);
+    assert_eq!(read_all(&wal.0).0.len(), 5);
+}
+
+#[test]
+fn timer_a_t04_durable_legacy_timer_and_generic_ping_routes_reject_preservingly() {
+    qa_timer_t04_closed_legacy_routes(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t04_written_legacy_timer_and_generic_ping_routes_reject_preservingly() {
+    qa_timer_t04_closed_legacy_routes(RecordingGate::Written);
+}
+
+fn qa_timer_t05_cross_authority_and_replay(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t05-rightful");
+    let foreign_wal = TempWal::new("timer-t05-foreign-numeric-equal");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let (foreign_owner, mut foreign_turn, foreign_handle, mut foreign_sink) =
+        owner_with_fault(&foreign_wal.0, gate, None);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    qa_timer_install_up(
+        &foreign_handle,
+        &mut foreign_turn,
+        &mut foreign_sink,
+        gate,
+        binding().id,
+        5,
+    );
+    let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let foreign_timer = qa_timer_due(
+        &foreign_handle,
+        &mut foreign_turn,
+        binding().id,
+        5 + QA_PING_NS,
+    );
+    assert_eq!(timer.identity(), foreign_timer.identity());
+    assert_eq!(timer.owner().id(), foreign_timer.owner().id());
+    let original = qa_timer_frame(6, timer.identity());
+    let foreign_ledger = foreign_handle.authority().ownership_report();
+    let foreign_status = foreign_owner.session_status();
+    let foreign_calls = foreign_owner.sink_persist_calls();
+    let foreign_physical = fs::read(&foreign_wal.0).unwrap();
+    let before_foreign_extract = handle.authority().ownership_report();
+    assert!(matches!(
+        handle.take_timer_ping(&mut turn, foreign_timer.owner()),
+        Err(AuthorityError::AuthorityMismatch)
+    ));
+    assert_eq!(
+        handle.authority().ownership_report(),
+        before_foreign_extract
+    );
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        foreign_timer.owner(),
+        gate,
+        &original,
+        AuthorityError::AuthorityMismatch,
+    );
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut foreign_turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &original,
+        AuthorityError::AuthorityMismatch,
+    );
+    assert_eq!(
+        foreign_handle.authority().ownership_report(),
+        foreign_ledger
+    );
+    assert_eq!(foreign_owner.session_status(), foreign_status);
+    assert_eq!(foreign_owner.sink_persist_calls(), foreign_calls);
+    assert_eq!(fs::read(&foreign_wal.0).unwrap(), foreign_physical);
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_transport(6, timer.identity(), Transport::Down),
+        AuthorityError::InvalidBinding,
+    );
+    sink.persist_owned(&mut turn, &original, gate, timer.owner())
+        .unwrap();
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_frame(7, timer.identity()),
+        AuthorityError::InvalidBinding,
+    );
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    let ping = handle.take_timer_ping(&mut turn, timer.owner()).unwrap();
+    drop(ping);
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_frame(7, timer.identity()),
+        AuthorityError::InvalidOwner,
+    );
+    // Consumed metadata cannot be re-admitted as a new Timer obligation.
+    let replacement = handle
+        .reserve_work(&mut turn, WorkKind::QueuedObservation)
+        .unwrap();
+    let before = handle.authority().ownership_report();
+    assert_eq!(
+        handle.admit_observation(&mut turn, &replacement, timer.identity()),
+        Err(AuthorityError::TimerAuthorityRequired)
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(owner.sink_persist_calls(), 2);
+    assert_eq!(read_all(&wal.0).0.len(), 6);
+    // The untouched foreign original remains independently recordable once.
+    foreign_sink
+        .persist_owned(&mut foreign_turn, &original, gate, foreign_timer.owner())
+        .unwrap();
+    qa_settle_once(
+        &foreign_handle,
+        &mut foreign_turn,
+        &foreign_sink,
+        foreign_timer.owner(),
+    );
+    drop(
+        foreign_handle
+            .take_timer_ping(&mut foreign_turn, foreign_timer.owner())
+            .unwrap(),
+    );
+    assert_eq!(foreign_owner.sink_persist_calls(), 2);
+    assert_eq!(read_all(&foreign_wal.0).0.len(), 6);
+    let consumed_identity = timer.identity();
+    let consumed_work_id = timer.owner().id();
+    drop(replacement);
+    drop(timer);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    // The retired original no longer has any capability. Recycled bounded
+    // storage can only expose a fresh opaque original with new frontiers.
+    let next = qa_timer_due(
+        &handle,
+        &mut turn,
+        binding().id,
+        5 + QA_PING_NS + QA_PONG_NS,
+    );
+    assert_eq!(next.kind(), TimerKind::Timeout);
+    assert!(next.owner().id() > consumed_work_id);
+    let ObservationClass::Timer {
+        timer_id: old_id, ..
+    } = consumed_identity.class
+    else {
+        unreachable!();
+    };
+    let ObservationClass::Timer {
+        timer_id: new_id, ..
+    } = next.identity().class
+    else {
+        unreachable!();
+    };
+    assert!(new_id > old_id);
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        next.owner(),
+        gate,
+        &qa_timer_frame(7, consumed_identity),
+        AuthorityError::InvalidBinding,
+    );
+    let original_next = qa_timer_frame(7, next.identity());
+    sink.persist_owned(&mut turn, &original_next, gate, next.owner())
+        .unwrap();
+    let original_down = qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &next);
+    qa_settle_once(&handle, &mut turn, &sink, next.owner());
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        next.owner(),
+        gate,
+        &qa_timer_frame(9, consumed_identity),
+        AuthorityError::InvalidOwner,
+    );
+    assert_eq!(&read_all(&wal.0).0[6..], &[original_next, original_down]);
+    assert_eq!(owner.sink_persist_calls(), 4);
+}
+
+#[test]
+fn timer_a_t05_durable_numeric_equal_foreign_capabilities_and_consumed_replays_preserve_originals()
+{
+    qa_timer_t05_cross_authority_and_replay(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t05_written_numeric_equal_foreign_capabilities_and_consumed_replays_preserve_originals()
+{
+    qa_timer_t05_cross_authority_and_replay(RecordingGate::Written);
+}
+
+fn qa_timer_t06_due_and_capacity(gate: RecordingGate) {
+    for two_scopes in [false, true] {
+        let wal = TempWal::new("timer-t06-due-capacity");
+        let (mut owner, mut turn, handle, mut sink) = if two_scopes {
+            owner_two_scopes_with_gate(&wal.0, gate)
+        } else {
+            owner_with_fault(&wal.0, gate, None)
+        };
+        let before = handle.authority().ownership_report();
+        assert!(matches!(
+            handle
+                .admit_due_timer(&mut turn, binding().id, qa_timer_stamp(u64::MAX))
+                .unwrap(),
+            TimerAdmission::NotDue
+        ));
+        assert_eq!(handle.authority().ownership_report(), before);
+        qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+        if two_scopes {
+            qa_timer_install_up(
+                &handle,
+                &mut turn,
+                &mut sink,
+                gate,
+                positive(StreamId::new(2)),
+                5,
+            );
+        }
+        let baseline = handle.authority().ownership_report();
+        let calls = owner.sink_persist_calls();
+        assert!(matches!(
+            handle
+                .admit_due_timer(&mut turn, binding().id, qa_timer_stamp(4 + QA_PING_NS))
+                .unwrap(),
+            TimerAdmission::NotDue
+        ));
+        assert_eq!(handle.authority().ownership_report(), baseline);
+        assert!(matches!(
+            handle.admit_due_timer(
+                &mut turn,
+                positive(StreamId::new(3)),
+                qa_timer_stamp(5 + QA_PING_NS)
+            ),
+            Err(AuthorityError::InvalidBinding)
+        ));
+        assert_eq!(handle.authority().ownership_report(), baseline);
+        let mut filled = Vec::new();
+        for _ in 0..baseline.work_limit {
+            filled.push(
+                handle
+                    .reserve_work(&mut turn, WorkKind::PendingPlan)
+                    .unwrap(),
+            );
+        }
+        let full = handle.authority().ownership_report();
+        let bytes = fs::read(&wal.0).unwrap();
+        assert!(matches!(
+            handle.admit_due_timer(&mut turn, binding().id, qa_timer_stamp(5 + QA_PING_NS)),
+            Err(AuthorityError::WorkExhausted)
+        ));
+        assert_eq!(handle.authority().ownership_report(), full);
+        assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        assert_eq!(owner.sink_persist_calls(), calls);
+        drop(filled.pop().unwrap());
+        let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+        let queued = handle.authority().ownership_report();
+        for stamp in [5 + QA_PING_NS, 6 + QA_PING_NS, u64::MAX] {
+            assert!(
+                matches!(handle.admit_due_timer(&mut turn, binding().id, qa_timer_stamp(stamp)).unwrap(),
+                TimerAdmission::AlreadyQueued { original_work_id } if original_work_id == timer.owner().id())
+            );
+            assert_eq!(handle.authority().ownership_report(), queued);
+        }
+        assert!(matches!(
+            owner.register_supervisor(
+                &mut turn,
+                &[scope()],
+                budget(),
+                HeartbeatPolicy::SupervisorV2
+            ),
+            Err(OwnerError::Authority(AuthorityError::AlreadyRegistered))
+                | Err(OwnerError::InvalidProfile(_))
+        ));
+        assert_eq!(handle.authority().ownership_report(), queued);
+        sink.persist_owned(
+            &mut turn,
+            &qa_timer_frame(handle.prefix().next_record.get(), timer.identity()),
+            gate,
+            timer.owner(),
+        )
+        .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        drop(handle.take_timer_ping(&mut turn, timer.owner()).unwrap());
+        drop(timer);
+        drop(filled);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        if two_scopes {
+            let neighbor = qa_timer_due(
+                &handle,
+                &mut turn,
+                positive(StreamId::new(2)),
+                5 + QA_PING_NS,
+            );
+            assert_eq!(neighbor.kind(), TimerKind::Ping);
+            sink.persist_owned(
+                &mut turn,
+                &qa_timer_frame(handle.prefix().next_record.get(), neighbor.identity()),
+                gate,
+                neighbor.owner(),
+            )
+            .unwrap();
+            qa_settle_once(&handle, &mut turn, &sink, neighbor.owner());
+            drop(handle.take_timer_ping(&mut turn, neighbor.owner()).unwrap());
+        }
+    }
+}
+
+#[test]
+fn timer_a_t06_durable_due_frontier_duplicate_and_capacity_rejection_keep_retryable_schedule() {
+    qa_timer_t06_due_and_capacity(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t06_written_due_frontier_duplicate_and_capacity_rejection_keep_retryable_schedule() {
+    qa_timer_t06_due_and_capacity(RecordingGate::Written);
+}
+
+fn qa_timer_t07_public_time_overflow(gate: RecordingGate) {
+    for obsolete in [false, true] {
+        let wal = TempWal::new("timer-t07-time-overflow");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        qa_timer_install_up(
+            &handle,
+            &mut turn,
+            &mut sink,
+            gate,
+            binding().id,
+            u64::MAX - QA_PING_NS,
+        );
+        let timer = qa_timer_due(&handle, &mut turn, binding().id, u64::MAX);
+        let original = qa_timer_frame(6, timer.identity());
+        if obsolete {
+            let ticket = owner.begin_finalization(&mut turn).unwrap();
+            sink.persist_owned(&mut turn, &original, gate, timer.owner())
+                .unwrap();
+            assert_eq!(
+                handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+                TimerProgressView::TimerOnlyObsolete {
+                    timer_confirmed: true
+                }
+            );
+            qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+            drop(timer);
+            assert!(matches!(
+                handle.quiesce(&mut turn, &ticket),
+                QuiescenceReport::Ready(_)
+            ));
+            assert_eq!(owner.sink_persist_calls(), 2);
+            assert_eq!(read_all(&wal.0).0.len(), 6);
+        } else {
+            let before_calls = owner.sink_persist_calls();
+            let prefix = handle.prefix();
+            assert_eq!(
+                sink.persist_owned(&mut turn, &original, gate, timer.owner()),
+                Err(PersistBoundaryError::Authority(
+                    AuthorityError::TimeOverflow
+                ))
+            );
+            assert_eq!(owner.sink_persist_calls(), before_calls);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(read_all(&wal.0).0.len(), 5);
+            assert!(owner.session_status().storage_stopped.is_some());
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                Err(AuthorityError::StorageStopped)
+            );
+        }
+    }
+}
+
+#[test]
+fn timer_a_t07_durable_active_ping_time_overflow_stops_and_obsolete_max_bypasses_arithmetic() {
+    qa_timer_t07_public_time_overflow(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t07_written_active_ping_time_overflow_stops_and_obsolete_max_bypasses_arithmetic() {
+    qa_timer_t07_public_time_overflow(RecordingGate::Written);
+}
+
+fn qa_timer_t08_atomic_ping(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t08-atomic-ping");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let before = handle.authority().ownership_report();
+    assert!(matches!(
+        handle.take_timer_ping(&mut turn, timer.owner()),
+        Err(AuthorityError::PingNotReady)
+    ));
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    let aliases = [
+        timer.owner().share().unwrap(),
+        timer.owner().share().unwrap(),
+        timer.owner().share().unwrap(),
+    ];
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_frame(6, timer.identity()),
+        AuthorityError::WorkShareExhausted,
+    );
+    assert_eq!(
+        handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+        TimerProgressView::Unselected
+    );
+    drop(aliases);
+    sink.persist_owned(
+        &mut turn,
+        &qa_timer_frame(6, timer.identity()),
+        gate,
+        timer.owner(),
+    )
+    .unwrap();
+    assert_eq!(
+        handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+        TimerProgressView::TimerOnlyPing {
+            timer_confirmed: true,
+            ping_taken: false
+        }
+    );
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    let minted_before = handle.authority().ownership_report();
+    assert!(matches!(
+        handle.command(
+            &mut turn,
+            timer.identity().stream,
+            timer.identity().epoch,
+            CommandKind::SendText {
+                text: "ping".to_owned()
+            },
+            timer.owner()
+        ),
+        Err(AuthorityError::TimerAuthorityRequired)
+    ));
+    assert_eq!(handle.authority().ownership_report(), minted_before);
+    let alias = timer.owner().share().unwrap();
+    drop(timer);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    let command = handle.take_timer_ping(&mut turn, &alias).unwrap();
+    let after_take = handle.authority().ownership_report();
+    assert!(matches!(
+        handle.take_timer_ping(&mut turn, &alias),
+        Err(AuthorityError::PingAlreadyTaken)
+    ));
+    assert_eq!(handle.authority().ownership_report(), after_take);
+    assert_eq!(
+        handle.timer_progress(&mut turn, &alias).unwrap(),
+        TimerProgressView::TimerOnlyPing {
+            timer_confirmed: true,
+            ping_taken: true
+        }
+    );
+    drop(alias);
+    assert_eq!(handle.authority().ownership_report().work_used, 1);
+    let mut effects = 0;
+    assert!(matches!(
+        owner.dispatch(&mut turn, command, |view| {
+            effects += 1;
+            assert_eq!(
+                view.kind,
+                &CommandKind::SendText {
+                    text: "ping".to_owned()
+                }
+            );
+            Err::<(), _>("ambiguous Ping")
+        }),
+        DispatchReport::DispatchFailed {
+            effect: AmbiguousEffect::Unknown,
+            ..
+        }
+    ));
+    assert_eq!(effects, 1);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    assert_eq!(read_all(&wal.0).0.len(), 6);
+    qa_timer_t08_ping_faults(gate);
+}
+
+fn qa_timer_t08_ping_faults(gate: RecordingGate) {
+    for variant in 0..if gate == RecordingGate::Durable { 3 } else { 2 } {
+        let wal = TempWal::new("timer-t08-ping-receipt-fault");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+        let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+        let original = qa_timer_frame(6, timer.identity());
+        let error = PersistError::typed(PersistErrorKind::Io, "original Ping receipt fault");
+        let kind = match variant {
+            0 => SinkFaultKind::BeforeWrite(error),
+            1 => SinkFaultKind::ReceiptMismatch { through: record(5) },
+            2 => SinkFaultKind::WeakGate {
+                achieved: RecordingGate::Flushed,
+            },
+            _ => unreachable!(),
+        };
+        owner
+            .set_sink_fault(
+                &mut turn,
+                Some(SinkFault {
+                    at: record(6),
+                    kind,
+                }),
+            )
+            .unwrap();
+        let prefix = handle.prefix();
+        let calls = owner.sink_persist_calls();
+        let actual = sink.persist_owned(&mut turn, &original, gate, timer.owner());
+        match kind {
+            SinkFaultKind::BeforeWrite(_) => {
+                assert_eq!(actual, Err(PersistBoundaryError::Persistence(error)))
+            }
+            SinkFaultKind::ReceiptMismatch { through } => assert_eq!(
+                actual,
+                Err(PersistBoundaryError::ReceiptMismatch {
+                    expected: record(6),
+                    actual: through
+                })
+            ),
+            SinkFaultKind::WeakGate { achieved } => assert_eq!(
+                actual,
+                Err(PersistBoundaryError::WeakGate {
+                    required: gate,
+                    achieved
+                })
+            ),
+        }
+        assert_eq!(owner.sink_persist_calls(), calls + 1);
+        assert_eq!(handle.prefix(), prefix);
+        assert!(owner.session_status().storage_stopped.is_some());
+        assert!(matches!(
+            handle.take_timer_ping(&mut turn, timer.owner()),
+            Err(AuthorityError::CommandRevoked)
+        ));
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+            Err(AuthorityError::StorageStopped)
+        );
+        assert_eq!(handle.authority().ownership_report().work_used, 1);
+        assert_eq!(
+            sink.persist_owned(&mut turn, &original, gate, timer.owner()),
+            Err(PersistBoundaryError::Authority(
+                AuthorityError::StorageStopped
+            ))
+        );
+        assert_eq!(owner.sink_persist_calls(), calls + 1);
+        assert!(matches!(
+            owner.close_diagnostic(&mut turn).outcome,
+            Ok(DiagnosticCloseState::Closed)
+        ));
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(records.len(), 5 + usize::from(variant != 0));
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(
+            !records
+                .iter()
+                .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+        );
+    }
+}
+
+#[test]
+fn timer_a_t08_durable_exact_ping_receipt_retains_one_same_work_one_shot_ambiguous_effect() {
+    qa_timer_t08_atomic_ping(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t08_written_exact_ping_receipt_retains_one_same_work_one_shot_ambiguous_effect() {
+    qa_timer_t08_atomic_ping(RecordingGate::Written);
+}
+
+fn qa_timer_t09_original_deadline_and_revocation(gate: RecordingGate) {
+    for route in 0..6 {
+        let wal = TempWal::new("timer-t09-delayed-revocation");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 100);
+        let observed = 100 + QA_PING_NS + 1_000;
+        let timer = qa_timer_due(&handle, &mut turn, binding().id, observed);
+        let ObservationClass::Timer { deadline_ns, .. } = timer.identity().class else {
+            unreachable!();
+        };
+        assert_eq!(deadline_ns, 100 + QA_PING_NS);
+        sink.persist_owned(
+            &mut turn,
+            &qa_timer_frame(6, timer.identity()),
+            gate,
+            timer.owner(),
+        )
+        .unwrap();
+        let ping = handle.take_timer_ping(&mut turn, timer.owner()).unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        let before_due = handle.authority().ownership_report();
+        assert!(matches!(
+            handle
+                .admit_due_timer(
+                    &mut turn,
+                    binding().id,
+                    qa_timer_stamp(observed + QA_PONG_NS - 1)
+                )
+                .unwrap(),
+            TimerAdmission::NotDue
+        ));
+        assert_eq!(handle.authority().ownership_report(), before_due);
+        match route {
+            0..=2 => {
+                let class = [
+                    ObservationClass::Pong,
+                    ObservationClass::Connected,
+                    ObservationClass::Disconnected,
+                ][route];
+                let mut identity = qa_original_identity(class);
+                identity.stamp = qa_timer_stamp(observed + 1);
+                let received = qa_admit(&handle, &mut turn, identity);
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_transport(
+                        7,
+                        identity,
+                        if class == ObservationClass::Disconnected {
+                            Transport::Down
+                        } else {
+                            Transport::Up
+                        },
+                    ),
+                    gate,
+                    &received,
+                )
+                .unwrap();
+                qa_settle_once(&handle, &mut turn, &sink, &received);
+            }
+            3 => {
+                let _ticket = owner.begin_finalization(&mut turn).unwrap();
+            }
+            4 => {
+                let termination = handle.terminate(&mut turn, terminal()).unwrap();
+                drop(termination.close);
+            }
+            5 => {
+                let timeout = qa_timer_due(&handle, &mut turn, binding().id, observed + QA_PONG_NS);
+                assert_eq!(timeout.kind(), TimerKind::Timeout);
+                let ObservationClass::Timer { deadline_ns, .. } = timeout.identity().class else {
+                    unreachable!();
+                };
+                assert_eq!(deadline_ns, observed + QA_PONG_NS);
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_frame(7, timeout.identity()),
+                    gate,
+                    timeout.owner(),
+                )
+                .unwrap();
+                qa_timer_selected_close(&handle, &mut turn, timeout.owner());
+                qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timeout);
+                qa_settle_once(&handle, &mut turn, &sink, timeout.owner());
+            }
+            _ => unreachable!(),
+        }
+        let mut effects = 0;
+        assert!(matches!(
+            owner.dispatch(&mut turn, ping, |_| {
+                effects += 1;
+                Ok::<_, ()>(())
+            }),
+            DispatchReport::Revoked(AuthorityError::CommandRevoked)
+        ));
+        assert_eq!(effects, 0);
+        assert_eq!(
+            handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+            TimerProgressView::TimerOnlyPing {
+                timer_confirmed: true,
+                ping_taken: true
+            }
+        );
+        assert_eq!(
+            read_all(&wal.0).1.status,
+            ArchiveStatus::ValidPrefixIncomplete
+        );
+    }
+}
+
+#[test]
+fn timer_a_t09_durable_original_stamp_deadlines_and_six_held_ping_revocations() {
+    qa_timer_t09_original_deadline_and_revocation(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t09_written_original_stamp_deadlines_and_six_held_ping_revocations() {
+    qa_timer_t09_original_deadline_and_revocation(RecordingGate::Written);
+}
+
+fn qa_timer_failure_marker(
+    handle: &SupervisorSessionHandle,
+    turn: &mut SessionTurn,
+    sink: &mut BoundRecordSink,
+    gate: RecordingGate,
+) {
+    let mut marker = failed_marker();
+    marker.record_no = handle.prefix().next_record;
+    let Record::Control(ControlRecord {
+        value: Control::Recording(evidence),
+        ..
+    }) = &mut marker.value
+    else {
+        unreachable!();
+    };
+    evidence.kind = if gate == RecordingGate::Durable {
+        WatermarkKind::Durable
+    } else {
+        WatermarkKind::Written
+    };
+    evidence.through = handle.trusted_watermark(evidence.kind);
+    sink.persist(turn, &marker, gate).unwrap();
+    handle
+        .authority()
+        .marker_confirmed(turn, marker.record_no)
+        .unwrap();
+}
+
+fn qa_timer_t10_lifecycle(gate: RecordingGate) {
+    // Closing classifies only the still-unselected Timer as obsolete. A plan
+    // already frozen by its exact Timer receipt must still obtain original Down.
+    for selected_timeout in [false, true] {
+        let wal = TempWal::new("timer-t10-closing");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let timer = if selected_timeout {
+            qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id)
+        } else {
+            qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+            qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS)
+        };
+        let original = qa_timer_frame(handle.prefix().next_record.get(), timer.identity());
+        let close = if selected_timeout {
+            sink.persist_owned(&mut turn, &original, gate, timer.owner())
+                .unwrap();
+            Some(qa_timer_selected_close(&handle, &mut turn, timer.owner()))
+        } else {
+            None
+        };
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert_eq!(owner.session_status().lifecycle, SessionLifecycle::Closing);
+        assert!(matches!(
+            handle.admit_due_timer(&mut turn, binding().id, qa_timer_stamp(u64::MAX)),
+            Err(AuthorityError::SessionClosing)
+        ));
+        if selected_timeout {
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                Err(AuthorityError::NotQuiescent)
+            );
+            qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        } else {
+            sink.persist_owned(&mut turn, &original, gate, timer.owner())
+                .unwrap();
+            assert_eq!(
+                handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+                TimerProgressView::TimerOnlyObsolete {
+                    timer_confirmed: true
+                }
+            );
+            assert!(matches!(
+                handle.take_timer_ping(&mut turn, timer.owner()),
+                Err(AuthorityError::CommandRevoked)
+            ));
+        }
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        if let Some(close) = close {
+            timer
+                .owner()
+                .set_kind(&mut turn, WorkKind::PendingPlan)
+                .unwrap();
+            assert_eq!(
+                handle.retain_generated_plan(&mut turn, timer.owner()),
+                Err(AuthorityError::SessionClosing)
+            );
+            let lease = leased(owner.reclaim_close(&mut turn, close));
+            assert!(matches!(
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
+                DispatchReport::Dispatched
+            ));
+        }
+        drop(timer);
+        let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+            panic!("settled admitted drain expected");
+        };
+        owner.finalize(&mut turn, &mut proof).unwrap();
+        assert_eq!(
+            owner.session_status().lifecycle,
+            SessionLifecycle::Finalized
+        );
+        assert!(matches!(
+            handle.admit_due_timer(&mut turn, binding().id, qa_timer_stamp(u64::MAX)),
+            Err(AuthorityError::SessionClosed)
+        ));
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(report.status, ArchiveStatus::Complete);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|f| matches!(f.value, Record::SegmentSeal(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|f| matches!(f.value, Record::ArchiveSeal(_)))
+                .count(),
+            1
+        );
+    }
+}
+
+fn qa_timer_t10_diagnostic_neighbor(gate: RecordingGate) {
+    // FailedDiagnostic keeps a healthy neighbor's Timer and transport effects
+    // lawful while the failed scope's original unselected Timer becomes obsolete.
+    let wal = TempWal::new("timer-t10-diagnostic-neighbor");
+    let (mut owner, mut turn, handle, mut sink) = owner_two_scopes_with_gate(&wal.0, gate);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    qa_timer_install_up(
+        &handle,
+        &mut turn,
+        &mut sink,
+        gate,
+        positive(StreamId::new(2)),
+        5,
+    );
+    let failed_timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let termination = handle.terminate(&mut turn, terminal()).unwrap();
+    let failed_close = termination.close_owner;
+    drop(termination.close);
+    sink.persist_owned(
+        &mut turn,
+        &qa_timer_frame(9, failed_timer.identity()),
+        gate,
+        failed_timer.owner(),
+    )
+    .unwrap();
+    assert_eq!(
+        handle
+            .timer_progress(&mut turn, failed_timer.owner())
+            .unwrap(),
+        TimerProgressView::TimerOnlyObsolete {
+            timer_confirmed: true
+        }
+    );
+    qa_settle_once(&handle, &mut turn, &sink, failed_timer.owner());
+    qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+    let neighbor = qa_timer_due(
+        &handle,
+        &mut turn,
+        positive(StreamId::new(2)),
+        5 + QA_PING_NS,
+    );
+    sink.persist_owned(
+        &mut turn,
+        &qa_timer_frame(11, neighbor.identity()),
+        gate,
+        neighbor.owner(),
+    )
+    .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, neighbor.owner());
+    let ping = handle.take_timer_ping(&mut turn, neighbor.owner()).unwrap();
+    assert!(matches!(
+        owner.dispatch(&mut turn, ping, |view| {
+            assert_eq!(view.stream, positive(StreamId::new(2)));
+            Ok::<_, ()>(())
+        }),
+        DispatchReport::Dispatched
+    ));
+    assert!(matches!(
+        owner.begin_finalization(&mut turn),
+        Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+    ));
+    drop(failed_timer);
+    drop(neighbor);
+    let report = owner.close_diagnostic(&mut turn);
+    assert!(matches!(report.outcome, Ok(DiagnosticCloseState::Closed)));
+    assert!(report.physical_report.descriptor_closed);
+    assert!(matches!(
+        handle.admit_due_timer(
+            &mut turn,
+            positive(StreamId::new(2)),
+            qa_timer_stamp(u64::MAX)
+        ),
+        Err(AuthorityError::SessionClosed)
+    ));
+    let lease = leased(owner.reclaim_close(&mut turn, failed_close.clone()));
+    assert!(matches!(
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
+        DispatchReport::Dispatched
+    ));
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, failed_close),
+        CloseLeaseReport::AlreadySettled
+    ));
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+}
+
+fn qa_timer_t10_diagnostic_owned_drain(gate: RecordingGate) {
+    // DiagnosticClosing drains an already-admitted obsolete Timer before the
+    // descriptor closes, with no invented Down or generated cancellation.
+    let wal = TempWal::new("timer-t10-diagnostic-owned-drain");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let termination = handle.terminate(&mut turn, terminal()).unwrap();
+    drop(termination.close);
+    assert!(matches!(
+        owner.close_diagnostic(&mut turn).outcome,
+        Ok(DiagnosticCloseState::Closing)
+    ));
+    // R1: the original pre-cut Timer drains before the fixed failure marker.
+    sink.persist_owned(
+        &mut turn,
+        &qa_timer_frame(6, timer.identity()),
+        gate,
+        timer.owner(),
+    )
+    .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    drop(timer);
+    qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+    assert!(matches!(
+        owner.close_diagnostic(&mut turn).outcome,
+        Ok(DiagnosticCloseState::Closed)
+    ));
+    assert_eq!(read_all(&wal.0).0.len(), 7);
+    let wal = TempWal::new("timer-t10-diagnostic-frozen-timeout");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+    let original_timer = qa_timer_frame(7, timer.identity());
+    sink.persist_owned(&mut turn, &original_timer, gate, timer.owner())
+        .unwrap();
+    let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+    let termination = handle.terminate(&mut turn, terminal()).unwrap();
+    assert_eq!(termination.close_owner, close);
+    drop(termination.close);
+    assert!(matches!(
+        owner.close_diagnostic(&mut turn).outcome,
+        Ok(DiagnosticCloseState::Closing)
+    ));
+    let original_down = qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    drop(timer);
+    qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+    let closed = owner.close_diagnostic(&mut turn);
+    assert!(matches!(closed.outcome, Ok(DiagnosticCloseState::Closed)));
+    assert!(closed.physical_report.descriptor_closed);
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert!(matches!(
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
+        DispatchReport::Dispatched
+    ));
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close),
+        CloseLeaseReport::AlreadySettled
+    ));
+    assert_eq!(&read_all(&wal.0).0[6..8], &[original_timer, original_down]);
+    assert_eq!(read_all(&wal.0).0.len(), 9);
+}
+
+#[test]
+fn timer_a_t10_durable_closing_original_drain_preserves_frozen_timeout_and_finalizes_once() {
+    qa_timer_t10_lifecycle(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t10_written_closing_original_drain_preserves_frozen_timeout_and_finalizes_once() {
+    qa_timer_t10_lifecycle(RecordingGate::Written);
+}
+
+#[test]
+fn timer_a_t10_durable_diagnostic_healthy_neighbor_timer_remains_lawful_then_descriptor_close() {
+    qa_timer_t10_diagnostic_neighbor(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t10_written_diagnostic_healthy_neighbor_timer_remains_lawful_then_descriptor_close() {
+    qa_timer_t10_diagnostic_neighbor(RecordingGate::Written);
+}
+#[test]
+fn timer_a_t10_durable_diagnostic_closing_drains_original_pre_cut_obsolete_and_frozen_timeout() {
+    qa_timer_t10_diagnostic_owned_drain(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t10_written_diagnostic_closing_drains_original_pre_cut_obsolete_and_frozen_timeout() {
+    qa_timer_t10_diagnostic_owned_drain(RecordingGate::Written);
+}
+
+fn qa_timer_t10_preowned_partial_h1_closing(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t10-preowned-partial-h1");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+    let identity = timer.identity();
+    sink.persist_owned(&mut turn, &qa_timer_frame(7, identity), gate, timer.owner())
+        .unwrap();
+    let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+    qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    timer
+        .owner()
+        .set_kind(&mut turn, WorkKind::PendingPlan)
+        .unwrap();
+    handle
+        .retain_generated_plan(&mut turn, timer.owner())
+        .unwrap();
+    let lease = leased(owner.reclaim_close(&mut turn, close));
+    assert!(matches!(
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
+        DispatchReport::Dispatched
+    ));
+    let bound = binding();
+    let connection = EpochChange::Connection {
+        owner: bound.connection_id,
+        expected: bound.tag.connection,
+        next: positive(ConnectionEpoch::new(2)),
+    };
+    let subscription = EpochChange::Subscription {
+        owner: bound.id,
+        expected: bound.tag.subscription,
+        next: positive(SubscriptionEpoch::new(2)),
+    };
+    let book = EpochChange::Book {
+        owner: bound.book_id.unwrap(),
+        expected: bound.tag.book.unwrap(),
+        next: positive(BookEpoch::new(2)),
+    };
+    let connection_record = qa_epoch(9, identity, connection);
+    sink.persist_owned(&mut turn, &connection_record, gate, timer.owner())
+        .unwrap();
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let ledger = handle.authority().ownership_report();
+    let prefix = handle.prefix();
+    let calls = owner.sink_persist_calls();
+    let bytes = fs::read(&wal.0).unwrap();
+    assert_eq!(
+        handle.cancel_generated_plan(&mut turn, timer.owner()),
+        Err(AuthorityError::NotQuiescent)
+    );
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.sink_persist_calls(), calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+    let subscription_record = qa_epoch(10, identity, subscription);
+    let book_record = qa_epoch(11, identity, book);
+    sink.persist_owned(&mut turn, &subscription_record, gate, timer.owner())
+        .unwrap();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    sink.persist_owned(&mut turn, &book_record, gate, timer.owner())
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    handle
+        .authority()
+        .advance_epoch(
+            &mut turn,
+            identity.stream,
+            identity.epoch,
+            positive(ConnectionEpoch::new(2)),
+        )
+        .unwrap();
+    assert!(matches!(
+        handle.admit_due_timer(&mut turn, identity.stream, qa_timer_stamp(u64::MAX)),
+        Err(AuthorityError::SessionClosing)
+    ));
+    drop(timer);
+    let QuiescenceReport::Ready(_proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("owned H1 exact stages drained before proof");
+    };
+    assert_eq!(
+        &read_all(&wal.0).0[8..],
+        &[connection_record, subscription_record, book_record]
+    );
+    assert_eq!(
+        read_all(&wal.0).1.status,
+        ArchiveStatus::ValidPrefixIncomplete
+    );
+}
+
+#[test]
+fn timer_a_t10_durable_preowned_partial_h1_drains_during_closing_without_false_cancellation() {
+    qa_timer_t10_preowned_partial_h1_closing(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t10_written_preowned_partial_h1_drains_during_closing_without_false_cancellation() {
+    qa_timer_t10_preowned_partial_h1_closing(RecordingGate::Written);
+}
+
+fn qa_timer_t11_close_readiness_and_recovery(gate: RecordingGate) {
+    qa_timer_t11_conflicting_reservation(gate);
+    for terminal_after_selection in [false, true] {
+        let wal = TempWal::new("timer-t11-close-readiness");
+        let foreign_wal = TempWal::new("timer-t11-foreign-close");
+        let (mut owner, mut turn, handle, mut sink) = if terminal_after_selection {
+            owner_two_scopes_with_gate(&wal.0, gate)
+        } else {
+            owner_with_fault(&wal.0, gate, None)
+        };
+        let (mut foreign_owner, mut foreign_turn, foreign_handle, _foreign_sink) =
+            owner_with_fault(&foreign_wal.0, gate, None);
+        let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+        assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+        sink.persist_owned(
+            &mut turn,
+            &qa_timer_frame(handle.prefix().next_record.get(), timer.identity()),
+            gate,
+            timer.owner(),
+        )
+        .unwrap();
+        let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+        assert_eq!(
+            handle
+                .mandatory_close(
+                    &mut turn,
+                    binding().id,
+                    binding().tag.connection,
+                    Some(timer.owner())
+                )
+                .unwrap(),
+            close
+        );
+        let before = handle.authority().ownership_report();
+        let bytes = fs::read(&wal.0).unwrap();
+        let calls = owner.sink_persist_calls();
+        for _ in 0..3 {
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::Rejected(AuthorityError::CloseNotReady)
+            ));
+            assert_eq!(handle.authority().ownership_report(), before);
+            assert_eq!(owner.sink_persist_calls(), calls);
+            assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        }
+        if terminal_after_selection {
+            let mut neighbor_identity = qa_original_identity(ObservationClass::Connected);
+            neighbor_identity.stream = positive(StreamId::new(2));
+            neighbor_identity.stamp = qa_timer_stamp(7);
+            // Already-owned neighbor work is PreCut when the selected timeout
+            // scope fails; it can lawfully drain before the fixed marker.
+            let neighbor = qa_admit(&handle, &mut turn, neighbor_identity);
+            let termination = handle.terminate(&mut turn, terminal()).unwrap();
+            assert_eq!(termination.close_owner, close);
+            drop(termination.close);
+            let TimerProgressView::TimerThenDown {
+                timer_confirmed,
+                down_confirmed,
+                close: view,
+            } = handle.timer_progress(&mut turn, timer.owner()).unwrap()
+            else {
+                unreachable!();
+            };
+            assert!(timer_confirmed && !down_confirmed && view.ready);
+            assert_eq!(view.owner, close);
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                Err(AuthorityError::NotQuiescent)
+            );
+            sink.persist_owned(
+                &mut turn,
+                &qa_timer_transport(
+                    handle.prefix().next_record.get(),
+                    neighbor_identity,
+                    Transport::Up,
+                ),
+                gate,
+                &neighbor,
+            )
+            .unwrap();
+            qa_settle_once(&handle, &mut turn, &sink, &neighbor);
+            drop(neighbor);
+            assert_eq!(
+                read_all(&wal.0)
+                    .0
+                    .iter()
+                    .filter(|f| matches!(
+                        f.value,
+                        Record::Control(ControlRecord {
+                            value: Control::Transport {
+                                value: Transport::Down,
+                                ..
+                            },
+                            ..
+                        })
+                    ))
+                    .count(),
+                0
+            );
+        } else {
+            qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        }
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.reclaim_close(&mut turn, close.clone()),
+            CloseLeaseReport::AlreadyLeased
+        ));
+        let foreign_before = foreign_handle.authority().ownership_report();
+        let mut effects = 0;
+        let command =
+            match foreign_owner.dispatch(&mut foreign_turn, lease.into_command().unwrap(), |_| {
+                effects += 1;
+                Ok::<_, ()>(())
+            }) {
+                DispatchReport::Denied {
+                    reason: AuthorityError::AuthorityMismatch,
+                    command,
+                } => command,
+                other => panic!("same valid Close returned on foreign dispatch: {other:?}"),
+            };
+        assert_eq!(effects, 0);
+        assert_eq!(
+            foreign_handle.authority().ownership_report(),
+            foreign_before
+        );
+        drop(command);
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Err::<(), _>(
+                "ambiguous Close"
+            )),
+            DispatchReport::DispatchFailed {
+                effect: AmbiguousEffect::Unknown,
+                ..
+            }
+        ));
+        assert_eq!(close_state(&owner, &close), Some(CloseState::Pending));
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        assert!(matches!(
+            owner.reclaim_close(&mut turn, close.clone()),
+            CloseLeaseReport::AlreadySettled
+        ));
+        if terminal_after_selection {
+            qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        }
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        assert_eq!(
+            handle
+                .mandatory_close(
+                    &mut turn,
+                    binding().id,
+                    binding().tag.connection,
+                    Some(timer.owner())
+                )
+                .unwrap(),
+            close
+        );
+        assert_eq!(
+            read_all(&wal.0).0.len(),
+            if terminal_after_selection { 11 } else { 8 }
+        );
+        assert_eq!(
+            read_all(&wal.0).1.status,
+            ArchiveStatus::ValidPrefixIncomplete
+        );
+    }
+}
+
+fn qa_timer_t11_conflicting_reservation(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t11-conflicting-live-close");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    qa_timer_arm_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let other = qa_admit(&handle, &mut turn, identity);
+    sink.persist_owned(&mut turn, &qa_raw(7, identity, false), gate, &other)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &other);
+    let prior_close = handle
+        .mandatory_close(&mut turn, identity.stream, identity.epoch, Some(&other))
+        .unwrap();
+    assert_eq!(prior_close.storage(), CloseStorage::WorkOwner(other.id()));
+    let timer = qa_timer_due(
+        &handle,
+        &mut turn,
+        binding().id,
+        5 + QA_PING_NS + QA_PONG_NS,
+    );
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_frame(8, timer.identity()),
+        AuthorityError::TimerCloseConflict,
+    );
+    assert_eq!(
+        handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+        TimerProgressView::Unselected
+    );
+    assert_eq!(owner.session_status().storage_stopped, None);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 1);
+    assert_eq!(close_state(&owner, &prior_close), Some(CloseState::Pending));
+    assert_eq!(read_all(&wal.0).0.len(), 7);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    assert!(matches!(
+        handle.quiesce(&mut turn, &ticket),
+        QuiescenceReport::NotReady(_)
+    ));
+}
+
+#[test]
+fn timer_a_t11_durable_same_timeout_close_readiness_foreign_drop_error_and_terminal_failsafe() {
+    qa_timer_t11_close_readiness_and_recovery(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t11_written_same_timeout_close_readiness_foreign_drop_error_and_terminal_failsafe() {
+    qa_timer_t11_close_readiness_and_recovery(RecordingGate::Written);
+}
+
+fn qa_timer_t12_fault_matrix(gate: RecordingGate) {
+    for stage in 0..2 {
+        for variant in 0..if gate == RecordingGate::Durable { 3 } else { 2 } {
+            let wal = TempWal::new("timer-t12-stage-fault");
+            let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+            let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+            if stage == 1 {
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_frame(7, timer.identity()),
+                    gate,
+                    timer.owner(),
+                )
+                .unwrap();
+            }
+            let original = if stage == 0 {
+                qa_timer_frame(7, timer.identity())
+            } else {
+                qa_timer_transport(8, timer.identity(), Transport::Down)
+            };
+            let mut replacement = original.clone();
+            let Record::Control(control) = &mut replacement.value else {
+                unreachable!();
+            };
+            control.context.unix_ns = LocalUnixNs::new(timer.identity().stamp.unix_ns + 1);
+            qa_timer_reject(
+                (&wal, &owner, &handle),
+                &mut turn,
+                &mut sink,
+                timer.owner(),
+                gate,
+                &replacement,
+                AuthorityError::InvalidBinding,
+            );
+            assert_eq!(owner.session_status().storage_stopped, None);
+            let prefix = handle.prefix();
+            let trusted_written = handle.trusted_watermark(WatermarkKind::Written);
+            let trusted_durable = handle.trusted_watermark(WatermarkKind::Durable);
+            let physical = fs::read(&wal.0).unwrap();
+            let calls = owner.sink_persist_calls();
+            let error = PersistError::typed(PersistErrorKind::Io, "original Timer fault");
+            let kind = match variant {
+                0 => SinkFaultKind::BeforeWrite(error),
+                1 => SinkFaultKind::ReceiptMismatch {
+                    through: record(original.record_no.get() - 1),
+                },
+                2 => SinkFaultKind::WeakGate {
+                    achieved: RecordingGate::Flushed,
+                },
+                _ => unreachable!(),
+            };
+            owner
+                .set_sink_fault(
+                    &mut turn,
+                    Some(SinkFault {
+                        at: original.record_no,
+                        kind,
+                    }),
+                )
+                .unwrap();
+            let actual = sink.persist_owned(&mut turn, &original, gate, timer.owner());
+            match kind {
+                SinkFaultKind::BeforeWrite(_) => {
+                    assert_eq!(actual, Err(PersistBoundaryError::Persistence(error)))
+                }
+                SinkFaultKind::ReceiptMismatch { through } => assert_eq!(
+                    actual,
+                    Err(PersistBoundaryError::ReceiptMismatch {
+                        expected: original.record_no,
+                        actual: through
+                    })
+                ),
+                SinkFaultKind::WeakGate { achieved } => assert_eq!(
+                    actual,
+                    Err(PersistBoundaryError::WeakGate {
+                        required: gate,
+                        achieved
+                    })
+                ),
+            }
+            assert_eq!(owner.sink_persist_calls(), calls + 1);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(
+                handle.trusted_watermark(WatermarkKind::Written),
+                trusted_written
+            );
+            assert_eq!(
+                handle.trusted_watermark(WatermarkKind::Durable),
+                trusted_durable
+            );
+            let stopped = owner
+                .session_status()
+                .storage_stopped
+                .expect("backend invocation hard-stops storage");
+            if variant == 0 {
+                assert_eq!(stopped, error);
+                assert_eq!(fs::read(&wal.0).unwrap(), physical);
+            } else {
+                assert!(fs::read(&wal.0).unwrap().len() > physical.len());
+            }
+            let TimerProgressView::TimerThenDown {
+                timer_confirmed,
+                down_confirmed,
+                close,
+            } = handle.timer_progress(&mut turn, timer.owner()).unwrap()
+            else {
+                unreachable!();
+            };
+            assert_eq!(timer_confirmed, stage == 1);
+            assert!(!down_confirmed);
+            assert!(close.ready);
+            assert_eq!(
+                close.owner.storage(),
+                CloseStorage::WorkOwner(timer.owner().id())
+            );
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                Err(AuthorityError::StorageStopped)
+            );
+            let after_fault = fs::read(&wal.0).unwrap();
+            assert_eq!(
+                sink.persist_owned(&mut turn, &original, gate, timer.owner()),
+                Err(PersistBoundaryError::Authority(
+                    AuthorityError::StorageStopped
+                ))
+            );
+            assert_eq!(owner.sink_persist_calls(), calls + 1);
+            assert_eq!(fs::read(&wal.0).unwrap(), after_fault);
+            let closed = owner.close_diagnostic(&mut turn);
+            assert!(matches!(closed.outcome, Ok(DiagnosticCloseState::Closed)));
+            assert!(closed.physical_report.descriptor_closed);
+            assert!(closed.physical_report.unconfirmed_suffix_possible);
+            assert!(matches!(
+                owner.begin_finalization(&mut turn),
+                Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+            ));
+            let lease = leased(owner.reclaim_close(&mut turn, close.owner.clone()));
+            assert!(matches!(
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
+                DispatchReport::Dispatched
+            ));
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close.owner),
+                CloseLeaseReport::AlreadySettled
+            ));
+            let (records, report) = read_all(&wal.0);
+            assert_eq!(records.len(), 6 + stage + usize::from(variant != 0));
+            assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+            assert!(
+                !records
+                    .iter()
+                    .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+            );
+        }
+    }
+}
+
+#[test]
+fn timer_a_t12_durable_both_stages_before_write_mismatch_and_weak_gate_keep_truthful_prefix_and_close()
+ {
+    qa_timer_t12_fault_matrix(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t12_written_both_stages_before_write_and_mismatch_keep_truthful_prefix_and_close() {
+    qa_timer_t12_fault_matrix(RecordingGate::Written);
+}
+
+fn qa_timer_t13_original_completion_and_h1(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t13-original-h1");
+    let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+    let identity = timer.identity();
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_transport(7, identity, Transport::Down),
+        AuthorityError::InvalidBinding,
+    );
+    for obsolete in [None, Some((identity.stream, identity.epoch))] {
+        assert_eq!(
+            handle.complete_observation(&mut turn, &sink, timer.owner(), obsolete),
+            Err(AuthorityError::NotQuiescent)
+        );
+    }
+    let original = qa_timer_frame(7, identity);
+    sink.persist_owned(&mut turn, &original, gate, timer.owner())
+        .unwrap();
+    let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    let mut historical = identity;
+    historical.stamp = qa_timer_stamp(identity.stamp.monotonic_ns - 1);
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &qa_timer_transport(8, historical, Transport::Down),
+        AuthorityError::InvalidBinding,
+    );
+    let down = qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    timer
+        .owner()
+        .set_kind(&mut turn, WorkKind::PendingPlan)
+        .unwrap();
+    handle
+        .retain_generated_plan(&mut turn, timer.owner())
+        .unwrap();
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+        Err(AuthorityError::NotQuiescent)
+    );
+    let bound = binding();
+    let connection = EpochChange::Connection {
+        owner: bound.connection_id,
+        expected: bound.tag.connection,
+        next: positive(ConnectionEpoch::new(2)),
+    };
+    let subscription = EpochChange::Subscription {
+        owner: bound.id,
+        expected: bound.tag.subscription,
+        next: positive(SubscriptionEpoch::new(2)),
+    };
+    let book = EpochChange::Book {
+        owner: bound.book_id.unwrap(),
+        expected: bound.tag.book.unwrap(),
+        next: positive(BookEpoch::new(2)),
+    };
+    let before = handle.authority().ownership_report();
+    let calls = owner.sink_persist_calls();
+    assert_eq!(
+        sink.persist_owned(
+            &mut turn,
+            &qa_epoch(9, identity, connection.clone()),
+            gate,
+            timer.owner()
+        ),
+        Err(PersistBoundaryError::Authority(
+            AuthorityError::NotQuiescent
+        ))
+    );
+    assert_eq!(handle.authority().ownership_report(), before);
+    assert_eq!(owner.sink_persist_calls(), calls);
+    let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+    assert!(matches!(
+        owner.dispatch(
+            &mut turn,
+            lease.into_command().unwrap(),
+            |_| Ok::<_, ()>(())
+        ),
+        DispatchReport::Dispatched
+    ));
+    for (index, change) in [connection, subscription, book].into_iter().enumerate() {
+        let stage = qa_epoch(9 + index as u64, identity, change);
+        sink.persist_owned(&mut turn, &stage, gate, timer.owner())
+            .unwrap();
+        if index < 2 {
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, timer.owner(), None),
+                Err(AuthorityError::NotQuiescent)
+            );
+        }
+    }
+    qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+    handle
+        .authority()
+        .advance_epoch(
+            &mut turn,
+            identity.stream,
+            identity.epoch,
+            positive(ConnectionEpoch::new(2)),
+        )
+        .unwrap();
+    let before_failure = read_all(&wal.0).0;
+    assert_eq!(&before_failure[6..8], &[original, down]);
+    assert_eq!(before_failure.len(), 11);
+    let mut failure = terminal();
+    failure.current_epoch = positive(ConnectionEpoch::new(2));
+    failure.observed_tag.connection = failure.current_epoch;
+    failure.observed_tag.subscription = positive(SubscriptionEpoch::new(2));
+    failure.observed_tag.book = Some(positive(BookEpoch::new(2)));
+    let termination = handle.terminate(&mut turn, failure).unwrap();
+    assert_eq!(termination.close_owner.epoch(), failure.current_epoch);
+    assert_eq!(read_all(&wal.0).0, before_failure);
+    assert!(matches!(
+        owner.reclaim_close(&mut turn, close),
+        CloseLeaseReport::Rejected(AuthorityError::OwnerRetired)
+    ));
+    assert!(matches!(
+        owner.begin_finalization(&mut turn),
+        Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+    ));
+}
+
+#[test]
+fn timer_a_t13_durable_original_timeout_stages_close_and_three_fresh_h1_epochs_are_required() {
+    qa_timer_t13_original_completion_and_h1(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t13_written_original_timeout_stages_close_and_three_fresh_h1_epochs_are_required() {
+    qa_timer_t13_original_completion_and_h1(RecordingGate::Written);
+}
+
+fn qa_timer_t14_last_steward_abandonment(gate: RecordingGate) {
+    qa_timer_t14_wrong_frame_does_not_synchronize_foreign_abandonment(gate);
+    for phase in 0..4 {
+        let wal = TempWal::new("timer-t14-last-steward");
+        let (mut owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+        let timer = if phase >= 2 {
+            qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id)
+        } else {
+            qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+            qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS)
+        };
+        let identity = timer.identity();
+        let work_id = timer.owner().id();
+        if phase != 0 {
+            sink.persist_owned(
+                &mut turn,
+                &qa_timer_frame(handle.prefix().next_record.get(), identity),
+                gate,
+                timer.owner(),
+            )
+            .unwrap();
+        }
+        let close = if phase >= 2 {
+            Some(qa_timer_selected_close(&handle, &mut turn, timer.owner()))
+        } else {
+            None
+        };
+        if phase == 3 {
+            qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        }
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::NotReady(_)
+        ));
+        if phase == 2 {
+            let original =
+                qa_timer_transport(handle.prefix().next_record.get(), identity, Transport::Down);
+            let error = PersistError::typed(PersistErrorKind::Io, "missing original Down");
+            owner
+                .set_sink_fault(
+                    &mut turn,
+                    Some(SinkFault {
+                        at: original.record_no,
+                        kind: SinkFaultKind::BeforeWrite(error),
+                    }),
+                )
+                .unwrap();
+            assert_eq!(
+                sink.persist_owned(&mut turn, &original, gate, timer.owner()),
+                Err(PersistBoundaryError::Persistence(error))
+            );
+        }
+        drop(timer);
+        if let Some(close) = close {
+            assert_eq!(handle.authority().ownership_report().work_used, 1);
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            assert!(matches!(
+                owner.dispatch(
+                    &mut turn,
+                    lease.into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
+                DispatchReport::Dispatched
+            ));
+        }
+        let abandoned = handle.authority().ownership_report();
+        assert_eq!(abandoned.work_used, 1);
+        assert_eq!(abandoned.abandoned_work, 1);
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+        ));
+        let lost = owner
+            .session_status()
+            .first_abandonment
+            .expect("retained original abandonment identity");
+        assert_eq!(lost.work_id, work_id);
+        assert_eq!(lost.identity, identity);
+        assert!(matches!(
+            owner.begin_finalization(&mut turn),
+            Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+        ));
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(
+            !records
+                .iter()
+                .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+        );
+    }
+}
+
+fn qa_timer_t14_wrong_frame_does_not_synchronize_foreign_abandonment(gate: RecordingGate) {
+    let wal = TempWal::new("timer-t14-pure-reject-before-abandonment-sync");
+    let (owner, mut turn, handle, mut sink) = owner_with_fault(&wal.0, gate, None);
+    qa_timer_install_up(&handle, &mut turn, &mut sink, gate, binding().id, 5);
+    let timer = qa_timer_due(&handle, &mut turn, binding().id, 5 + QA_PING_NS);
+    let raw_identity = qa_original_identity(ObservationClass::Raw);
+    let raw = qa_admit(&handle, &mut turn, raw_identity);
+    let raw_id = raw.id();
+    drop(raw);
+    assert_eq!(handle.authority().ownership_report().abandoned_work, 1);
+    assert_eq!(owner.session_status().storage_stopped, None);
+    assert_eq!(owner.session_status().first_abandonment, None);
+    let original = qa_timer_frame(6, timer.identity());
+    let mut wrong = original.clone();
+    let Record::Control(ControlRecord {
+        value: Control::Timer { timer_id, .. },
+        ..
+    }) = &mut wrong.value
+    else {
+        unreachable!();
+    };
+    *timer_id += 1;
+    qa_timer_reject(
+        (&wal, &owner, &handle),
+        &mut turn,
+        &mut sink,
+        timer.owner(),
+        gate,
+        &wrong,
+        AuthorityError::InvalidBinding,
+    );
+    assert_eq!(owner.session_status().storage_stopped, None);
+    assert_eq!(owner.session_status().first_abandonment, None);
+    let calls = owner.sink_persist_calls();
+    let bytes = fs::read(&wal.0).unwrap();
+    let prefix = handle.prefix();
+    assert_eq!(
+        sink.persist_owned(&mut turn, &original, gate, timer.owner()),
+        Err(PersistBoundaryError::Authority(
+            AuthorityError::StorageStopped
+        ))
+    );
+    assert_eq!(owner.sink_persist_calls(), calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(
+        handle.timer_progress(&mut turn, timer.owner()).unwrap(),
+        TimerProgressView::Unselected
+    );
+    let abandonment = owner.session_status().first_abandonment.unwrap();
+    assert_eq!(abandonment.work_id, raw_id);
+    assert_eq!(abandonment.identity, raw_identity);
+    assert_eq!(handle.authority().ownership_report().work_used, 2);
+    assert_eq!(read_all(&wal.0).0.len(), 5);
+}
+
+#[test]
+fn timer_a_t14_durable_last_steward_drop_at_four_timer_stages_keeps_original_abandoned_and_denies_seals()
+ {
+    qa_timer_t14_last_steward_abandonment(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t14_written_last_steward_drop_at_four_timer_stages_keeps_original_abandoned_and_denies_seals()
+ {
+    qa_timer_t14_last_steward_abandonment(RecordingGate::Written);
+}
+
+fn qa_timer_t15_requested_allocation(gate: RecordingGate) {
+    for cap in [5, 9] {
+        let wal = TempWal::new("timer-t15-allocation");
+        let probe = AllocationProbe::begin();
+        let (mut owner, mut turn, handle, mut sink) = if cap == 5 {
+            owner_with_fault(&wal.0, gate, None)
+        } else {
+            owner_two_scopes_with_gate(&wal.0, gate)
+        };
+        let metadata = owner.memory_report();
+        let ledger = handle.authority().ownership_report();
+        let computed_ceiling = ledger.metadata_ceiling_bytes
+            + metadata.known_metadata_backing_bytes
+            + metadata.registry_metadata_bound
+            + metadata.encoder_workspace_bound
+            + MAX_CAPTURE_PATH_BYTES
+            + 8192;
+        let initial_metadata_backing = ledger.metadata_backing_bytes;
+        let initial_metadata_ceiling = ledger.metadata_ceiling_bytes;
+        let mut monotonic = 5;
+        for _ in 0..100 {
+            for stream in 1..=if cap == 5 { 1 } else { 2 } {
+                let stream = positive(StreamId::new(stream));
+                qa_timer_install_up(&handle, &mut turn, &mut sink, gate, stream, monotonic);
+                let timer = qa_timer_due(&handle, &mut turn, stream, monotonic + QA_PING_NS);
+                let original = qa_timer_frame(handle.prefix().next_record.get(), timer.identity());
+                let mut replacement = original.clone();
+                let Record::Control(control) = &mut replacement.value else {
+                    unreachable!();
+                };
+                control.context.monotonic_ns =
+                    MonotonicNs::new(timer.identity().stamp.monotonic_ns + 1);
+                let before = handle.authority().ownership_report();
+                let calls = owner.sink_persist_calls();
+                assert_eq!(
+                    sink.persist_owned(&mut turn, &replacement, gate, timer.owner()),
+                    Err(PersistBoundaryError::Authority(
+                        AuthorityError::InvalidBinding
+                    ))
+                );
+                assert_eq!(owner.sink_persist_calls(), calls);
+                assert_eq!(handle.authority().ownership_report(), before);
+                sink.persist_owned(&mut turn, &original, gate, timer.owner())
+                    .unwrap();
+                qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+                let command = handle.take_timer_ping(&mut turn, timer.owner()).unwrap();
+                drop(timer);
+                assert_eq!(handle.authority().ownership_report().work_used, 1);
+                assert!(matches!(
+                    owner.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+                    DispatchReport::Dispatched
+                ));
+                assert_eq!(handle.authority().ownership_report().work_used, 0);
+                // An earlier received Pong revokes a due original Timer. Its
+                // own exact Up commits before the original Timer-only record.
+                let mut pong_identity = qa_original_identity(ObservationClass::Pong);
+                pong_identity.stream = stream;
+                pong_identity.stamp = qa_timer_stamp(monotonic + QA_PING_NS + QA_PONG_NS - 1);
+                let pong = qa_admit(&handle, &mut turn, pong_identity);
+                let obsolete = qa_timer_due(
+                    &handle,
+                    &mut turn,
+                    stream,
+                    monotonic + QA_PING_NS + QA_PONG_NS,
+                );
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_transport(
+                        handle.prefix().next_record.get(),
+                        pong_identity,
+                        Transport::Up,
+                    ),
+                    gate,
+                    &pong,
+                )
+                .unwrap();
+                qa_settle_once(&handle, &mut turn, &sink, &pong);
+                drop(pong);
+                sink.persist_owned(
+                    &mut turn,
+                    &qa_timer_frame(handle.prefix().next_record.get(), obsolete.identity()),
+                    gate,
+                    obsolete.owner(),
+                )
+                .unwrap();
+                assert_eq!(
+                    handle.timer_progress(&mut turn, obsolete.owner()).unwrap(),
+                    TimerProgressView::TimerOnlyObsolete {
+                        timer_confirmed: true
+                    }
+                );
+                qa_settle_once(&handle, &mut turn, &sink, obsolete.owner());
+                drop(obsolete);
+                let current = handle.authority().ownership_report();
+                assert_eq!(current.work_used, 0);
+                assert_eq!(current.metadata_backing_bytes, initial_metadata_backing);
+                assert_eq!(current.metadata_ceiling_bytes, initial_metadata_ceiling);
+                assert!(current.inline_accounted_capacity_bytes <= current.inline_ceiling_bytes);
+                monotonic += QA_PING_NS + QA_PONG_NS + 1;
+            }
+        }
+        let timer = qa_timer_timeout(&handle, &mut turn, &mut sink, gate, binding().id);
+        sink.persist_owned(
+            &mut turn,
+            &qa_timer_frame(handle.prefix().next_record.get(), timer.identity()),
+            gate,
+            timer.owner(),
+        )
+        .unwrap();
+        let close = qa_timer_selected_close(&handle, &mut turn, timer.owner());
+        qa_timer_commit_down(&handle, &mut turn, &mut sink, gate, &timer);
+        qa_settle_once(&handle, &mut turn, &sink, timer.owner());
+        drop(timer);
+        let fixed = handle.authority().ownership_report();
+        let fixed_live = probe.sample().live_requested_bytes;
+        for _ in 0..100 {
+            let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close.clone()),
+                CloseLeaseReport::AlreadyLeased
+            ));
+            drop(lease);
+            assert_eq!(handle.authority().ownership_report(), fixed);
+            assert_eq!(probe.sample().live_requested_bytes, fixed_live);
+        }
+        let lease = leased(owner.reclaim_close(&mut turn, close.clone()));
+        assert!(matches!(
+            owner.dispatch(
+                &mut turn,
+                lease.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
+            DispatchReport::Dispatched
+        ));
+        let sample = probe.sample();
+        assert!(!sample.unmatched_deallocation);
+        assert!(sample.peak_requested_bytes <= computed_ceiling);
+        drop(close);
+        drop(sink);
+        drop(handle);
+        drop(turn);
+        drop(owner);
+        assert_eq!(probe.sample().live_requested_bytes, 0);
+        assert!(!probe.sample().unmatched_deallocation);
+        let peak = probe.sample().peak_requested_bytes;
+        drop(probe);
+        let (records, report) = read_all(&wal.0);
+        assert_eq!(report.status, ArchiveStatus::ValidPrefixIncomplete);
+        assert!(
+            !records
+                .iter()
+                .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+        );
+        eprintln!(
+            "Timer A allocation gate={gate:?} cap={cap} metadata_backing={initial_metadata_backing} metadata_ceiling={initial_metadata_ceiling} peak={peak} computed_ceiling={computed_ceiling} teardown_live=0 loops=100"
+        );
+    }
+}
+
+#[test]
+fn timer_a_t15_durable_actual_allocation_cap5_cap9_hundred_ping_obsolete_close_cycles_and_zero_teardown()
+ {
+    qa_timer_t15_requested_allocation(RecordingGate::Durable);
+}
+#[test]
+fn timer_a_t15_written_actual_allocation_cap5_cap9_hundred_ping_obsolete_close_cycles_and_zero_teardown()
+ {
+    qa_timer_t15_requested_allocation(RecordingGate::Written);
 }

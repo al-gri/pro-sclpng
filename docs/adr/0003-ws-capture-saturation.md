@@ -998,3 +998,70 @@ Live commit/tree/parent, actual main and open/Draft/unmerged PR34 were independe
 Review method: source/contract analysis with independent FIFO/API, lifecycle/Close and bounds subreviews. No Rust tests, reproduction or production changes were performed. d85 debug425 PASS/release NOT_RUN and residual Down/Close status are supplied Integrator/worker evidence, not new Architecture QA. ENV-01 Linux/Durable release, fresh independent implementation QA, Integrator acceptance, owner merge and post-merge CI remain separate gates.
 
 Existing lineage only: Issue20 / parent5 / claim6024304772 / recovery6025249885 / feat/REC-001D-ws-supervisor / DraftPR34. Worker and Integrator MUST preserve this exact decision ID/addendum hash in ADR/handoff and durable decision records, copy the complete accepted text rather than a summary, and identify the later implementation head independently.
+
+## 18. Bounded Timer A implementation continuation — 2026-10-08
+
+Decision ARCH-REC-001D-TIMER-A-20261008 remains DESIGN_APPROVED_A /
+APPROVED_FOR_BOUNDED_IMPLEMENTATION. The complete 33986-byte normative addendum
+above is unchanged, SHA256
+cf585a92e3bd8372caf90326c67436274fef5abb5a8d163b389aa0a42ab838ba.
+Approval/provenance commit982a23d14e3bbc41bb51a7b213fe4e900aaf9e09,
+tree8a42f3075bb882c50e551c1c9d81fe4740f9e1e2, precedes the implementation.
+Its parent8e4e2b49930d38e16d5b48bb165ee0d8d69dd690 and earlier
+18937c96de95648ba5254203be6f0c2e274da5dd Down/Close work remain ancestors.
+The implementation head containing this section is identified by its full SHA
+and tree in the existing Issue20/PR34 records and accompanying exact-head report;
+the approval SHA must never be used as implementation runtime evidence.
+
+The authority now selects Timer kind, identity, disposition and frozen receipt
+stages. Fixed SupervisorV2 policy revision2 owns 30-second Ping and 15-second Pong
+deadlines, checked generation/TimerId/actual RecordAdmissionOrder, and bounded
+per-scope scheduling. Due admission returns an opaque owner or the original queued
+identity; legacy Timer admission and generic SendText("ping") cannot manufacture
+entitlement. Actual admitted record-stage FIFO and original common/Timer fields
+are checked before selection, arithmetic, abandonment reconciliation or sink I/O.
+Authenticated controls cannot pass an earlier required original receipt; frozen
+Timeout additionally prevents intervening schedule/epoch replacement.
+
+An exact active Ping receipt atomically commits its original-stamp deadline and
+reserved same-W affine command. One-shot extraction and dispatch revalidation
+preserve revocation by control, Down, Closing, epoch change or storage stop.
+An obsolete Timer records only its original Timer, without active arithmetic or
+effects. An active Timeout reserves its original same-W mandatory Close before
+Timer I/O. Close remains unready until the original Down, StorageStopped, or the
+existing genuine scoped terminal fail-safe. All conversion/reclaim/dispatch paths
+check readiness; Timer then Down receipts and the original Close settlement gate
+completion and fresh H1 Connection/Subscription/Book stages. Only a settled Close
+from a strictly older epoch of the same scope may be retired for the next genuine
+Timeout cycle; current/live/future/foreign owners retain their rejection behavior.
+
+Original Down/Close, Raw/GAP and Q2 obligations remain counted after Drop and
+preserving rejection. Diagnostic closure counts unfinished record stages rather
+than receipt-settled W retained only by its Close/command; descriptor-closed
+reporting and the same mandatory Close remain truthful. Pure identity/order/stage
+and epoch-proof rejection does not reconcile unrelated abandonment or invoke the
+writer. Actual backend errors, mismatch or weak gate enter StorageStopped with
+the original error and distinct trusted/physical prefix. Closed/stopped authority
+cannot revive an epoch. Recording counts actual sink persist invocations for the
+zero-I/O/fault evidence, with its fixed Rc/Cell storage included in metadata bounds.
+
+Only seven source/test files and ADR/handoff are changed from the approval head.
+Accepted WAL schema, decoder and DataHealth contracts, dependencies, lockfile,
+toolchain and workflows are unchanged. Original §8 and all31 §9 families are
+preserved. Fixed metadata uses W+N+1<=M; no per-event history or unbounded cache is
+introduced. Updated requested-layout measurements include authority, WorkCell,
+Close and retained affine Ping storage; the conservative decoder scratch bound
+remains applicable and is not represented as process RSS.
+
+Worker status is IMPLEMENTED / QA_PENDING / PARTIAL_VERIFICATION. T01–T16 mappings,
+source fingerprints, actual command logs, cap5/cap9 measurements and original31
+family requirements accompany the new head. Windows pure/Written tests and worker
+peer analysis are supplemental. Genuine Linux/Durable debug and release, fresh
+independent QA, Integrator acceptance, READY and owner merge remain separate
+gates. Owner-confirmed Docker desktop-linux/WSL2/Linux amd64 Engine29.3.1 is
+available, but this session's granular policy rejects require_escalated before
+process launch (sandbox_approval=false); this is a worker execution-policy blocker,
+not an unavailable owner executor. No Release PASS is inferred. The prepared
+exact-head runner uses the named-pipe context, a clean rust:1.98.1-bookworm
+temporary container, bash -c, temporary rustfmt/clippy and full stdout/stderr,
+command exits, Rust/Cargo versions and before/after clean-source provenance.

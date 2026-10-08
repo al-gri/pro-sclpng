@@ -372,7 +372,7 @@ impl PublicWsSupervisor {
             )
             .expect("accepted bounded bootstrap");
             let (handle, sink) = owner
-                .register_supervisor(&mut turn, &scopes, budget)
+                .register_supervisor(&mut turn, &scopes, budget, HeartbeatPolicy::SupervisorV2)
                 .expect("register owner");
             let authority = sink.authority().clone();
             (Some(owner), authority, turn, handle, sink)
@@ -397,6 +397,7 @@ impl PublicWsSupervisor {
                         segment: config.segment_no,
                         next_record: actual_next,
                     },
+                    HeartbeatPolicy::SupervisorV2,
                 )
                 .map_err(SupervisorError::Authority)?;
             authority
@@ -722,6 +723,402 @@ fn stamp(monotonic_ns: u64) -> ReceiveStamp {
         unix_ns: 1_800_000_000_000_000_000_i64 + monotonic_ns as i64,
         monotonic_ns,
     }
+}
+
+fn timer_a_read_prefix(supervisor: &PublicWsSupervisor) -> Vec<RecordFrame> {
+    let mut reader = WalReader::open(&supervisor.temp.path).expect("actual owner WAL");
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.next_record().expect("physical accepted prefix") {
+        frames.push(frame);
+    }
+    frames
+}
+
+fn timer_a_supervisor_held_ping(gate: RecordingGate) {
+    // T06/T09/T10: external commands retain the original counted W after the
+    // Timer result is dropped, and are revalidated at dispatch after a revoke.
+    for revoke in [0, 1, 2] {
+        let binding = stream_binding(1, 1, 1, "BTCUSDT");
+        let mut supervisor =
+            canonical_supervisor(vec![binding.clone()], QueuePolicy::default(), gate);
+        let mut trace = MemorySink::default();
+        supervisor.start_commands().unwrap();
+        connect_one(&mut supervisor, &mut trace, &binding, 100);
+        let due = 100 + HEARTBEAT_INTERVAL_NS;
+        supervisor.queue_tick(stamp(due)).unwrap();
+        let mut timer = supervisor
+            .inner
+            .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+            .outcome
+            .unwrap()
+            .unwrap();
+        assert_eq!(timer.records.len(), 1);
+        let ping = std::mem::take(&mut timer.commands)
+            .into_iter()
+            .next()
+            .unwrap();
+        let original_work = ping.work_owner_id().expect("original Timer W");
+        assert!(matches!(ping.kind(), session::CommandKind::SendText { text } if text == "ping"));
+        drop(timer);
+        let held = supervisor.authority.ownership_report();
+        assert_eq!(held.work_used, 1);
+        assert_eq!(held.pending_observations, 0);
+        let prefix = timer_a_read_prefix(&supervisor);
+        let Record::Control(ControlRecord {
+            context,
+            value:
+                Control::Timer {
+                    timer_id,
+                    deadline_ns,
+                    ..
+                },
+        }) = &prefix.last().unwrap().value
+        else {
+            panic!("original Timer")
+        };
+        assert_eq!((*timer_id, *deadline_ns), (1, due));
+        assert_eq!(context.monotonic_ns.get(), due);
+        match revoke {
+            0 => {
+                supervisor
+                    .queue_text(
+                        binding.connection_id,
+                        binding.tag.connection,
+                        stamp(due + 1),
+                        b"pong".to_vec(),
+                    )
+                    .unwrap();
+                supervisor.drain_one(&mut trace).unwrap().unwrap();
+            }
+            1 => {
+                let ticket = supervisor
+                    .owner
+                    .as_mut()
+                    .unwrap()
+                    .begin_finalization(&mut supervisor.turn)
+                    .unwrap();
+                assert!(matches!(
+                    supervisor.inner.quiesce(&mut supervisor.turn, &ticket),
+                    session::QuiescenceReport::NotReady(_)
+                ));
+                assert_eq!(supervisor.authority.ownership_report().work_used, 1);
+                assert!(matches!(
+                    supervisor
+                        .inner
+                        .queue_tick(&mut supervisor.turn, stamp(due + 2))
+                        .outcome,
+                    Err(SupervisorError::Authority(
+                        session::AuthorityError::SessionClosing
+                    ))
+                ));
+            }
+            2 => {
+                supervisor
+                    .queue_tick(stamp(due + PONG_TIMEOUT_NS_V1))
+                    .unwrap();
+                let mut timeout = supervisor
+                    .inner
+                    .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                    .outcome
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(timeout.records.len(), 2);
+                let close = std::mem::take(&mut timeout.commands)
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                assert_ne!(close.work_owner_id(), Some(original_work));
+                let close_owner = close.close_owner().expect("same timeout Close").clone();
+                assert!(
+                    supervisor
+                        .authority
+                        .outstanding_close_owners()
+                        .iter()
+                        .any(|view| view.owner == close_owner && view.ready)
+                );
+                drop(timeout);
+                assert!(matches!(
+                    supervisor.owner.as_mut().unwrap().dispatch(
+                        &mut supervisor.turn,
+                        close,
+                        |_| Ok::<(), ()>(())
+                    ),
+                    session::DispatchReport::Dispatched
+                ));
+            }
+            _ => unreachable!(),
+        }
+        let before_dispatch = timer_a_read_prefix(&supervisor);
+        let mut effects = 0;
+        assert!(matches!(
+            supervisor
+                .owner
+                .as_mut()
+                .unwrap()
+                .dispatch(&mut supervisor.turn, ping, |_| {
+                    effects += 1;
+                    Ok::<(), ()>(())
+                }),
+            session::DispatchReport::Revoked(session::AuthorityError::CommandRevoked)
+        ));
+        assert_eq!(effects, 0);
+        assert_eq!(timer_a_read_prefix(&supervisor), before_dispatch);
+        if revoke == 0 {
+            supervisor
+                .queue_tick(stamp(due + 1 + HEARTBEAT_INTERVAL_NS))
+                .unwrap();
+            let replacement = supervisor.drain_one(&mut trace).unwrap().unwrap();
+            assert_eq!(q2_ping_count(&[replacement]), 1);
+            let frames = timer_a_read_prefix(&supervisor);
+            assert!(matches!(
+                frames.last().unwrap().value,
+                Record::Control(ControlRecord {
+                    value: Control::Timer { timer_id: 2, .. },
+                    ..
+                })
+            ));
+        }
+        supervisor.assert_bounds();
+    }
+}
+
+#[test]
+fn timer_a_supervisor_held_ping_revoked_by_pong_closing_and_timeout_durable() {
+    timer_a_supervisor_held_ping(RecordingGate::Durable);
+}
+
+#[test]
+fn timer_a_supervisor_held_ping_revoked_by_pong_closing_and_timeout_written() {
+    timer_a_supervisor_held_ping(RecordingGate::Written);
+}
+
+fn timer_a_supervisor_tick_partial_capacity(gate: RecordingGate) {
+    // T02/T11: capacity rejects a timer before it exists. Tick's partial
+    // admission is deterministic and repeated calls retain no extra W.
+    let a = stream_binding(1, 1, 1, "BTCUSDT");
+    let b = stream_binding(2, 2, 2, "ETHUSDT");
+    let mut supervisor = canonical_supervisor(
+        vec![b.clone(), a.clone()],
+        QueuePolicy {
+            max_total_items: 9,
+            ..QueuePolicy::default()
+        },
+        gate,
+    );
+    let mut trace = MemorySink::default();
+    supervisor.start_commands().unwrap();
+    connect_one(&mut supervisor, &mut trace, &a, 100);
+    connect_one(&mut supervisor, &mut trace, &b, 100);
+    let mut held: Vec<_> = (0..5)
+        .map(|_| {
+            supervisor
+                .authority
+                .reserve_work(&mut supervisor.turn, session::WorkKind::Result)
+                .unwrap()
+        })
+        .collect();
+    let prefix = timer_a_read_prefix(&supervisor);
+    let due = 100 + HEARTBEAT_INTERVAL_NS;
+    let first = supervisor
+        .inner
+        .queue_tick(&mut supervisor.turn, stamp(due));
+    assert_eq!(first.admitted_scopes, [Some(a.id), None, None, None]);
+    assert!(matches!(
+        first.outcome,
+        Err(SupervisorError::Authority(
+            session::AuthorityError::WorkExhausted
+        ))
+    ));
+    assert!(first.failure.is_none());
+    assert!(first.commands.is_empty());
+    let retained = supervisor.authority.ownership_report();
+    let status = supervisor.authority.status();
+    assert_eq!(retained.work_used, 6);
+    assert_eq!(retained.pending_observations, 1);
+    for _ in 0..100 {
+        let retry = supervisor
+            .inner
+            .queue_tick(&mut supervisor.turn, stamp(due + 1));
+        assert!(retry.admitted_scopes.iter().all(Option::is_none));
+        assert!(matches!(
+            retry.outcome,
+            Err(SupervisorError::Authority(
+                session::AuthorityError::WorkExhausted
+            ))
+        ));
+        assert_eq!(supervisor.authority.ownership_report(), retained);
+        assert_eq!(supervisor.authority.status(), status);
+        assert_eq!(timer_a_read_prefix(&supervisor), prefix);
+        assert_eq!(supervisor.queued_items(), 1);
+    }
+    drop(held.pop().unwrap());
+    let retry = supervisor
+        .inner
+        .queue_tick(&mut supervisor.turn, stamp(due + 2));
+    assert_eq!(retry.outcome, Ok(AdmissionOutcome::Admitted));
+    assert_eq!(retry.admitted_scopes, [Some(b.id), None, None, None]);
+    let results = drain_all(&mut supervisor, &mut trace);
+    assert_eq!(q2_ping_count(&results), 2);
+    let timers: Vec<_> = timer_a_read_prefix(&supervisor)
+        .into_iter()
+        .filter_map(|frame| match frame.value {
+            Record::Control(ControlRecord {
+                context,
+                value:
+                    Control::Timer {
+                        stream,
+                        timer_id,
+                        deadline_ns,
+                    },
+            }) => Some((stream, timer_id, deadline_ns, context.monotonic_ns.get())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(timers, vec![(a.id, 1, due, due), (b.id, 1, due, due + 2)]);
+    drop(held);
+    assert_eq!(supervisor.authority.ownership_report().work_used, 0);
+    assert!(!supervisor.is_halted());
+    supervisor.assert_bounds();
+}
+
+#[test]
+fn timer_a_supervisor_tick_partial_capacity_is_ascending_and_preserving_durable() {
+    timer_a_supervisor_tick_partial_capacity(RecordingGate::Durable);
+}
+
+#[test]
+fn timer_a_supervisor_tick_partial_capacity_is_ascending_and_preserving_written() {
+    timer_a_supervisor_tick_partial_capacity(RecordingGate::Written);
+}
+
+fn timer_a_supervisor_timeout_h1_failure(gate: RecordingGate) {
+    // T08/T13/N3: H1 is later than the authenticated Timeout Down. A checked
+    // future successor failure retains that prefix, original W and ready Close.
+    let mut binding = stream_binding(1, 1, 1, "BTCUSDT");
+    binding.tag.book = Some(id(BookEpoch::new(u64::MAX)));
+    let mut supervisor = canonical_supervisor(vec![binding.clone()], QueuePolicy::default(), gate);
+    let mut trace = MemorySink::default();
+    supervisor.start_commands().unwrap();
+    connect_one(&mut supervisor, &mut trace, &binding, 100);
+    let due = 100 + HEARTBEAT_INTERVAL_NS;
+    supervisor.queue_tick(stamp(due)).unwrap();
+    supervisor.drain_one(&mut trace).unwrap().unwrap();
+    let before = timer_a_read_prefix(&supervisor);
+    let timeout_stamp = due + PONG_TIMEOUT_NS_V1;
+    supervisor.queue_tick(stamp(timeout_stamp)).unwrap();
+    let rejected = supervisor
+        .inner
+        .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink);
+    assert!(matches!(
+        rejected.outcome,
+        Err(SupervisorError::Identity(IdentityError::CounterExhausted(
+            "BookEpoch"
+        )))
+    ));
+    let frames = timer_a_read_prefix(&supervisor);
+    assert_eq!(frames.len(), before.len() + 2);
+    assert!(matches!(
+        frames[before.len()].value,
+        Record::Control(ControlRecord {
+            value: Control::Timer { timer_id: 2, .. },
+            ..
+        })
+    ));
+    assert!(matches!(
+        frames[before.len() + 1].value,
+        Record::Control(ControlRecord {
+            value: Control::Transport {
+                value: Transport::Down,
+                ..
+            },
+            ..
+        })
+    ));
+    let retained = supervisor.authority.ownership_report();
+    assert_eq!(retained.pending_observations, 1);
+    assert_eq!(retained.work_used, 1);
+    assert_eq!(supervisor.queued_items(), 1);
+    assert!(supervisor.authority.status().storage_stopped.is_some());
+    let state = supervisor.snapshot(binding.id).unwrap();
+    assert_eq!(state.transport, Transport::Down);
+    assert_eq!(state.subscription, SubscriptionState::Degraded);
+    assert_eq!(state.tag, binding.tag);
+    assert_eq!(supervisor.authority.unsettled_summary().pending_plans, 0);
+    let closes = supervisor.authority.outstanding_close_owners();
+    assert_eq!(closes.iter().count(), 1);
+    let close = closes.iter().next().unwrap();
+    assert!(close.ready);
+    assert_eq!(close.state, session::CloseState::Pending);
+    let close_ref = close.owner.clone();
+    for _ in 0..3 {
+        assert!(matches!(
+            supervisor
+                .inner
+                .drain_one(&mut supervisor.turn, &mut supervisor.bound_sink)
+                .outcome,
+            Err(SupervisorError::Halted)
+        ));
+        assert_eq!(supervisor.authority.ownership_report(), retained);
+        assert_eq!(timer_a_read_prefix(&supervisor), frames);
+        assert_eq!(
+            supervisor
+                .authority
+                .outstanding_close_owners()
+                .iter()
+                .next()
+                .unwrap()
+                .owner,
+            close_ref
+        );
+    }
+    let session::CloseLeaseReport::Leased(close) = supervisor
+        .owner
+        .as_mut()
+        .unwrap()
+        .reclaim_close(&mut supervisor.turn, close_ref.clone())
+    else {
+        panic!("retained Close")
+    };
+    assert!(matches!(
+        supervisor.owner.as_mut().unwrap().dispatch(
+            &mut supervisor.turn,
+            close.into_command().unwrap(),
+            |_| Ok::<(), ()>(())
+        ),
+        session::DispatchReport::Dispatched
+    ));
+    assert_eq!(
+        supervisor
+            .authority
+            .close_state(binding.id, binding.tag.connection)
+            .unwrap(),
+        session::CloseState::Settled
+    );
+    assert_eq!(
+        supervisor.authority.ownership_report().pending_observations,
+        1
+    );
+    assert!(matches!(
+        supervisor
+            .owner
+            .as_mut()
+            .unwrap()
+            .begin_finalization(&mut supervisor.turn),
+        Err(recording::OwnerError::Authority(
+            session::AuthorityError::ArchiveFailed
+        ))
+    ));
+    assert_eq!(timer_a_read_prefix(&supervisor), frames);
+}
+
+#[test]
+fn timer_a_supervisor_timeout_h1_failure_retains_original_down_close_durable() {
+    timer_a_supervisor_timeout_h1_failure(RecordingGate::Durable);
+}
+
+#[test]
+fn timer_a_supervisor_timeout_h1_failure_retains_original_down_close_written() {
+    timer_a_supervisor_timeout_h1_failure(RecordingGate::Written);
 }
 
 fn ack(symbol: &str) -> Vec<u8> {
@@ -5339,12 +5736,16 @@ fn canonical_terminal_close_reclaim_survives_all_marker_faults_and_diagnostic_cl
             session::CloseLeaseReport::AlreadyLeased
         ));
         let mut physical_attempts = 0;
-        let dispatched = owner.dispatch(&mut supervisor.turn, lease.into_command(), |view| {
-            assert_eq!(view.epoch, binding.tag.connection);
-            assert_eq!(view.kind, &session::CommandKind::Close);
-            physical_attempts += 1;
-            Err::<(), _>("ambiguous physical close")
-        });
+        let dispatched = owner.dispatch(
+            &mut supervisor.turn,
+            lease.into_command().unwrap(),
+            |view| {
+                assert_eq!(view.epoch, binding.tag.connection);
+                assert_eq!(view.kind, &session::CommandKind::Close);
+                physical_attempts += 1;
+                Err::<(), _>("ambiguous physical close")
+            },
+        );
         assert!(matches!(
             dispatched,
             session::DispatchReport::DispatchFailed {
@@ -5364,7 +5765,7 @@ fn canonical_terminal_close_reclaim_survives_all_marker_faults_and_diagnostic_cl
             owner.reclaim_close(&mut foreign.turn, close_owner.clone()),
             session::CloseLeaseReport::Rejected(session::AuthorityError::AuthorityMismatch)
         ));
-        let denied = owner.dispatch(&mut foreign.turn, lease.into_command(), |_| {
+        let denied = owner.dispatch(&mut foreign.turn, lease.into_command().unwrap(), |_| {
             panic!("foreign authority must not execute an effect") as Result<(), ()>
         });
         let session::DispatchReport::Denied {
@@ -5461,12 +5862,16 @@ fn canonical_terminal_close_reclaim_survives_all_marker_faults_and_diagnostic_cl
             before_reclaim
         );
         assert!(matches!(
-            owner.dispatch(&mut supervisor.turn, lease.into_command(), |view| {
-                assert_eq!(view.epoch, binding.tag.connection);
-                assert_eq!(view.kind, &session::CommandKind::Close);
-                physical_attempts += 1;
-                Ok::<(), ()>(())
-            }),
+            owner.dispatch(
+                &mut supervisor.turn,
+                lease.into_command().unwrap(),
+                |view| {
+                    assert_eq!(view.epoch, binding.tag.connection);
+                    assert_eq!(view.kind, &session::CommandKind::Close);
+                    physical_attempts += 1;
+                    Ok::<(), ()>(())
+                }
+            ),
             session::DispatchReport::Dispatched
         ));
         assert_eq!(
@@ -6400,6 +6805,7 @@ fn full_supervisor_requested_heap_retention_and_decode_peak_fit_cap5_and_cap9_pr
                         raw_byte_limit: 4096,
                         max_message_bytes: 4096,
                     },
+                    HeartbeatPolicy::SupervisorV2,
                 )
                 .expect("register fixed full scope set");
             let mut supervisor = BoundSupervisor::new(
@@ -6589,7 +6995,9 @@ fn full_supervisor_requested_heap_retention_and_decode_peak_fit_cap5_and_cap9_pr
                 panic!("mandatory Close")
             };
             assert!(matches!(
-                owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<(), ()>(())),
+                owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Ok::<(), ()>(
+                    ()
+                )),
                 session::DispatchReport::Dispatched
             ));
             assert!(matches!(
@@ -6829,7 +7237,7 @@ fn b1_dropped_supervisor_retains_admitted_obligation_and_denies_ready_and_seals(
                     panic!("same mandatory Close can be reclaimed")
                 };
                 assert!(matches!(
-                    owner.dispatch(&mut turn, lease.into_command(), |_| {
+                    owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| {
                         attempts += 1;
                         Ok::<(), ()>(())
                     }),
@@ -7191,7 +7599,9 @@ fn b1_abandonment_after_cut_retains_pre_post_work_and_original_failure_prefix() 
             panic!("Close after closure")
         };
         assert!(matches!(
-            owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<(), ()>(())),
+            owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Ok::<(), ()>(
+                ()
+            )),
             session::DispatchReport::Dispatched
         ));
     }
@@ -7356,7 +7766,9 @@ fn b1_dropped_pending_down_plan_cannot_settle_by_releasing_other_aliases() {
         session::CloseStorage::WorkOwner(work_id)
     );
     assert!(matches!(
-        owner.dispatch(&mut turn, lease.into_command(), |_| Ok::<(), ()>(())),
+        owner.dispatch(&mut turn, lease.into_command().unwrap(), |_| Ok::<(), ()>(
+            ()
+        )),
         session::DispatchReport::Dispatched
     ));
     for _ in 0..32 {
@@ -7422,6 +7834,7 @@ fn b1_genuine_owner_keeps_unconfirmed_inflight_obligation_after_last_reference_d
                     raw_byte_limit: 1024,
                     max_message_bytes: 1024,
                 },
+                HeartbeatPolicy::SupervisorV2,
             )
             .unwrap();
         let work = handle
@@ -8339,7 +8752,7 @@ fn qa_d1_same_scope_cancellation_keeps_close_and_retained_down_result_through_re
                     else {
                         panic!("Drop reclaims same owner")
                     };
-                    lease.into_command()
+                    lease.into_command().unwrap()
                 }
                 2 => {
                     assert!(matches!(
@@ -8357,7 +8770,7 @@ fn qa_d1_same_scope_cancellation_keeps_close_and_retained_down_result_through_re
                     else {
                         panic!("dispatch error reclaims same owner")
                     };
-                    lease.into_command()
+                    lease.into_command().unwrap()
                 }
                 _ => unreachable!(),
             };
@@ -8636,7 +9049,7 @@ fn qa_d1_external_scope_failure_cancels_only_its_generated_plan_and_neighbor_com
     assert!(matches!(
         owner.dispatch(
             &mut supervisor.turn,
-            lease.into_command(),
+            lease.into_command().unwrap(),
             |_| Ok::<(), ()>(())
         ),
         session::DispatchReport::Dispatched
@@ -8891,7 +9304,7 @@ fn qa_d1_diagnostic_closing_or_closed_cancels_unadmitted_plan_without_losing_clo
         assert!(matches!(
             owner.dispatch(
                 &mut supervisor.turn,
-                lease.into_command(),
+                lease.into_command().unwrap(),
                 |_| Err::<(), _>("ambiguous closure")
             ),
             session::DispatchReport::DispatchFailed {
@@ -8907,7 +9320,7 @@ fn qa_d1_diagnostic_closing_or_closed_cancels_unadmitted_plan_without_losing_clo
         assert!(matches!(
             owner.dispatch(
                 &mut supervisor.turn,
-                lease.into_command(),
+                lease.into_command().unwrap(),
                 |_| Ok::<(), ()>(())
             ),
             session::DispatchReport::Dispatched
@@ -9360,6 +9773,7 @@ fn qa8_direct_partial_generated_cancel(confirmed: u64, mode: u8) {
                 raw_byte_limit: 1024,
                 max_message_bytes: 1024,
             },
+            HeartbeatPolicy::SupervisorV2,
         )
         .unwrap();
     let work = handle
@@ -9423,7 +9837,9 @@ fn qa8_direct_partial_generated_cancel(confirmed: u64, mode: u8) {
         panic!("same Down-owned Close available");
     };
     assert!(matches!(
-        owner.dispatch(&mut turn, close.into_command(), |_| Ok::<(), ()>(())),
+        owner.dispatch(&mut turn, close.into_command().unwrap(), |_| Ok::<(), ()>(
+            ()
+        )),
         session::DispatchReport::Dispatched
     ));
     assert!(matches!(
@@ -9662,6 +10078,7 @@ impl QaD2Generated {
                     raw_byte_limit: 1024,
                     max_message_bytes: 1024,
                 },
+                HeartbeatPolicy::SupervisorV2,
             )
             .unwrap();
         let work = handle
@@ -9714,10 +10131,12 @@ impl QaD2Generated {
             panic!("genuine Down owns mandatory Close")
         };
         let held_close = if hold_close {
-            Some(close.into_command())
+            Some(close.into_command().unwrap())
         } else {
             assert!(matches!(
-                owner.dispatch(&mut turn, close.into_command(), |_| Ok::<(), ()>(())),
+                owner.dispatch(&mut turn, close.into_command().unwrap(), |_| Ok::<(), ()>(
+                    ()
+                )),
                 session::DispatchReport::Dispatched
             ));
             None
@@ -10267,7 +10686,10 @@ fn qa_d2_zero_fresh_no_stop_cancellation_succeeds_in_all_eligible_lifecycles_wit
         assert!(matches!(
             fixture
                 .owner
-                .dispatch(&mut fixture.turn, lease.into_command(), |_| Err::<(), _>(
+                .dispatch(&mut fixture.turn, lease.into_command().unwrap(), |_| Err::<
+                    (),
+                    _,
+                >(
                     "ambiguous Close"
                 )),
             session::DispatchReport::DispatchFailed {
@@ -10282,11 +10704,14 @@ fn qa_d2_zero_fresh_no_stop_cancellation_succeeds_in_all_eligible_lifecycles_wit
             panic!("same Close survives dispatch error")
         };
         assert!(matches!(
-            fixture.owner.dispatch(
-                &mut fixture.turn,
-                lease.into_command(),
-                |_| Ok::<(), ()>(())
-            ),
+            fixture
+                .owner
+                .dispatch(&mut fixture.turn, lease.into_command().unwrap(), |_| Ok::<
+                    (),
+                    (),
+                >(
+                    ()
+                )),
             session::DispatchReport::Dispatched
         ));
         assert_eq!(fixture.handle.authority().ownership_report().work_used, 0);

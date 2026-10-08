@@ -42,6 +42,7 @@ fn session(
                 segment: SegmentNo::new(0),
                 next_record: RecordNo::new(10).unwrap(),
             },
+            HeartbeatPolicy::SupervisorV2,
         )
         .unwrap();
     (authority, turn, handle)
@@ -222,7 +223,7 @@ fn mandatory_close_drop_error_double_reclaim_and_success_preserve_owner_identity
             CloseState::Pending
         );
         let second = lease(&authority, &mut turn, &owner);
-        let result = authority.dispatch(&mut turn, second.into_command(), |_| {
+        let result = authority.dispatch(&mut turn, second.into_command().unwrap(), |_| {
             Err("possible physical effect")
         });
         assert!(matches!(
@@ -235,7 +236,11 @@ fn mandatory_close_drop_error_double_reclaim_and_success_preserve_owner_identity
         assert_same_ledger(authority.ownership_report(), before);
         let third = lease(&authority, &mut turn, &owner);
         assert!(matches!(
-            authority.dispatch(&mut turn, third.into_command(), |_| Ok::<_, ()>(())),
+            authority.dispatch(
+                &mut turn,
+                third.into_command().unwrap(),
+                |_| Ok::<_, ()>(())
+            ),
             DispatchReport::Dispatched
         ));
         assert!(matches!(
@@ -267,7 +272,7 @@ fn foreign_reclaim_and_dispatch_leave_rightful_lease_owned() {
         authority.reclaim_close(&mut foreign_turn, owner.clone()),
         CloseLeaseReport::Rejected(AuthorityError::AuthorityMismatch)
     ));
-    let command = lease(&authority, &mut turn, &owner).into_command();
+    let command = lease(&authority, &mut turn, &owner).into_command().unwrap();
     let returned = match foreign.dispatch(&mut foreign_turn, command, |_| -> Result<(), ()> {
         panic!("foreign effect")
     }) {
@@ -310,10 +315,10 @@ fn mandatory_close_survives_storage_stop_and_diagnostic_descriptor_closure() {
     authority.begin_diagnostic_close(&mut turn).unwrap();
     authority.diagnostic_closed(&mut turn).unwrap();
     let before = authority.ownership_report();
-    let command = lease(&authority, &mut turn, &owner).into_command();
+    let command = lease(&authority, &mut turn, &owner).into_command().unwrap();
     drop(command);
     assert_same_ledger(authority.ownership_report(), before);
-    let command = lease(&authority, &mut turn, &owner).into_command();
+    let command = lease(&authority, &mut turn, &owner).into_command().unwrap();
     assert!(matches!(
         authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
         DispatchReport::Dispatched
@@ -353,7 +358,7 @@ fn borrowed_quiescence_not_ready_is_repeatable_and_only_one_proof_is_issued() {
         AuthorityError::SessionClosing
     );
     drop(work);
-    let command = lease(&authority, &mut turn, &owner).into_command();
+    let command = lease(&authority, &mut turn, &owner).into_command().unwrap();
     authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(()));
     let mut proof = match handle.quiesce(&mut turn, &ticket) {
         QuiescenceReport::Ready(proof) => proof,
@@ -549,7 +554,7 @@ fn admitted_obligation_survives_last_alias_and_kind_changes_without_false_settle
             .unwrap()
             .owner
             .clone();
-        let command = lease(&authority, &mut turn, &close).into_command();
+        let command = lease(&authority, &mut turn, &close).into_command().unwrap();
         assert!(matches!(
             authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
             DispatchReport::Dispatched
@@ -663,13 +668,15 @@ fn one_work_owner_cannot_supply_three_scope_closes_at_cap_thirteen() {
         let owner = authority
             .mandatory_close(&mut turn, StreamId::new(stream).unwrap(), epoch, Some(&own))
             .unwrap();
-        let command = lease(&authority, &mut turn, &owner).into_command();
+        let command = lease(&authority, &mut turn, &owner).into_command().unwrap();
         assert!(matches!(
             authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
             DispatchReport::Dispatched
         ));
     }
-    let command = lease(&authority, &mut turn, &rightful).into_command();
+    let command = lease(&authority, &mut turn, &rightful)
+        .into_command()
+        .unwrap();
     assert!(matches!(
         authority.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
         DispatchReport::Dispatched
