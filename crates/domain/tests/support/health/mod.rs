@@ -235,6 +235,7 @@ impl HealthModel {
                 reason: Reason::Unknown,
                 watermarks: Watermarks::default(),
                 last_receipt: None,
+                terminal_failure: None,
             },
             blocked: None,
         })
@@ -431,8 +432,8 @@ impl HealthModel {
         let policy = config.policy;
         let ids: Vec<_> = self.streams.keys().copied().collect();
         for id in ids {
-            let eligible =
-                self.usable_data(id) && self.recording.health == RecordingHealth::Healthy;
+            let eligible = self.usable_data(id)
+                && self.recording.effective_health() == RecordingHealth::Healthy;
             let mut stream = self
                 .streams
                 .remove(&id)
@@ -490,7 +491,7 @@ impl HealthModel {
             &PermitState {
                 canonical_running: self.blocked.is_none(),
                 usable_data: self.usable_data(candidate.id.stream),
-                recording: self.recording.health,
+                recording: &self.recording,
                 mode: self.start.mode,
                 scope: &scope,
                 current_candidate: stream.candidate.as_ref(),

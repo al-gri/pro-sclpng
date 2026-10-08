@@ -111,11 +111,53 @@ impl Watermarks {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TerminalRecordingFailure {
+    /// The recorded observation is archive-wide evidence, not the identity of
+    /// an unrecorded input or a replacement GAP.
+    pub record: RecordNo,
+    pub reason: Reason,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecordingSnapshot {
+    /// Most recently observed health; a later successful receipt can truthfully
+    /// be Healthy without clearing the capture session's terminal failure.
     pub health: RecordingHealth,
     pub reason: Reason,
     pub watermarks: Watermarks,
     pub last_receipt: Option<RecordNo>,
+    pub terminal_failure: Option<TerminalRecordingFailure>,
+}
+
+impl RecordingSnapshot {
+    pub fn effective_health(&self) -> RecordingHealth {
+        if self.terminal_failure.is_some() {
+            RecordingHealth::Failed
+        } else {
+            self.health
+        }
+    }
+
+    pub fn observe(
+        &mut self,
+        own: RecordNo,
+        admitted_prefix: RecordNo,
+        evidence: &RecordingEvidence,
+    ) -> Result<(), ReceiptError> {
+        // Validate the watermark before mutating either the observation or the
+        // latch. An invalid record is outside the admitted semantic prefix.
+        self.watermarks.observe(own, admitted_prefix, evidence)?;
+        self.health = evidence.health;
+        self.reason = evidence.reason;
+        self.last_receipt = Some(own);
+        if evidence.health == RecordingHealth::Failed && self.terminal_failure.is_none() {
+            self.terminal_failure = Some(TerminalRecordingFailure {
+                record: own,
+                reason: evidence.reason,
+            });
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,7 +240,7 @@ pub enum PermitError {
 pub struct PermitState<'a> {
     pub canonical_running: bool,
     pub usable_data: bool,
-    pub recording: RecordingHealth,
+    pub recording: &'a RecordingSnapshot,
     pub mode: DurabilityMode,
     pub scope: &'a EvidenceScope,
     pub current_candidate: Option<&'a PublicationCandidate>,
@@ -221,7 +263,7 @@ pub fn publication_permit(
     if !state.usable_data {
         return Err(PermitError::DataNotUsable);
     }
-    if state.recording != RecordingHealth::Healthy {
+    if state.recording.effective_health() != RecordingHealth::Healthy {
         return Err(PermitError::RecordingNotHealthy);
     }
     state

@@ -1,12 +1,15 @@
-//! Offline, bounded market-data decoding and deterministic DataHealth reduction.
+//! Bounded market-data decoding, deterministic DataHealth reduction, and public WS supervision.
 //!
-//! This crate intentionally owns no network connection, live clock, storage I/O
-//! or canonical local-book quantities/levels.
+//! REC-001D owns the Bitget public WebSocket protocol/supervision state machine and
+//! accepted WAL-record construction. Concrete TLS/socket I/O, live clock sampling,
+//! canonical local-book quantities/levels, private APIs, and trading remain outside
+//! this crate.
 
 mod continuity;
 mod data_health;
 mod decoder;
 mod json;
+mod ws_supervisor;
 
 pub use continuity::{ContinuityClassifier, ContinuityOutcome, ContinuityRule};
 pub use data_health::{
@@ -22,3 +25,12 @@ pub use decoder::{
     WireTrade, decode_message, decode_message_with_limits,
 };
 pub use json::{JsonError, JsonErrorKind};
+pub use ws_supervisor::{
+    AdmissionOutcome, AdmissionReport, BITGET_PUBLIC_WS_ENDPOINT, BoundedList, DrainReport,
+    DrainResult, HEARTBEAT_INTERVAL_NS, HeartbeatPolicy, MAX_CONFIGURED_STREAMS,
+    PONG_TIMEOUT_NS_V1, PersistError, PersistenceReceipt, PublicWsSupervisor, QueuePolicy,
+    RECONNECT_BASE_NS_V1, RECONNECT_MAX_NS_V1, RawRetention, ReceiveStamp,
+    SUPERVISOR_POLICY_VERSION, StreamSupervisorSnapshot, SubscriptionState, SupervisorError,
+    SupervisorEvent, SupervisorRetentionReport, TransportCommand, WsSupervisorConfig,
+    reconnect_delay_ns,
+};

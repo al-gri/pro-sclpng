@@ -11,6 +11,7 @@ name = "market-data"
 version = "0.1.0"
 dependencies = [
  "domain",
+ "recording",
 ]
 
 [[package]]
