@@ -2512,11 +2512,12 @@ impl SupervisorSessionHandle {
             && owner.cell.obligation.get() == ObservationObligation::Pending
             && owner.cell.received_progress.get() == ReceivedProgress::Unconfirmed
             && owner.cell.confirmed_records.get() == 0
-            && owner
-                .cell
-                .observation
-                .get()
-                .is_some_and(|identity| identity.class == ObservationClass::Gap)
+            && owner.cell.observation.get().is_some_and(|identity| {
+                identity.class == ObservationClass::Gap
+                    && state.scopes.iter().any(|scope| {
+                        scope.binding.stream == identity.stream && scope.failure.is_none()
+                    })
+            })
             && owner.cell.record_admission_order.get() == Some(state.record_admission_counter)
             && (!state.failed || owner.cut_side() == CutSide::PostCut))
     }
@@ -3626,6 +3627,11 @@ impl CaptureSessionAuthority {
     pub fn synchronize_obligations(&self, turn: &mut SessionTurn) -> Result<(), AuthorityError> {
         self.validate_turn(turn)?;
         let mut state = self.state.borrow_mut();
+        // Successful finalization fixes the reports. A readonly synchronization
+        // remains a no-op, preserving consumed ticket/proof error priority.
+        if state.lifecycle == SessionLifecycle::Finalized {
+            return Ok(());
+        }
         let first = state
             .work
             .iter()
@@ -4335,11 +4341,25 @@ impl CaptureSessionAuthority {
         }
     }
 
+    fn ensure_terminal_mutation_allowed(&self) -> Result<(), AuthorityError> {
+        if self.state.borrow().lifecycle == SessionLifecycle::Finalized {
+            return Err(AuthorityError::SessionClosed);
+        }
+        Ok(())
+    }
+
     pub fn terminate(
         &self,
         turn: &mut SessionTurn,
         failure: TerminalFailure,
     ) -> Result<TerminationReport, AuthorityError> {
+        self.validate_turn(turn)?;
+        if !self.state.borrow().scopes.iter().any(|scope| {
+            scope.binding.stream == failure.stream && scope.binding.connection == failure.connection
+        }) {
+            return Err(AuthorityError::InvalidBinding);
+        }
+        self.ensure_terminal_mutation_allowed()?;
         self.synchronize_obligations(turn)?;
         let first;
         {
@@ -4419,6 +4439,8 @@ impl CaptureSessionAuthority {
         turn: &mut SessionTurn,
         error: PersistError,
     ) -> Result<(), AuthorityError> {
+        self.validate_turn(turn)?;
+        self.ensure_terminal_mutation_allowed()?;
         self.synchronize_obligations(turn)?;
         let mut s = self.state.borrow_mut();
         if s.storage_stopped.is_none() {
@@ -8027,6 +8049,518 @@ mod conformance {
                 assert_eq!(cell.state.get(), CloseState::Settled);
             }
         }
+    }
+
+    fn qa42_terminal_failure(handle: &SupervisorSessionHandle) -> TerminalFailure {
+        TerminalFailure {
+            stream: StreamId::new(1).unwrap(),
+            connection: ConnectionId::new(1).unwrap(),
+            current_epoch: ConnectionEpoch::new(1).unwrap(),
+            observed_tag: accepted_binding().tag,
+            context: handle.prefix().context,
+            stamp: ReceiveStamp {
+                unix_ns: 700,
+                monotonic_ns: 700,
+            },
+            input_class: InputClass::Raw,
+            attempt: AttemptIdentity::Candidate(CaptureAttemptNo::new(2).unwrap()),
+            cause: FailureCause::QueueOverflow,
+        }
+    }
+
+    #[test]
+    fn qa42_finalized_terminal_routes_preserve_reports_and_consumed_authorization() {
+        // Actual pure-authority finalization, not a filesystem/seal fixture.
+        // Recording covers the corresponding concrete Durable public routes.
+        let (authority, mut turn, handle) = session(10);
+        let (foreign, mut foreign_turn, _) = session(10);
+        let failure = qa42_terminal_failure(&handle);
+        let error = PersistError::typed(PersistErrorKind::Io, "late terminal stop");
+        let ticket = authority.begin_finalization(&mut turn).unwrap();
+        let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+            panic!("genuine settled authority must issue its sole proof");
+        };
+        authority.consume_proof(&mut turn, &mut proof).unwrap();
+        authority.finalization_finished(&mut turn).unwrap();
+        let snapshot = || {
+            let state = authority.state.borrow();
+            let scope = &state.scopes[0];
+            (
+                authority.status(),
+                authority.ownership_report(),
+                authority.unsettled_summary(),
+                authority.prefix().unwrap(),
+                state.trusted_watermarks,
+                (
+                    state.sequence,
+                    state.record_admission_counter,
+                    state.ticket,
+                    state.proof_issued,
+                    state.proof_consumed,
+                    state.finalization_authorized,
+                ),
+                (
+                    scope.failure,
+                    scope.schedule,
+                    scope.schedule_generation,
+                    scope.timer_id,
+                    scope.queued_timer,
+                    scope.frozen_timeout,
+                ),
+            )
+        };
+        let before = snapshot();
+        let foreign_before = foreign.status();
+        for _ in 0..100 {
+            assert_eq!(
+                handle.terminate(&mut turn, failure).unwrap_err(),
+                AuthorityError::SessionClosed
+            );
+            assert_eq!(snapshot(), before);
+            assert_eq!(
+                authority.terminate(&mut turn, failure).unwrap_err(),
+                AuthorityError::SessionClosed
+            );
+            assert_eq!(snapshot(), before);
+            assert_eq!(
+                authority.storage_stopped(&mut turn, error),
+                Err(AuthorityError::SessionClosed)
+            );
+            assert_eq!(snapshot(), before);
+            assert_eq!(
+                authority.hard_stop(&mut turn, error),
+                Err(AuthorityError::SessionClosed)
+            );
+            assert_eq!(authority.synchronize_obligations(&mut turn), Ok(()));
+            assert_eq!(snapshot(), before);
+        }
+        let mut wrong = failure;
+        wrong.connection = ConnectionId::new(2).unwrap();
+        assert_eq!(
+            handle.terminate(&mut turn, wrong).unwrap_err(),
+            AuthorityError::InvalidBinding
+        );
+        assert_eq!(
+            handle.terminate(&mut foreign_turn, wrong).unwrap_err(),
+            AuthorityError::AuthorityMismatch
+        );
+        assert_eq!(
+            authority.storage_stopped(&mut foreign_turn, error),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            authority.hard_stop(&mut foreign_turn, error),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            authority.synchronize_obligations(&mut foreign_turn),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::TicketConsumed
+        ));
+        assert_eq!(
+            authority.consume_proof(&mut turn, &mut proof),
+            Err(AuthorityError::ProofConsumed)
+        );
+        assert_eq!(snapshot(), before);
+        assert_eq!(foreign.status(), foreign_before);
+    }
+
+    #[test]
+    fn qa42_finalized_sync_cannot_latch_modeled_abandonment_or_change_error_priority() {
+        let (authority, mut turn, handle) = session(10);
+        let identity = ObservationIdentity {
+            stream: StreamId::new(1).unwrap(),
+            epoch: ConnectionEpoch::new(1).unwrap(),
+            stamp: ReceiveStamp {
+                unix_ns: 5,
+                monotonic_ns: 5,
+            },
+            class: ObservationClass::Raw,
+            tag: Some(accepted_binding().tag),
+            attempts: Some((
+                CaptureAttemptNo::new(1).unwrap(),
+                CaptureAttemptNo::new(1).unwrap(),
+            )),
+            loss_count: None,
+        };
+        let work = handle
+            .reserve_work(&mut turn, WorkKind::QueuedObservation)
+            .unwrap();
+        handle
+            .admit_observation(&mut turn, &work, identity)
+            .unwrap();
+        drop(work);
+        // Private defensive modeling only: lawful public quiescence cannot
+        // finalize an abandoned received obligation. Preserve that obligation
+        // without letting a late sync or rejected terminal call rewrite reports.
+        authority.state.borrow_mut().lifecycle = SessionLifecycle::Finalized;
+        let before = (
+            authority.status(),
+            authority.ownership_report(),
+            authority.unsettled_summary(),
+            authority.prefix().unwrap(),
+        );
+        assert!(!before.0.failed);
+        assert!(before.0.first_abandonment.is_none());
+        assert_eq!(before.1.work_used, 1);
+        let mut wrong = qa42_terminal_failure(&handle);
+        wrong.stream = StreamId::new(2).unwrap();
+        for _ in 0..100 {
+            assert_eq!(authority.synchronize_obligations(&mut turn), Ok(()));
+            assert_eq!(
+                authority.terminate(&mut turn, wrong).unwrap_err(),
+                AuthorityError::InvalidBinding
+            );
+            assert_eq!(
+                handle
+                    .terminate(&mut turn, qa42_terminal_failure(&handle))
+                    .unwrap_err(),
+                AuthorityError::SessionClosed
+            );
+            assert_eq!(
+                (
+                    authority.status(),
+                    authority.ownership_report(),
+                    authority.unsettled_summary(),
+                    authority.prefix().unwrap()
+                ),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn qa42_closing_failure_before_and_after_ready_retains_original_close_and_revokes_seals() {
+        for phase in 0..3 {
+            let (authority, mut turn, handle) = session(10);
+            let ticket = authority.begin_finalization(&mut turn).unwrap();
+            let mut proof = if phase > 0 {
+                let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+                    panic!("healthy original ready control");
+                };
+                Some(proof)
+            } else {
+                None
+            };
+            if phase == 2 {
+                authority
+                    .consume_proof(&mut turn, proof.as_mut().unwrap())
+                    .unwrap();
+                authority.ensure_finalization_authorized().unwrap();
+            }
+            let original = qa42_terminal_failure(&handle);
+            let terminal = handle.terminate(&mut turn, original).unwrap();
+            assert!(terminal.first);
+            assert_eq!(authority.terminal_failure(original.stream), Some(original));
+            assert_eq!(
+                authority.status().lifecycle,
+                SessionLifecycle::DiagnosticClosing
+            );
+            assert_eq!(authority.status().storage_stopped, None);
+            assert_eq!(
+                authority.ensure_finalization_authorized(),
+                Err(AuthorityError::ArchiveFailed)
+            );
+            assert!(matches!(
+                handle.quiesce(&mut turn, &ticket),
+                QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+            ));
+            if let Some(proof) = proof.as_mut() {
+                assert_eq!(
+                    authority.consume_proof(&mut turn, proof),
+                    Err(AuthorityError::ArchiveFailed)
+                );
+            }
+            assert_eq!(
+                authority.finalization_finished(&mut turn),
+                Err(AuthorityError::ArchiveFailed)
+            );
+            assert_eq!(
+                authority.ensure_admission_open(&turn),
+                Err(AuthorityError::SessionClosing)
+            );
+            assert_eq!(
+                authority.state.borrow().ticket,
+                if phase == 0 {
+                    TicketState::Invalidated
+                } else {
+                    TicketState::Consumed
+                }
+            );
+            let close = terminal.close_owner.clone();
+            drop(terminal.close);
+            let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close.clone())
+            else {
+                panic!("original fail-safe Close survives Closing failure")
+            };
+            assert!(matches!(
+                authority.dispatch(&mut turn, lease.into_command().unwrap(), |_| Err::<(), _>(
+                    "ambiguous original Close"
+                )),
+                DispatchReport::DispatchFailed {
+                    effect: AmbiguousEffect::Unknown,
+                    ..
+                }
+            ));
+            let CloseLeaseReport::Leased(lease) = authority.reclaim_close(&mut turn, close.clone())
+            else {
+                panic!("same original Close remains retryable")
+            };
+            let mut effects = 0;
+            assert!(matches!(
+                authority.dispatch(&mut turn, lease.into_command().unwrap(), |_| {
+                    effects += 1;
+                    Ok::<_, ()>(())
+                }),
+                DispatchReport::Dispatched
+            ));
+            assert_eq!(effects, 1);
+            assert_eq!(
+                authority.close_state(original.stream, original.current_epoch),
+                Ok(CloseState::Settled)
+            );
+            assert_eq!(authority.ownership_report().work_used, 0);
+            let again = handle.terminate(&mut turn, original).unwrap();
+            assert!(!again.first);
+            assert!(again.close.is_none());
+            assert_eq!(again.close_owner, close);
+        }
+    }
+
+    #[test]
+    fn qa42_failed_scope_gap_keeps_original_identity_while_healthy_postcut_tail_extends_at_max() {
+        for fail_gap_scope in [false, true] {
+            // Epoch-only pure domain registry and trusted receipt writer. The
+            // public recording counterparts own full accepted WAL bindings.
+            let (base, base_turn, base_handle) = session(10);
+            let binding = base.binding();
+            let prefix = base_handle.prefix();
+            drop((base, base_turn, base_handle));
+            let (authority, mut turn) = CaptureSessionAuthority::new(binding);
+            let scopes: [ScopeBinding; 2] = std::array::from_fn(|index| ScopeBinding {
+                stream: StreamId::new(index as u32 + 1).unwrap(),
+                connection: ConnectionId::new(index as u32 + 1).unwrap(),
+                epoch: ConnectionEpoch::new(1).unwrap(),
+            });
+            let handle = authority
+                .register_supervisor(
+                    &mut turn,
+                    &scopes,
+                    RetentionBudget {
+                        item_cap: 9,
+                        raw_frame_limit: 1,
+                        raw_byte_limit: 64,
+                        max_message_bytes: 64,
+                    },
+                    prefix,
+                    HeartbeatPolicy::SupervisorV2,
+                )
+                .unwrap();
+            let mut first_failure = qa42_terminal_failure(&handle);
+            first_failure.attempt = AttemptIdentity::Candidate(CaptureAttemptNo::new(1).unwrap());
+            let first = handle.terminate(&mut turn, first_failure).unwrap();
+            assert!(matches!(
+                authority.dispatch(
+                    &mut turn,
+                    first.close.unwrap().into_command().unwrap(),
+                    |_| Ok::<_, ()>(())
+                ),
+                DispatchReport::Dispatched
+            ));
+            // Private arithmetic modeling only; MAX is not publicly reached in
+            // this bounded test. Actual successful GAP admission sets its order.
+            authority.state.borrow_mut().record_admission_counter = u64::MAX - 1;
+            let one = CaptureAttemptNo::new(1).unwrap();
+            let original = ObservationIdentity {
+                stream: scopes[1].stream,
+                epoch: scopes[1].epoch,
+                stamp: ReceiveStamp {
+                    unix_ns: 701,
+                    monotonic_ns: 701,
+                },
+                class: ObservationClass::Gap,
+                tag: Some(accepted_binding().tag),
+                attempts: Some((one, one)),
+                loss_count: Some(1),
+            };
+            let gap = handle
+                .reserve_work(&mut turn, WorkKind::QueuedObservation)
+                .unwrap();
+            handle.admit_observation(&mut turn, &gap, original).unwrap();
+            assert_eq!(gap.cell.record_admission_order.get(), Some(u64::MAX));
+            assert_eq!(gap.cut_side(), CutSide::PostCut);
+            let mut second_failure = qa42_terminal_failure(&handle);
+            second_failure.stream = scopes[1].stream;
+            second_failure.connection = scopes[1].connection;
+            second_failure.stamp = ReceiveStamp {
+                unix_ns: 702,
+                monotonic_ns: 702,
+            };
+            if fail_gap_scope {
+                let second = handle.terminate(&mut turn, second_failure).unwrap();
+                assert!(second.first);
+                assert!(matches!(
+                    authority.dispatch(
+                        &mut turn,
+                        second.close.unwrap().into_command().unwrap(),
+                        |_| Ok::<_, ()>(())
+                    ),
+                    DispatchReport::Dispatched
+                ));
+            }
+            let snapshot = || {
+                let state = authority.state.borrow();
+                (
+                    authority.status(),
+                    authority.ownership_report(),
+                    authority.unsettled_summary(),
+                    authority.prefix().unwrap(),
+                    (state.sequence, state.record_admission_counter),
+                    (
+                        gap.id(),
+                        gap.cut_side(),
+                        gap.cell.record_admission_order.get(),
+                    ),
+                )
+            };
+            let before = snapshot();
+            let mut expected = original;
+            if fail_gap_scope {
+                let expanded = ObservationIdentity {
+                    attempts: Some((one, CaptureAttemptNo::new(2).unwrap())),
+                    loss_count: Some(2),
+                    ..original
+                };
+                for _ in 0..100 {
+                    assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+                    assert_eq!(
+                        handle.extend_gap_observation(&mut turn, &gap, expanded),
+                        Err(AuthorityError::InvalidOwner)
+                    );
+                    assert_eq!(gap.cell.observation.get(), Some(original));
+                    assert_eq!(snapshot(), before);
+                }
+                assert_eq!(
+                    authority.terminal_failure(scopes[1].stream),
+                    Some(second_failure)
+                );
+            } else {
+                for last in 2..=33 {
+                    expected = ObservationIdentity {
+                        attempts: Some((one, CaptureAttemptNo::new(last).unwrap())),
+                        loss_count: Some(last),
+                        ..original
+                    };
+                    assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+                    handle
+                        .extend_gap_observation(&mut turn, &gap, expected)
+                        .unwrap();
+                    assert_eq!(gap.cell.observation.get(), Some(expected));
+                    assert_eq!(snapshot(), before);
+                }
+                assert_eq!(authority.terminal_failure(scopes[1].stream), None);
+            }
+            assert_eq!(
+                authority.terminal_failure(scopes[0].stream),
+                Some(first_failure)
+            );
+            let calls = Rc::new(Cell::new(0));
+            let mut sink = authority
+                .bind_sink(
+                    &mut turn,
+                    Box::new(Writer {
+                        calls: Rc::clone(&calls),
+                        mode: 0,
+                    }),
+                )
+                .unwrap();
+            let descriptor = authority.archive_failure_observation().unwrap();
+            let marker = RecordFrame {
+                record_no: handle.prefix().next_record,
+                segment_no: handle.prefix().segment,
+                value: Record::Control(ControlRecord {
+                    context: descriptor.context,
+                    value: Control::Recording(RecordingEvidence {
+                        health: RecordingHealth::Failed,
+                        kind: descriptor.kind,
+                        through: authority.trusted_watermark(descriptor.kind),
+                        reason: descriptor.reason,
+                    }),
+                }),
+            };
+            sink.persist_marker(&mut turn, &marker, RecordingGate::Durable)
+                .unwrap();
+            gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+                .unwrap();
+            let frame = RecordFrame {
+                record_no: handle.prefix().next_record,
+                segment_no: handle.prefix().segment,
+                value: Record::Gap(crate::record::Gap {
+                    context: WireContext {
+                        unix_ns: LocalUnixNs::new(expected.stamp.unix_ns),
+                        monotonic_ns: MonotonicNs::new(expected.stamp.monotonic_ns),
+                        context: InputContext::Active(handle.prefix().context),
+                    },
+                    scope: crate::record::GapScope::ExplicitTargets(vec![
+                        crate::record::GapTarget {
+                            stream: expected.stream,
+                            tag: expected.tag.unwrap(),
+                            range: expected.attempts,
+                            loss_count: expected.loss_count,
+                        },
+                    ]),
+                    reason: Reason::QueueOverflow,
+                }),
+            };
+            sink.persist_owned(&mut turn, &frame, RecordingGate::Durable, &gap)
+                .unwrap();
+            handle
+                .complete_observation(&mut turn, &sink, &gap, None)
+                .unwrap();
+            assert_eq!(
+                handle.complete_observation(&mut turn, &sink, &gap, None),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(gap.cell.observation.get(), Some(expected));
+            assert_eq!(calls.get(), 2);
+            drop(gap);
+            assert_eq!(authority.ownership_report().work_used, 0);
+            assert_eq!(authority.state.borrow().record_admission_counter, u64::MAX);
+        }
+    }
+
+    #[test]
+    fn qa42_actual_requested_layouts() {
+        // Current worker private requested-layout observation, adapted from the
+        // preserved independent layout probe. This is not public behavior/RSS.
+        let actual = (
+            std::mem::size_of::<WorkCell>(),
+            std::mem::size_of::<ScopeState>(),
+            std::mem::size_of::<AuthorityState>(),
+            std::mem::size_of::<TimerOriginal>(),
+            std::mem::size_of::<CloseCell>(),
+            std::mem::size_of::<CommandLease>(),
+            std::mem::size_of::<WorkOwner>(),
+        );
+        eprintln!(
+            "WORKER_QA42_LAYOUT WorkCell={} ScopeState={} AuthorityState={} TimerOriginal={} CloseCell={} CommandLease={} WorkOwner={} pointer_bytes={}",
+            actual.0,
+            actual.1,
+            actual.2,
+            actual.3,
+            actual.4,
+            actual.5,
+            actual.6,
+            std::mem::size_of::<usize>()
+        );
+        assert_eq!(
+            std::mem::size_of::<usize>(),
+            8,
+            "reported x64 layout profile"
+        );
     }
 
     #[test]

@@ -7488,3 +7488,1055 @@ fn p2_flushed_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
 fn p2_durable_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
     p2_gap_requested_allocation(RecordingGate::Durable);
 }
+
+// Fresh public Durable probes: existing owner-minted authority, no field mutation.
+fn independent_qa_42_postcut_scope_gap(terminate_gap_scope: bool) {
+    let wal = TempWal::new("independent-42-terminal-gap");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_two_scopes_with_gate(&wal.0, RecordingGate::Durable);
+    let first = handle.terminate(&mut turn, terminal()).unwrap();
+    let mut effects = 0;
+    assert!(matches!(
+        owner.dispatch(
+            &mut turn,
+            first.close.unwrap().into_command().unwrap(),
+            |_| {
+                effects += 1;
+                Ok::<_, ()>(())
+            }
+        ),
+        DispatchReport::Dispatched
+    ));
+    let original = ObservationIdentity {
+        stream: positive(StreamId::new(2)),
+        stamp: ReceiveStamp {
+            unix_ns: 701,
+            monotonic_ns: 701,
+        },
+        ..qa_original_identity(ObservationClass::Gap)
+    };
+    let gap = p2_queued_gap(&handle, &mut turn, original);
+    assert_eq!(gap.cut_side(), domain::capture_session::CutSide::PostCut);
+    assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+    let second_failure = TerminalFailure {
+        stream: original.stream,
+        connection: positive(ConnectionId::new(2)),
+        observed_tag: original.tag.unwrap(),
+        current_epoch: original.epoch,
+        context: active(),
+        stamp: ReceiveStamp {
+            unix_ns: 702,
+            monotonic_ns: 702,
+        },
+        input_class: InputClass::Raw,
+        attempt: AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2))),
+        cause: FailureCause::QueueOverflow,
+    };
+    if terminate_gap_scope {
+        let second = handle.terminate(&mut turn, second_failure).unwrap();
+        assert!(second.first);
+        assert!(matches!(
+            owner.dispatch(
+                &mut turn,
+                second.close.unwrap().into_command().unwrap(),
+                |_| {
+                    effects += 1;
+                    Ok::<_, ()>(())
+                }
+            ),
+            DispatchReport::Dispatched
+        ));
+        assert_eq!(
+            handle.authority().terminal_failure(original.stream),
+            Some(second_failure)
+        );
+    }
+    let before = owner.session_status();
+    let ledger = handle.authority().ownership_report();
+    let prefix = handle.prefix();
+    let calls = owner.sink_persist_calls();
+    let bytes = fs::read(&wal.0).unwrap();
+    let eligible = handle.gap_extension_eligible(&turn, &gap);
+    let extension = handle.extend_gap_observation(&mut turn, &gap, p2_expanded_gap(original, 2));
+    let rejected = matches!(extension, Err(AuthorityError::InvalidOwner));
+    eprintln!(
+        "INDEPENDENT42 terminalGap terminated={terminate_gap_scope} eligibility={eligible:?} extension={extension:?} candidate={:?}",
+        handle.authority().terminal_failure(original.stream)
+    );
+    assert_eq!(owner.session_status(), before);
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.sink_persist_calls(), calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+    gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    let written_identity = if rejected {
+        original
+    } else {
+        p2_expanded_gap(original, 2)
+    };
+    let actual = qa_gap(
+        handle.prefix().next_record.get(),
+        written_identity,
+        Reason::QueueOverflow,
+    );
+    sink.persist_owned(&mut turn, &actual, RecordingGate::Durable, &gap)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &gap);
+    drop(gap);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    let (records, physical) = read_all(&wal.0);
+    assert_eq!(records.last(), Some(&actual));
+    assert_eq!(physical.status, ArchiveStatus::ValidPrefixIncomplete);
+    assert!(
+        !records
+            .iter()
+            .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+    );
+    assert!(owner.session_status().failed);
+    eprintln!(
+        "INDEPENDENT42 terminalGap physical={:?} written={actual:?} W=0 effects={effects} seals=0",
+        physical.status
+    );
+    if terminate_gap_scope {
+        assert_eq!(
+            eligible,
+            Ok(false),
+            "terminated scope cannot extend admission of a new loss"
+        );
+        assert!(
+            rejected,
+            "original terminal Candidate remains diagnostic only, never new GAP accounting"
+        );
+    } else {
+        assert_eq!(eligible, Ok(true));
+        assert!(
+            !rejected,
+            "healthy PostCut neighbor same-tail extension is lawful"
+        );
+    }
+}
+
+#[test]
+fn independent_qa_42_durable_terminal_scope_cannot_extend_old_postcut_gap() {
+    independent_qa_42_postcut_scope_gap(true);
+}
+
+#[test]
+fn independent_qa_42_durable_active_postcut_neighbor_gap_extension_control() {
+    independent_qa_42_postcut_scope_gap(false);
+}
+
+#[test]
+fn independent_qa_42_durable_finalized_terminal_call_preserves_final_immutable_reports() {
+    let wal = TempWal::new("independent-42-finalized-terminal");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_with_fault(&wal.0, RecordingGate::Durable, None);
+    let identity = qa_original_identity(ObservationClass::Raw);
+    let work = qa_admit(&handle, &mut turn, identity);
+    let original = qa_raw(5, identity, false);
+    sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &work)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &work);
+    drop(work);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("genuine healthy original finalizes first");
+    };
+    owner.finalize(&mut turn, &mut proof).unwrap();
+    let (records, physical) = read_all(&wal.0);
+    assert_eq!(physical.status, ArchiveStatus::Complete);
+    assert_eq!(records.len(), 7);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|f| matches!(f.value, Record::SegmentSeal(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|f| matches!(f.value, Record::ArchiveSeal(_)))
+            .count(),
+        1
+    );
+    let status = owner.session_status();
+    let ledger = handle.authority().ownership_report();
+    let unsettled = handle.authority().unsettled_summary();
+    let closes = owner.outstanding_close_owners();
+    let prefix = handle.prefix();
+    let watermarks = owner.watermarks();
+    let calls = owner.sink_persist_calls();
+    let bytes = fs::read(&wal.0).unwrap();
+    assert_eq!(status.lifecycle, SessionLifecycle::Finalized);
+    assert!(!status.failed);
+    assert!(matches!(
+        handle.mandatory_close(&mut turn, identity.stream, identity.epoch, None),
+        Err(AuthorityError::SessionClosed)
+    ));
+    assert_eq!(owner.session_status(), status);
+    let mut next_received_failure = terminal();
+    next_received_failure.attempt = AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2)));
+    let outcome = handle.terminate(&mut turn, next_received_failure);
+    eprintln!(
+        "INDEPENDENT42 Finalized terminate={outcome:?}; before={status:?}; after={:?}; physical=Complete records7 seals1+1",
+        owner.session_status()
+    );
+    assert!(matches!(outcome, Err(AuthorityError::SessionClosed)));
+    assert_eq!(handle.authority().ownership_report(), ledger);
+    assert_eq!(owner.outstanding_close_owners(), closes);
+    assert_eq!(handle.prefix(), prefix);
+    assert_eq!(owner.watermarks(), watermarks);
+    assert_eq!(owner.sink_persist_calls(), calls);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+    assert_eq!(read_all(&wal.0), (records, physical));
+    assert_eq!(
+        owner.session_status(),
+        status,
+        "Finalized exposes only immutable final reports; rejected late terminal call changes none"
+    );
+    assert_eq!(handle.authority().unsettled_summary(), unsettled);
+}
+
+// Fresh independent QA: public owner-minted route and actual Durable backend.
+// Preparing H1 is not archive-record admission. Its first activated stage is.
+fn independent_qa_42_generated_stage_gap_barrier(activate_first: bool) {
+    let wal = TempWal::new("independent-42-generated-gap-barrier");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_two_scopes_with_gate(&wal.0, RecordingGate::Durable);
+    let down_identity = qa_original_identity(ObservationClass::Disconnected);
+    let plan = qa_admit(&handle, &mut turn, down_identity);
+    let down = qa_transport(7, down_identity, Transport::Down);
+    sink.persist_owned(&mut turn, &down, RecordingGate::Durable, &plan)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &plan);
+    let close = qa_pending_down_close(&owner, down_identity, &plan);
+    let command = leased(owner.reclaim_close(&mut turn, close))
+        .into_command()
+        .unwrap();
+    let mut close_effects = 0;
+    assert!(matches!(
+        owner.dispatch(&mut turn, command, |_| {
+            close_effects += 1;
+            Ok::<_, ()>(())
+        }),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(close_effects, 1);
+    plan.set_kind(&mut turn, WorkKind::PendingPlan).unwrap();
+
+    let gap_identity = ObservationIdentity {
+        stream: positive(StreamId::new(2)),
+        stamp: ReceiveStamp {
+            unix_ns: 6,
+            monotonic_ns: 6,
+        },
+        ..qa_original_identity(ObservationClass::Gap)
+    };
+    let gap = p2_queued_gap(&handle, &mut turn, gap_identity);
+    let before_prepare = handle.authority().ownership_report();
+    let prefix_before_prepare = handle.prefix();
+    let calls_before_prepare = owner.sink_persist_calls();
+    let bytes_before_prepare = fs::read(&wal.0).unwrap();
+    assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+    handle.retain_generated_plan(&mut turn, &plan).unwrap();
+    assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+    let mut prepared_ledger = before_prepare;
+    prepared_ledger.pending_observations += 1;
+    assert_eq!(handle.authority().ownership_report(), prepared_ledger);
+    assert_eq!(handle.prefix(), prefix_before_prepare);
+    assert_eq!(owner.sink_persist_calls(), calls_before_prepare);
+    assert_eq!(fs::read(&wal.0).unwrap(), bytes_before_prepare);
+    assert_eq!(
+        handle.complete_observation(&mut turn, &sink, &plan, None),
+        Err(AuthorityError::NotQuiescent)
+    );
+
+    let binding = binding();
+    let changes = [
+        EpochChange::Connection {
+            owner: binding.connection_id,
+            expected: binding.tag.connection,
+            next: binding.tag.connection.checked_next().unwrap(),
+        },
+        EpochChange::Subscription {
+            owner: binding.id,
+            expected: binding.tag.subscription,
+            next: binding.tag.subscription.checked_next().unwrap(),
+        },
+        EpochChange::Book {
+            owner: binding.book_id.unwrap(),
+            expected: binding.tag.book.unwrap(),
+            next: binding.tag.book.unwrap().checked_next().unwrap(),
+        },
+    ];
+    let mut expected = vec![down];
+    if activate_first {
+        let connection = qa_epoch(8, down_identity, changes[0].clone());
+        sink.persist_owned(&mut turn, &connection, RecordingGate::Durable, &plan)
+            .unwrap();
+        expected.push(connection);
+        assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+        let status = owner.session_status();
+        let ledger = handle.authority().ownership_report();
+        let unsettled = handle.authority().unsettled_summary();
+        let closes = owner.outstanding_close_owners();
+        let prefix = handle.prefix();
+        let watermarks = owner.watermarks();
+        let bytes = fs::read(&wal.0).unwrap();
+        let calls = owner.sink_persist_calls();
+        let id = gap.id();
+        let cut = gap.cut_side();
+        for _ in 0..100 {
+            assert_eq!(
+                handle.extend_gap_observation(&mut turn, &gap, p2_expanded_gap(gap_identity, 2)),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(handle.authority().ownership_report(), ledger);
+            assert_eq!(handle.authority().unsettled_summary(), unsettled);
+            assert_eq!(owner.outstanding_close_owners(), closes);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.watermarks(), watermarks);
+            assert_eq!(owner.sink_persist_calls(), calls);
+            assert_eq!(gap.id(), id);
+            assert_eq!(gap.cut_side(), cut);
+            assert_eq!(fs::read(&wal.0).unwrap(), bytes);
+        }
+        // Concrete matching expanded bytes are denied too; original stays retryable.
+        p2_write_original_gap_after_rejection(
+            (&wal, &owner, &handle),
+            &mut turn,
+            &mut sink,
+            &gap,
+            gap_identity,
+        );
+        expected.push(qa_gap(9, gap_identity, Reason::QueueOverflow));
+    } else {
+        let ledger = handle.authority().ownership_report();
+        let id = gap.id();
+        let cut = gap.cut_side();
+        handle
+            .extend_gap_observation(&mut turn, &gap, p2_expanded_gap(gap_identity, 2))
+            .unwrap();
+        assert_eq!(handle.authority().ownership_report(), ledger);
+        assert_eq!(gap.id(), id);
+        assert_eq!(gap.cut_side(), cut);
+        gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let expanded = qa_gap(8, p2_expanded_gap(gap_identity, 2), Reason::QueueOverflow);
+        sink.persist_owned(&mut turn, &expanded, RecordingGate::Durable, &gap)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &gap);
+        expected.push(expanded);
+    }
+    drop(gap);
+    let first_remaining = usize::from(activate_first);
+    for change in changes.into_iter().skip(first_remaining) {
+        let stage = qa_epoch(handle.prefix().next_record.get(), down_identity, change);
+        sink.persist_owned(&mut turn, &stage, RecordingGate::Durable, &plan)
+            .unwrap();
+        expected.push(stage);
+    }
+    qa_settle_once(&handle, &mut turn, &sink, &plan);
+    drop(plan);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(owner.outstanding_close_owners().iter().count(), 0);
+    let (before_seals, incomplete) = read_all(&wal.0);
+    assert_eq!(&before_seals[6..], expected.as_slice());
+    assert_eq!(incomplete.status, ArchiveStatus::ValidPrefixIncomplete);
+    let ticket = owner.begin_finalization(&mut turn).unwrap();
+    let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+        panic!("original Down/Close, truthful GAP and three fresh H1 stages complete");
+    };
+    owner.finalize(&mut turn, &mut proof).unwrap();
+    let (records, physical) = read_all(&wal.0);
+    assert_eq!(physical.status, ArchiveStatus::Complete);
+    assert_eq!(physical.input_quality, Some(InputQuality::Unknown));
+    assert_eq!(
+        owner.session_status().lifecycle,
+        SessionLifecycle::Finalized
+    );
+    assert_eq!(records.len(), 13);
+    assert_eq!(
+        records
+            .iter()
+            .filter(|f| matches!(f.value, Record::SegmentSeal(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|f| matches!(f.value, Record::ArchiveSeal(_)))
+            .count(),
+        1
+    );
+    eprintln!(
+        "INDEPENDENT42 generated activation={activate_first} genuine Durable Complete records={} close_effects={close_effects} W=0 seals=1+1",
+        records.len()
+    );
+}
+
+#[test]
+fn independent_qa_42_durable_gap_rejects_other_scope_activated_generated_stage_preservingly() {
+    independent_qa_42_generated_stage_gap_barrier(true);
+}
+
+#[test]
+fn independent_qa_42_durable_gap_prepared_unactivated_generated_plan_allows_lawful_extension() {
+    independent_qa_42_generated_stage_gap_barrier(false);
+}
+
+// Public reports only: private scheduler/ordinal arithmetic is covered in domain.
+macro_rules! qa42_reports {
+    ($owner:expr, $handle:expr, $wal:expr) => {{
+        let authority = $handle.authority();
+        (
+            $owner.session_status(),
+            authority.ownership_report(),
+            authority.unsettled_summary(),
+            $owner.outstanding_close_owners(),
+            (
+                authority.disposition(),
+                authority.scope_disposition(positive(StreamId::new(1))),
+                authority.scope_disposition(positive(StreamId::new(2))),
+                authority.terminal_failure(positive(StreamId::new(1))),
+                authority.terminal_failure(positive(StreamId::new(2))),
+                authority.archive_failure_observation(),
+                authority.scopes(),
+            ),
+            (
+                $handle.prefix(),
+                $owner.watermarks(),
+                [
+                    authority.trusted_watermark(WatermarkKind::Accepted),
+                    authority.trusted_watermark(WatermarkKind::Appended),
+                    authority.trusted_watermark(WatermarkKind::Written),
+                    authority.trusted_watermark(WatermarkKind::Flushed),
+                    authority.trusted_watermark(WatermarkKind::Durable),
+                ],
+            ),
+            $owner.sink_persist_calls(),
+            fs::read(&$wal.0).unwrap(),
+            read_all(&$wal.0),
+        )
+    }};
+}
+
+fn qa42_dispatch_terminal(
+    owner: &mut CaptureSessionOwner,
+    turn: &mut SessionTurn,
+    handle: &SupervisorSessionHandle,
+    failure: TerminalFailure,
+) -> CloseOwnerRef {
+    let report = handle.terminate(turn, failure).unwrap();
+    assert!(report.first);
+    let close = report.close_owner;
+    let mut effects = 0;
+    assert!(matches!(
+        owner.dispatch(turn, report.close.unwrap().into_command().unwrap(), |_| {
+            effects += 1;
+            Ok::<_, ()>(())
+        }),
+        DispatchReport::Dispatched
+    ));
+    assert_eq!(effects, 1, "only the original lawful failure Close effect");
+    close
+}
+
+#[test]
+fn qa42_durable_finalized_terminal_hardstop_and_sync_repeats_preserve_all_public_reports() {
+    for with_original_close in [false, true] {
+        let wal = TempWal::new("qa42-finalized-terminal-routes");
+        let foreign_wal = TempWal::new("qa42-finalized-terminal-foreign");
+        let (mut owner, mut turn, handle, mut sink) =
+            owner_with_fault(&wal.0, RecordingGate::Durable, None);
+        let (foreign_owner, mut foreign_turn, foreign_handle, _foreign_sink) =
+            owner_with_fault(&foreign_wal.0, RecordingGate::Durable, None);
+        let identity = qa_original_identity(if with_original_close {
+            ObservationClass::Disconnected
+        } else {
+            ObservationClass::Raw
+        });
+        let work = qa_admit(&handle, &mut turn, identity);
+        let original = if with_original_close {
+            qa_transport(5, identity, Transport::Down)
+        } else {
+            qa_raw(5, identity, false)
+        };
+        sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &work)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &work);
+        let original_close = with_original_close.then(|| {
+            let close = qa_pending_down_close(&owner, identity, &work);
+            let command = leased(owner.reclaim_close(&mut turn, close.clone()))
+                .into_command()
+                .unwrap();
+            assert!(matches!(
+                owner.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+                DispatchReport::Dispatched
+            ));
+            close
+        });
+        drop(work);
+        let ticket = owner.begin_finalization(&mut turn).unwrap();
+        let QuiescenceReport::Ready(mut proof) = handle.quiesce(&mut turn, &ticket) else {
+            panic!("all original Durable obligations and Close settled first");
+        };
+        owner.finalize(&mut turn, &mut proof).unwrap();
+        let (records, physical) = read_all(&wal.0);
+        assert_eq!(physical.status, ArchiveStatus::Complete);
+        assert_eq!(records.len(), 7);
+        assert_eq!(
+            records
+                .iter()
+                .filter(|f| matches!(f.value, Record::SegmentSeal(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|f| matches!(f.value, Record::ArchiveSeal(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            owner.session_status().lifecycle,
+            SessionLifecycle::Finalized
+        );
+        assert!(!owner.session_status().failed);
+        let before = qa42_reports!(owner, handle, wal);
+        let foreign_before = qa42_reports!(foreign_owner, foreign_handle, foreign_wal);
+        let mut failure = terminal();
+        failure.attempt = AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2)));
+        let late_error = PersistError::typed(PersistErrorKind::Io, "late finalized storage stop");
+        for _ in 0..100 {
+            assert!(matches!(
+                handle.terminate(&mut turn, failure),
+                Err(AuthorityError::SessionClosed)
+            ));
+            assert_eq!(qa42_reports!(owner, handle, wal), before);
+            assert!(matches!(
+                handle.authority().terminate(&mut turn, failure),
+                Err(AuthorityError::SessionClosed)
+            ));
+            assert_eq!(qa42_reports!(owner, handle, wal), before);
+            assert_eq!(
+                handle.authority().hard_stop(&mut turn, late_error),
+                Err(AuthorityError::SessionClosed)
+            );
+            assert_eq!(qa42_reports!(owner, handle, wal), before);
+            assert_eq!(
+                handle.authority().storage_stopped(&mut turn, late_error),
+                Err(AuthorityError::SessionClosed)
+            );
+            assert_eq!(qa42_reports!(owner, handle, wal), before);
+            assert_eq!(
+                handle.authority().synchronize_obligations(&mut turn),
+                Ok(())
+            );
+            assert_eq!(qa42_reports!(owner, handle, wal), before);
+            if let Some(close) = &original_close {
+                assert_eq!(
+                    handle
+                        .authority()
+                        .close_state(identity.stream, identity.epoch),
+                    Ok(CloseState::Settled)
+                );
+                assert!(matches!(
+                    owner.reclaim_close(&mut turn, close.clone()),
+                    CloseLeaseReport::Rejected(AuthorityError::SessionClosed)
+                ));
+                assert_eq!(qa42_reports!(owner, handle, wal), before);
+            }
+        }
+        assert!(matches!(
+            handle.terminate(&mut foreign_turn, failure),
+            Err(AuthorityError::AuthorityMismatch)
+        ));
+        assert!(matches!(
+            handle.authority().terminate(&mut foreign_turn, failure),
+            Err(AuthorityError::AuthorityMismatch)
+        ));
+        assert_eq!(
+            handle.authority().hard_stop(&mut foreign_turn, late_error),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            handle
+                .authority()
+                .storage_stopped(&mut foreign_turn, late_error),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        assert_eq!(
+            handle
+                .authority()
+                .synchronize_obligations(&mut foreign_turn),
+            Err(AuthorityError::AuthorityMismatch)
+        );
+        let unknown_binding = TerminalFailure {
+            connection: positive(ConnectionId::new(2)),
+            ..failure
+        };
+        assert!(matches!(
+            handle.terminate(&mut turn, unknown_binding),
+            Err(AuthorityError::InvalidBinding)
+        ));
+        assert!(matches!(
+            handle.authority().terminate(&mut turn, unknown_binding),
+            Err(AuthorityError::InvalidBinding)
+        ));
+        assert!(matches!(
+            handle.quiesce(&mut turn, &ticket),
+            QuiescenceReport::TicketConsumed
+        ));
+        assert!(matches!(
+            owner.finalize(&mut turn, &mut proof),
+            Err(OwnerError::Authority(AuthorityError::ProofConsumed))
+        ));
+        assert_eq!(qa42_reports!(owner, handle, wal), before);
+        assert_eq!(
+            qa42_reports!(foreign_owner, foreign_handle, foreign_wal),
+            foreign_before
+        );
+    }
+}
+
+#[test]
+fn qa42_durable_closing_failure_before_and_after_ready_revokes_proof_and_keeps_original_close() {
+    for proof_issued in [false, true] {
+        for storage_stop in [false, true] {
+            let wal = TempWal::new("qa42-closing-terminal-boundary");
+            let (mut owner, mut turn, handle, mut sink) =
+                owner_with_fault(&wal.0, RecordingGate::Durable, None);
+            let identity = qa_original_identity(ObservationClass::Disconnected);
+            let work = qa_admit(&handle, &mut turn, identity);
+            let down = qa_transport(5, identity, Transport::Down);
+            sink.persist_owned(&mut turn, &down, RecordingGate::Durable, &work)
+                .unwrap();
+            qa_settle_once(&handle, &mut turn, &sink, &work);
+            let close = qa_pending_down_close(&owner, identity, &work);
+            drop(work);
+            if proof_issued {
+                let command = leased(owner.reclaim_close(&mut turn, close.clone()))
+                    .into_command()
+                    .unwrap();
+                assert!(matches!(
+                    owner.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+                    DispatchReport::Dispatched
+                ));
+            }
+            let ticket = owner.begin_finalization(&mut turn).unwrap();
+            let mut proof = if proof_issued {
+                let QuiescenceReport::Ready(proof) = handle.quiesce(&mut turn, &ticket) else {
+                    panic!("genuine Ready before failure");
+                };
+                Some(proof)
+            } else {
+                assert!(matches!(
+                    handle.quiesce(&mut turn, &ticket),
+                    QuiescenceReport::NotReady(_)
+                ));
+                None
+            };
+            let before_prefix = handle.prefix();
+            let before_bytes = fs::read(&wal.0).unwrap();
+            let before_calls = owner.sink_persist_calls();
+            if storage_stop {
+                handle
+                    .authority()
+                    .hard_stop(
+                        &mut turn,
+                        PersistError::typed(PersistErrorKind::Io, "lawful Closing hard stop"),
+                    )
+                    .unwrap();
+            } else {
+                let termination = handle.terminate(&mut turn, terminal()).unwrap();
+                assert!(termination.first);
+                assert_eq!(termination.close_owner, close);
+                drop(termination.close);
+            }
+            assert_eq!(
+                owner.session_status().lifecycle,
+                SessionLifecycle::DiagnosticClosing
+            );
+            assert!(owner.session_status().failed);
+            assert_eq!(handle.prefix(), before_prefix);
+            assert_eq!(owner.sink_persist_calls(), before_calls);
+            assert_eq!(fs::read(&wal.0).unwrap(), before_bytes);
+            assert_eq!(
+                handle.authority().ensure_admission_open(&turn),
+                if storage_stop {
+                    Err(AuthorityError::StorageStopped)
+                } else {
+                    Err(AuthorityError::SessionClosing)
+                }
+            );
+            assert!(matches!(
+                handle.quiesce(&mut turn, &ticket),
+                QuiescenceReport::FinalizationInvalidated(AuthorityError::ArchiveFailed)
+            ));
+            if let Some(proof) = &mut proof {
+                assert!(matches!(
+                    owner.finalize(&mut turn, proof),
+                    Err(OwnerError::Authority(AuthorityError::ArchiveFailed))
+                ));
+            }
+            if !proof_issued {
+                let ledger = handle.authority().ownership_report();
+                drop(leased(owner.reclaim_close(&mut turn, close.clone())));
+                assert_eq!(handle.authority().ownership_report(), ledger);
+                let command = leased(owner.reclaim_close(&mut turn, close.clone()))
+                    .into_command()
+                    .unwrap();
+                assert!(matches!(
+                    owner.dispatch(&mut turn, command, |_| Err::<(), _>(
+                        "possible original Close effect"
+                    )),
+                    DispatchReport::DispatchFailed {
+                        effect: AmbiguousEffect::Unknown,
+                        ..
+                    }
+                ));
+                let command = leased(owner.reclaim_close(&mut turn, close.clone()))
+                    .into_command()
+                    .unwrap();
+                assert!(matches!(
+                    owner.dispatch(&mut turn, command, |_| Ok::<_, ()>(())),
+                    DispatchReport::Dispatched
+                ));
+            }
+            assert_eq!(
+                handle
+                    .authority()
+                    .close_state(identity.stream, identity.epoch),
+                Ok(CloseState::Settled)
+            );
+            if !storage_stop {
+                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+            }
+            assert!(matches!(
+                owner.close_diagnostic(&mut turn).outcome,
+                Ok(DiagnosticCloseState::Closed)
+            ));
+            assert!(matches!(
+                owner.reclaim_close(&mut turn, close),
+                CloseLeaseReport::AlreadySettled
+            ));
+            let (records, physical) = read_all(&wal.0);
+            assert_eq!(physical.status, ArchiveStatus::ValidPrefixIncomplete);
+            assert!(
+                !records
+                    .iter()
+                    .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+            );
+            assert_eq!(records[4], down);
+        }
+    }
+}
+
+#[test]
+fn qa42_durable_failed_scope_gap_at_three_old_stages_rejects_extension_and_drains_once() {
+    for cap in [5, 9] {
+        for confirmed_stage in 0..=2 {
+            let wal = TempWal::new("qa42-failed-original-gap-stages");
+            let (mut owner, mut turn, handle, mut sink) = if cap == 5 {
+                owner_with_fault(&wal.0, RecordingGate::Durable, None)
+            } else {
+                owner_two_scopes_with_gate(&wal.0, RecordingGate::Durable)
+            };
+            let first_close = (cap == 9)
+                .then(|| qa42_dispatch_terminal(&mut owner, &mut turn, &handle, terminal()));
+            let identity = ObservationIdentity {
+                stream: positive(StreamId::new(if cap == 5 { 1 } else { 2 })),
+                stamp: ReceiveStamp {
+                    unix_ns: 701,
+                    monotonic_ns: 701,
+                },
+                ..qa_original_identity(ObservationClass::Gap)
+            };
+            let gap = p2_queued_gap(&handle, &mut turn, identity);
+            assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+            if cap == 9 {
+                assert_eq!(gap.cut_side(), domain::capture_session::CutSide::PostCut);
+                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+            }
+            let original = qa_gap(
+                handle.prefix().next_record.get(),
+                identity,
+                Reason::QueueOverflow,
+            );
+            if confirmed_stage != 0 {
+                gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+                    .unwrap();
+            }
+            if confirmed_stage == 2 {
+                sink.persist_owned(&mut turn, &original, RecordingGate::Durable, &gap)
+                    .unwrap();
+            }
+            let failure = TerminalFailure {
+                stream: identity.stream,
+                connection: positive(ConnectionId::new(if cap == 5 { 1 } else { 2 })),
+                current_epoch: identity.epoch,
+                observed_tag: identity.tag.unwrap(),
+                stamp: ReceiveStamp {
+                    unix_ns: 702,
+                    monotonic_ns: 702,
+                },
+                attempt: AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2))),
+                ..terminal()
+            };
+            let close = qa42_dispatch_terminal(&mut owner, &mut turn, &handle, failure);
+            let before = qa42_reports!(owner, handle, wal);
+            let id = gap.id();
+            let cut = gap.cut_side();
+            for _ in 0..100 {
+                assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+                assert_eq!(
+                    handle.extend_gap_observation(&mut turn, &gap, p2_expanded_gap(identity, 2)),
+                    Err(AuthorityError::InvalidOwner)
+                );
+                let repeat = handle.terminate(&mut turn, failure).unwrap();
+                assert!(!repeat.first);
+                assert!(repeat.close.is_none());
+                assert_eq!(repeat.close_owner, close);
+                assert_eq!(gap.id(), id);
+                assert_eq!(gap.cut_side(), cut);
+                assert_eq!(qa42_reports!(owner, handle, wal), before);
+            }
+            if confirmed_stage != 2 {
+                p2_write_original_gap_after_rejection(
+                    (&wal, &owner, &handle),
+                    &mut turn,
+                    &mut sink,
+                    &gap,
+                    identity,
+                );
+            } else {
+                qa_settle_once(&handle, &mut turn, &sink, &gap);
+            }
+            drop(gap);
+            if cap == 5 {
+                qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+            }
+            assert_eq!(
+                handle.authority().terminal_failure(identity.stream),
+                Some(failure)
+            );
+            assert_eq!(handle.authority().ownership_report().work_used, 0);
+            assert!(matches!(
+                owner.close_diagnostic(&mut turn).outcome,
+                Ok(DiagnosticCloseState::Closed)
+            ));
+            let (records, physical) = read_all(&wal.0);
+            assert_eq!(physical.status, ArchiveStatus::ValidPrefixIncomplete);
+            assert_eq!(records.iter().filter(|f| f == &&original).count(), 1);
+            assert!(
+                !records
+                    .iter()
+                    .any(|f| matches!(f.value, Record::SegmentSeal(_) | Record::ArchiveSeal(_)))
+            );
+            assert_eq!(
+                handle
+                    .authority()
+                    .terminal_failure(identity.stream)
+                    .unwrap()
+                    .attempt,
+                AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2)))
+            );
+            drop(close);
+            drop(first_close);
+        }
+    }
+}
+
+#[test]
+fn qa42_durable_healthy_postcut_gap_thirty_two_extensions_keep_original_owner_and_cut() {
+    let wal = TempWal::new("qa42-healthy-postcut-gap32");
+    let (mut owner, mut turn, handle, mut sink) =
+        owner_two_scopes_with_gate(&wal.0, RecordingGate::Durable);
+    let _first_close = qa42_dispatch_terminal(&mut owner, &mut turn, &handle, terminal());
+    let identity = ObservationIdentity {
+        stream: positive(StreamId::new(2)),
+        stamp: ReceiveStamp {
+            unix_ns: 701,
+            monotonic_ns: 701,
+        },
+        ..qa_original_identity(ObservationClass::Gap)
+    };
+    let gap = p2_queued_gap(&handle, &mut turn, identity);
+    let reserved = handle.reserve_work(&mut turn, WorkKind::Result).unwrap();
+    let before = qa42_reports!(owner, handle, wal);
+    let id = gap.id();
+    let cut = gap.cut_side();
+    for last in 2..=33 {
+        assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(true));
+        handle
+            .extend_gap_observation(&mut turn, &gap, p2_expanded_gap(identity, last))
+            .unwrap();
+        assert_eq!(gap.id(), id);
+        assert_eq!(gap.cut_side(), cut);
+        assert_eq!(qa42_reports!(owner, handle, wal), before);
+    }
+    assert!(
+        handle
+            .authority()
+            .terminal_failure(identity.stream)
+            .is_none()
+    );
+    qa_timer_failure_marker(&handle, &mut turn, &mut sink, RecordingGate::Durable);
+    gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+        .unwrap();
+    let expanded = qa_gap(
+        handle.prefix().next_record.get(),
+        p2_expanded_gap(identity, 33),
+        Reason::QueueOverflow,
+    );
+    sink.persist_owned(&mut turn, &expanded, RecordingGate::Durable, &gap)
+        .unwrap();
+    qa_settle_once(&handle, &mut turn, &sink, &gap);
+    drop(gap);
+    drop(reserved);
+    assert_eq!(handle.authority().ownership_report().work_used, 0);
+    assert_eq!(read_all(&wal.0).0.last(), Some(&expanded));
+    assert!(owner.session_status().failed);
+    assert!(
+        handle
+            .authority()
+            .terminal_failure(identity.stream)
+            .is_none()
+    );
+    assert_eq!(cut, domain::capture_session::CutSide::PostCut);
+}
+
+fn qa42_failed_scope_requested_allocation(gate: RecordingGate) {
+    for cap in [5, 9] {
+        let wal = TempWal::new("qa42-failed-gap-allocation");
+        let probe = AllocationProbe::begin();
+        let (mut owner, mut turn, handle, mut sink) = if cap == 5 {
+            owner_with_fault(&wal.0, gate, None)
+        } else {
+            owner_two_scopes_with_gate(&wal.0, gate)
+        };
+        let memory = owner.memory_report();
+        let metadata = handle.authority().ownership_report();
+        let ceiling = metadata.metadata_ceiling_bytes
+            + memory.known_metadata_backing_bytes
+            + memory.registry_metadata_bound
+            + memory.encoder_workspace_bound
+            + MAX_CAPTURE_PATH_BYTES
+            + 8192;
+        let first_close =
+            (cap == 9).then(|| qa42_dispatch_terminal(&mut owner, &mut turn, &handle, terminal()));
+        let identity = ObservationIdentity {
+            stream: positive(StreamId::new(if cap == 5 { 1 } else { 2 })),
+            stamp: ReceiveStamp {
+                unix_ns: 701,
+                monotonic_ns: 701,
+            },
+            ..qa_original_identity(ObservationClass::Gap)
+        };
+        let gap = p2_queued_gap(&handle, &mut turn, identity);
+        let mut reserved = Vec::new();
+        while handle.authority().ownership_report().work_used < metadata.work_limit {
+            reserved.push(handle.reserve_work(&mut turn, WorkKind::Result).unwrap());
+        }
+        let failure = TerminalFailure {
+            stream: identity.stream,
+            connection: positive(ConnectionId::new(if cap == 5 { 1 } else { 2 })),
+            observed_tag: identity.tag.unwrap(),
+            current_epoch: identity.epoch,
+            stamp: ReceiveStamp {
+                unix_ns: 702,
+                monotonic_ns: 702,
+            },
+            attempt: AttemptIdentity::Candidate(positive(CaptureAttemptNo::new(2))),
+            ..terminal()
+        };
+        let close = qa42_dispatch_terminal(&mut owner, &mut turn, &handle, failure);
+        let status = owner.session_status();
+        let ownership = handle.authority().ownership_report();
+        let unsettled = handle.authority().unsettled_summary();
+        let closes = owner.outstanding_close_owners();
+        let prefix = handle.prefix();
+        let watermarks = owner.watermarks();
+        let calls = owner.sink_persist_calls();
+        let cut = gap.cut_side();
+        let id = gap.id();
+        let baseline = probe.sample().live_requested_bytes;
+        for _ in 0..100 {
+            assert_eq!(handle.gap_extension_eligible(&turn, &gap), Ok(false));
+            assert_eq!(
+                handle.extend_gap_observation(&mut turn, &gap, p2_expanded_gap(identity, 2)),
+                Err(AuthorityError::InvalidOwner)
+            );
+            assert_eq!(owner.session_status(), status);
+            assert_eq!(handle.authority().ownership_report(), ownership);
+            assert_eq!(handle.authority().unsettled_summary(), unsettled);
+            assert_eq!(owner.outstanding_close_owners(), closes);
+            assert_eq!(handle.prefix(), prefix);
+            assert_eq!(owner.watermarks(), watermarks);
+            assert_eq!(owner.sink_persist_calls(), calls);
+            assert_eq!(gap.id(), id);
+            assert_eq!(gap.cut_side(), cut);
+            assert_eq!(probe.sample().live_requested_bytes, baseline);
+        }
+        if cap == 9 {
+            qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+        }
+        gap.set_kind(&mut turn, WorkKind::InFlightObservation)
+            .unwrap();
+        let original = qa_gap(
+            handle.prefix().next_record.get(),
+            identity,
+            Reason::QueueOverflow,
+        );
+        sink.persist_owned(&mut turn, &original, gate, &gap)
+            .unwrap();
+        qa_settle_once(&handle, &mut turn, &sink, &gap);
+        drop(gap);
+        if cap == 5 {
+            qa_timer_failure_marker(&handle, &mut turn, &mut sink, gate);
+        }
+        drop(reserved);
+        assert_eq!(handle.authority().ownership_report().work_used, 0);
+        let measured = probe.sample();
+        assert!(!measured.unmatched_deallocation);
+        assert!(measured.peak_requested_bytes <= ceiling);
+        drop(original);
+        drop(closes);
+        drop(close);
+        drop(first_close);
+        drop(sink);
+        drop(handle);
+        drop(turn);
+        drop(owner);
+        assert_eq!(probe.sample().live_requested_bytes, 0);
+        assert!(!probe.sample().unmatched_deallocation);
+        drop(probe);
+        eprintln!(
+            "qa42 terminal GAP allocation gate={gate:?} cap={cap} N={} rejects=100 baseline={baseline} peak={} ceiling={ceiling} teardown_live=0",
+            if cap == 5 { 1 } else { 2 },
+            measured.peak_requested_bytes
+        );
+    }
+}
+
+#[test]
+fn qa42_written_failed_scope_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    qa42_failed_scope_requested_allocation(RecordingGate::Written);
+}
+
+#[test]
+fn qa42_flushed_failed_scope_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    qa42_failed_scope_requested_allocation(RecordingGate::Flushed);
+}
+
+#[test]
+fn qa42_durable_failed_scope_gap_rejection_requested_allocation_cap5_cap9_repeats_teardown() {
+    qa42_failed_scope_requested_allocation(RecordingGate::Durable);
+}
