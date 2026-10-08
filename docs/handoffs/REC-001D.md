@@ -2976,3 +2976,37 @@ gates, followed by FULL NEW independent QA. Integrator acceptance, READY,
 merge/auto-merge, post-merge CI and Issue closure remain unissued. Same Issue20 /
 parent5 / claim6024304772 / recovery6025249885 / branch / DraftPR34; no new claim,
 Issue, branch, PR, workflow, dependency/lock/toolchain or accepted-spec change.
+
+### Actual first corrective candidate failure and test-only repair — 2026-10-08
+
+First bounded corrective candidate dd4478aa8c2a056960b02fc19a49c481455011e4,
+treeceb11c81c44c40874e6ee6a30b9316b3b397a5a6, sole parent rejected da157ee6,
+was actually executed WORKER-LOCAL on the confirmed Docker/WSL2 Linux executor.
+Pinned Rust/Cargo1.98.1 canonical fmt, strict workspace/all-target Clippy and
+locked workspace build exited0. Full locked workspace debug AND release tests
+each exited101:15 completed suite summaries,477 passed/4 failed before Cargo
+stopped. Recording capture tests had105 passed/4 failed; later WAL and doctest
+suites did not run. Per-command exact SHA/tree,133-source verification exit0,
+Cargo.lock and empty before/after status evidence remain in the raw failed run.
+The19-command wrapper's overall exit1 and all focused outcomes are retained;
+the failed full gate is not relabeled PASS or an environment limitation.
+
+Both profiles actually passed the supplied public Finalized negative, primary
+queued GAP-barrier negative, lawful same-tail control, and both additional
+public Durable Finalized controls. The remaining new received-barrier matrix
+fixture incorrectly reused lost CaptureAttempt1 for a later Raw, causing actual
+WAL Validation rejection; that later genuine Raw must be CaptureAttempt2 after
+the original GAP1. Three requested-allocation variants (Written/Flushed/Durable)
+reported88 tracked live bytes at teardown because test-owned original/control
+GapTarget frame vectors were still held. They must be dropped before the final
+zero-live measurement. These are explicit test-fixture repairs, not a changed
+production guard, weakened WAL/zero-teardown assertion or dropped regression.
+
+The correction changes10 lines only in recording/tests/capture_session.rs:
+the original later-Raw attempt2 and explicit release of the two test-owned frames.
+All original/new test names and assertions remain. No successor SHA/tree is
+invented here. Complete new five-command debug/release, focused19-command,
+source/lock/clean checks and fresh exact-head CI must run on the ensuing immutable
+candidate. Current successor outcomes are NOT_RUN at this history append;
+failed dd evidence and rejected da QA remain immutable and grant no future PASS,
+independent acceptance, READY, merge or Issue closure.

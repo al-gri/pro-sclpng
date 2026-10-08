@@ -7105,6 +7105,12 @@ fn p2_durable_gap_rejects_connected_pong_down_raw_and_due_timer_barriers() {
                 unix_ns: 6,
                 monotonic_ns: 6,
             },
+            // Gap attempt1 already accounts the loss. The later received Raw
+            // is the genuine next attempt2, not a duplicate of the lost input.
+            attempts: (class == ObservationClass::Raw).then_some((
+                positive(CaptureAttemptNo::new(2)),
+                positive(CaptureAttemptNo::new(2)),
+            )),
             ..qa_original_identity(class)
         };
         let barrier = p2_queued_gap(&handle, &mut turn, identity);
@@ -7450,6 +7456,10 @@ fn p2_gap_requested_allocation(gate: RecordingGate) {
         let measured = probe.sample();
         assert!(!measured.unmatched_deallocation);
         assert!(measured.peak_requested_bytes <= ceiling);
+        // Release test-owned frame payloads before measuring complete teardown.
+        // The original GapTarget vector is part of requested allocation too.
+        drop(original);
+        drop(control);
         drop(sink);
         drop(handle);
         drop(turn);
