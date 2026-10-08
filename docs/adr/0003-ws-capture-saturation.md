@@ -1,6 +1,6 @@
 # ADR 0003 — terminal capture saturation and archive session authority
 
-Status: **PRIOR CONTRACT DESIGN_APPROVED_FOR_IMPLEMENTATION; QA-NEW-01 PARTIAL_IDENTITY_RESTORATION / QA_PENDING; TIMER EXTENSION DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED**. Date: 2026-10-08.
+Status: **PRIOR CONTRACT DESIGN_APPROVED_FOR_IMPLEMENTATION; QA-NEW-01 PARTIAL_IDENTITY_RESTORATION / QA_PENDING; RECEIVED DOWN/CLOSE FIXED_IN_CODE / QA_PENDING; TIMER EXTENSION DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED**. Date: 2026-10-08.
 Architecture direction: **ARCHITECTURE_DIRECTION_SET**.
 This is the bounded REC-001D design revision for [Issue #20](https://github.com/al-gri/pro-sclpng/issues/20), parent [#5](https://github.com/al-gri/pro-sclpng/issues/5), existing Draft [PR #34](https://github.com/al-gri/pro-sclpng/pull/34).
 Claim `6024304772`; recovery `6025249885`; latest incoming partial completion [6033824631](https://github.com/al-gri/pro-sclpng/issues/20#issuecomment-6033824631).
@@ -688,3 +688,77 @@ extensions. Until then dependent Timer stages remain TIMER_CONTRACT_BLOCKED.
 ENV-01 independently blocks required Linux/Durable execution on this Windows
 surface. This proposal is not ACCEPTED, independent QA, owner readiness or merge
 approval. Existing branch/PR stays in its original lineage and Draft state.
+
+## 16. Received Down completion retains mandatory Close — 2026-10-08
+
+Status: **DOWN_CLOSE_FIXED_IN_CODE / QA_PENDING** under the already approved
+§3.2/§4/R2/§12.1 contract. Whole continuation remains PARTIAL / QA_PENDING;
+§15 Timer proposal remains DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED, without
+Architecture approval or runtime extension. This section supersedes only the
+historical d85 received Down/full-job limitation described in §15.1. Section15
+itself and its unapproved Timer recommendation are retained unchanged.
+
+On reviewed `d85fa6876258b80a9594b158e87ad5cc7004d799`, a rightful public
+owner-minted handle could persist exact original Disconnected Down, complete the
+received observation, drop W and receive Ready while no Close had been installed.
+The supplied Integrator probe was unexecuted on delivery. Worker compilation
+and Written debug/release now fail behaviorally at missing Close0 versus1; an
+additional separately preserved probe demonstrates completion Ok -> Drop,
+work_used0, outstanding Close0, Ready=true. These are Windows Written results,
+not parent Linux/Durable acceptance. Original Durable parent compilation succeeds
+but setup fails Unsupported Unix metadata sync; behavioral result NOT_RUN.
+
+Public received Disconnected completion now uses the existing serialized R2
+mandatory_close transition before Pending->Settled. The first ordinary Down
+installs a discoverable Pending Close on that original W. Pending/Leased Close
+does not prevent received completion, but retains W and prevents Ready until
+rightful dispatch/authenticated closure. The canonical later lease_command
+reuses the same owner; no supervisor-only ordering fix or second W is introduced.
+
+An existing same-epoch original Close is retained. A different live W is reusable
+only when its retained original scope/epoch and authenticated Down or original
+Generated Down association establish a valid prior owner. Unrelated None/Raw/
+Timer-only live owners reject before settlement without overwriting Close or
+changing original Pending/progress, prefix, watermarks or physical records.
+Already fulfilled Close and exact reserved terminal Close retain existing R2
+reuse; duplicates create no second owner/lease. Installation/reference errors
+remain typed and preserve rightful retry. No rollback of already written Down
+or unconfirmed postwrite bytes is promised. The existing TimerDown evidence is
+only recognized as historical Down metadata; no Timer kind/eligibility decision
+is added by this correction.
+
+Source fix `f80ea21948dd88676e4cfa293f35789bbd3569f6`, parent d85, changes only
+domain capture_session.rs and recording capture_session tests. Initial Linux CI
+found one inaccurate new fixture expectation: the concrete finalized seal records
+InputQuality::Unknown, not NoKnownLoss. Test-only child
+`18937c96de95648ba5254203be6f0c2e274da5dd`, tree
+`d85d20b7189c12d2e3ed77eb664c7bbfefaca06a`, corrects only that expectation.
+Production completeness, physical Complete/unique seals and proof checks stay
+unchanged. Fresh [source-head CI37740622434](https://github.com/al-gri/pro-sclpng/actions/runs/37740622434)
+verifies exact18937c96, pinned1.98.1 and final clean checks:439 PASS/0 FAIL/
+0 ignored, including all61 recording functions and11 affine compile-fail cases.
+This is worker Linux debug evidence; release/independent acceptance is not implied.
+
+Six paired Written/Durable families cover automatic first Close and foreign
+completion/lease operations; alias exhaustion with preserved Pending and retry;
+authentic prior/terminal reuse; incompatible live owners; fixed cut, neighbor
+drain, marker faults/ambiguity and abandonment; reserved terminal states. Two
+supplied probe names are retained. All47 previous recording functions remain;
+61 now means14 added functions, not loop variants. Existing control/H1 positives
+discover the automatic Close after completion; obsolete Up/Pong retains the actual
+Close/W until dispatch rather than relying on the historical missing-Close path.
+
+No fields, public API, dependencies or layout change. WorkCell remains248 bytes;
+cap5/cap9 metadata ceilings and Written/Flushed allocation profiles stay intact.
+Actual owner/full-supervisor debug/release retention/repeat/teardown results are
+in the appended handoff. §8 and all31 §9 requirements remain byte-identical;
+accepted schema, recovery/specs, manifests/lockfile/toolchain/workflow and inherited
+whole-PR paths are unchanged. Only the two source/test paths and two delivery
+documents are used. The immutable docs child and its new exact-head CI/command
+results are recorded externally after commit, avoiding a containing-SHA self-reference.
+
+Genuine full Linux/Durable release remains NOT_RUN/BLOCKED: no accessible local
+Linux executor; the unchanged workflow has no release step. Timer A1–A5 remains
+an Architecture request, not approval. Full new independent debug/release QA of
+the final immutable head and all31/corrective scope is still required. Draft PR34,
+Issue20, parent5 and existing claim/recovery remain; no readiness/merge is granted.

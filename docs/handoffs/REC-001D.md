@@ -2240,3 +2240,153 @@ merge, post-merge exact-head push CI and closing Issue20 are subsequent separate
 gates. Parent fullM1 stays open. Deferred adapters/networking/REST/RPI/execution
 scope and U09/U10 UNKNOWN/BLOCKED,U20 NOT_PROVEN/FORBIDDEN,C01 BLOCKED,C03 UNKNOWN
 remain unchanged.
+
+
+## Received Down / mandatory Close continuation — 2026-10-08
+
+Worker disposition: **DOWN_CLOSE_FIXED_IN_CODE / QA_PENDING** for this bounded R2
+correction; whole task **PARTIAL / QA_PENDING**. Timer **DESIGN_PROPOSED /
+TIMER_CONTRACT_BLOCKED**; required Linux/Durable release **NOT_RUN/BLOCKED**;
+independent acceptance **NOT_ESTABLISHED**. Same Issue20/parent5, claim6024304772,
+recovery6025249885, branch feat/REC-001D-ws-supervisor and existing Draft PR34.
+No new lineage, main write, force push, merge, auto-merge, readiness or closure.
+
+### Packet and fresh preflight
+
+User expressly continued by TASK.txt from WORKER-REC-001D-Down-Close-d85fa687.zip.
+Outer ZIP6858423 bytes, SHA256
+`7834b152bcc7aa5898e34a76d40f72a5e939716e7b83a398bf40d09eb3ddd1b2`.
+All14 manifest payloads verified; no unsafe/duplicate/undeclared payloads.
+TASK12577B SHA2567d76748706ef7ad5db89f090c81aedd93e4c4c7f9292cb19af5c53b97ab6cd58;
+original PROBE5894B SHA25674971ca2121151d284d337978acaeefffeb4db866cf5319a5a4560afd97a217b.
+Probe stayed unchanged as an input, separately from formatted/strengthened worker
+tests. ARCHITECTURE_REQUEST A1–A5 was read as an unapproved request, not approval.
+Nested d85 evidence867 payloads and original c9 evidence287 payloads reverified.
+One external standalone VERIFICATION attestation was not attached; all attached
+payload checks match. Original packet, source snapshots, manifests and raw audits
+are retained in the new delivery evidence.
+
+Live main/base39ff0dba797eb010586238ef06fb80e996340401; reviewed head
+d85fa6876258b80a9594b158e87ad5cc7004d799/tree3d702b6a9d4f01703134a6c1b6a19b64e3aab4e6.
+PR34 open/Draft/unmerged; Issue20 and parent5 open. Live governance/ADR/Issue/PR
+records were read again and matched; all133 d85 source blobs authenticated.
+Local clean head matched d85 before edits. A changed sandbox account required
+per-command safe.directory for the existing checkout; no global Git setting was
+changed. Isolated parent test clone retained the exact d85 Git head plus supplied
+test patch; tested source inventories distinguish that patched tree from a clean
+canonical checkout. Rust/Cargo1.98.1, Windows x86_64; no lock/features overrides.
+
+### Reproduction, cause and restored boundary
+
+Supplied exact Written probe compiles and fails behaviorally on d85 in debug and
+release, exit101: Close snapshot0 instead of1 after exact Down/completion Ok.
+Separate explicit-route negative compiles/fails101 in both profiles and prints
+`Down -> completion Ok -> Drop; work_used=0; closes=0; Ready=true`.
+Existing caller-installed-Close positive passes debug exit0 on the same parent.
+Original Durable probe compiles, then bootstrap sync_all fails Unsupported Unix
+metadata durability, exit101: behavioral result NOT_RUN. No parent Linux/Durable
+execution or seal delivery is invented from those Written results.
+
+At d85 ReceivedProgress::Down sufficed for settlement, while canonical commands
+installed Close later. Direct public handles could skip that later operation;
+finalization checked only existing Close identities. The restoration moves
+installed/validated retention into the public serialized completion boundary
+using existing mandatory_close, before Pending->Settled. Ordinary first Close
+belongs to original W, remains discoverable/retained after its caller drops and
+keeps quiescence NotReady until truthful closure. Received completion does not
+wait for dispatch; canonical H1 still returns Down/Close before fallible epochs.
+
+Matching original Close and authenticated prior same-scope/epoch Down/Generated
+owner are reused. Pending/Leased prior Close has no duplicate lease/owner/W;
+fulfilled and reserved terminal owners retain R2 semantics. Incompatible live
+None/Raw/Timer-only owner rejects without overwrite or fictitious settlement.
+Alias exhaustion preserves original Pending/progress and typed retry. Foreign
+turn/work/sink validation, bounded abandonment, cut and physical ambiguity remain.
+Existing TimerDown is recognized only as an authenticated historical Down stage,
+with no approval or implementation of Timer kind/disposition entitlement.
+
+### Source/provenance and regression functions
+
+Source fixf80ea21948dd88676e4cfa293f35789bbd3569f6/tree714090d4c2d732c3e6ac2428673f289dee5d3ec0,
+sole parentd85. Exactly two paths:
+crates/domain/src/capture_session.rs (+75 lines, no fields/API changes),
+crates/recording/tests/capture_session.rs (14 new functions plus stronger positives).
+Domain197296B SHA256412a57ae2ebe3d56c009bfe565d54e7f4130f3012df845a43aa159dad48559ac.
+An initial new Durable positive incorrectly expected NoKnownLoss completeness.
+Linux CI37740088172 reports60/61 recording functions PASS and this one assertion
+FAIL; test-job final clean step was skipped after failure. Raw logs remain.
+The concrete seal's existing InputQuality::Unknown is truthful and unchanged.
+Test-only child18937c96de95648ba5254203be6f0c2e274da5dd/tree
+d85d20b7189c12d2e3ed77eb664c7bbfefaca06a changes only that assertion. Test file
+144378B SHA256d9fa6dc6b7b9f9be923cf9752d01b280e43067e63caefdf577fea7cee4bd23de.
+ArchiveStatus::Complete,7 records,both unique seals, consumed/reused proof and
+all Close assertions remain. No production completeness/recovery change.
+
+Recording61 functions =47 previous +2 supplied probe names +6 paired Written/
+Durable helpers. Loop variants are separate: automatic first Close/4 foreign
+completion routes/foreign lease recovery/error; bounded alias exhaustion3 retries;
+4 authentic prior Down states;4 incompatible live owner classes with3 repetitions;
+fixed cut/two-scope neighbor drain/before-write and postwrite marker faults/
+abandonment; reserved terminal Pending/Leased/Settled. Tests compare ledger/status,
+cut/Close/prefix/watermarks/actual WAL bytes, rightful retry, dispatch/drop/reclaim,
+soleReady and Durable final seals. Existing control/H1 positives discover automatic
+Close after completion; obsolete Up/Pong retains W1 until successful Close dispatch.
+All earlier25 partial-identity functions and strengthened Raw/GAP/stale/Up stay.
+
+### Actual commands/profiles and CI
+
+Candidate Windows canonical fmt/clippy/build all exit0, pinned1.98.1; precommit
+records correctly say d85+source inventory, not a clean later SHA. Pure domain
+capture-session13 PASS debug/release. New Written6 PASS debug/release; supplied
+Written1 PASS debug/release. Existing qa_new_written10 PASS debug/release.
+Combined supplied Down probes each1 Written PASS +1 Durable bootstrap environment
+FAIL, exit101; local Durable behavior NOT_RUN. No skips/ignores/features or weakened
+durability. Full Windows workspace acceptance was not repeated to close ENV-01.
+
+Fresh source-head [CI37740622434](https://github.com/al-gri/pro-sclpng/actions/runs/37740622434)
+at exact18937c96 succeeds all3 jobs: rust-tests113190248806,
+rust-clippy113190249239,rust-fmt113190249304. Logs show expected=checked-out SHA,
+pinned1.98.1 Ubuntu24.04 Linux x86_64 and final clean checks/unchanged lockfile.
+Full workspace debug439 PASS/0 FAIL/0 ignored =428 runtime functions +11 expected
+affine compile-fail doctests, including all61 recording tests with genuine Durable
+fixtures. This is actual worker CI evidence, not independent acceptance.
+
+Five canonical commands: fmt --all -- --check; clippy --workspace --all-targets
+--locked -- -D warnings; build --workspace --locked; test --workspace --locked
+pass in fresh source Linux CI. Full test --workspace --release --locked remains
+NOT_RUN/BLOCKED on genuine Linux/Durable: WSL enumeration E_ACCESSDENIED and Docker
+config/engine access denied; no arbitrary Linux execution surface available.
+Those errors describe access, not proof no Linux host exists. Existing workflow
+has no release step and was not modified. Integrator must supply an executor.
+The containing docs commit requires separate fresh exact-head CI and clean local
+checks, whose actual SHA/results are recorded externally after commit. No containing
+SHA is inserted into its own handoff. Complete commands/profiles/exits, timestamps,
+toolchain/OS/overrides/source inventories and stdout/stderr hashes are delivered.
+
+### Bounds, preserved requirements and final gates
+
+No added per-W/per-scope fields, side lane/history/payload copy or dependency.
+WorkCell248B and previous fixed metadata ceilings remain. Clean f80 source owner
+allocation debug/release: cap5 peak29571/29570 vs8575010, cap9 31298/31297 vs8710676.
+Full-supervisor Flushed cap5/cap9 peak56710/60820 vs10256259/10410374,100 repeats/
+teardown PASS/released0 in both profiles. These are requested Layout bytes, not
+RSS/usable heap/network-memory; unchanged Written/Flushed probes are supplemental.
+Final immutable-head repetitions and byte identities are supplied externally.
+
+§8 table4919B SHA256784f9e20d61806872deba9d305023660cbf471784bac48bd36677d46eae872af;
+all31 §9 rows11593B SHA2567f450da4b09d80a453c2b08344b2d20b8b1023bd406c3f8bc75cee037f4afa84
+remain byte-identical. Only the two source/test files plus ADR/handoff change in
+this continuation;129 other tracked blobs and inherited20-file PR scope persist.
+Accepted WAL/schema/specs/ADR0002, reader/recovery/codec, dependencies/manifests/
+Cargo.lock/toolchain/workflow/apps/governance are untouched. All31/corrective
+families,Q1/Q2,R1-R3,B1-B3,QA-D1/D2,63 H1,H2,12 Q2 faults,F1-F6/N1-N3,
+decoder/continuity/DataHealth/publication/WAL,real CLI,11 compile-fail and cap5/
+cap9 requirements stay. Actual final-head debug mapping is delivered separately.
+
+ADR§16 supersedes only d85's missing public received Down/Close enforcement.
+ADR§15/A1-A5 Timer remains an unchanged unapproved proposal. Raw payload/digest
+and decoder-required disposition limits remain factual; no unrelated contract.
+Before any Timer extension explicit Architecture approval is required. Full
+independent final-head Linux/Durable debug/release QA and release executor remain
+separate gates. Freeze reviewed branch after delivery; Draft/open Issue/PR state,
+parent fullM1 and deferred scope/U09/U10/U20/C01/C03 remain. No merge/ready/acceptance.
