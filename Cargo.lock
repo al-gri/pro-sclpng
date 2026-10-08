@@ -17,6 +17,11 @@ dependencies = [
 [[package]]
 name = "radar"
 version = "0.1.0"
+dependencies = [
+ "domain",
+ "market-data",
+ "recording",
+]
 
 [[package]]
 name = "recording"
