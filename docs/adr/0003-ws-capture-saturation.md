@@ -1,6 +1,6 @@
 # ADR 0003 — terminal capture saturation and archive session authority
 
-Status: **PRIOR CONTRACT DESIGN_APPROVED_FOR_IMPLEMENTATION; QA-NEW-01 PARTIAL_IDENTITY_RESTORATION / QA_PENDING; RECEIVED DOWN/CLOSE FIXED_IN_CODE / QA_PENDING; TIMER EXTENSION DESIGN_PROPOSED / TIMER_CONTRACT_BLOCKED**. Date: 2026-10-08.
+Status: **PRIOR CONTRACT DESIGN_APPROVED_FOR_IMPLEMENTATION; QA-NEW-01 PARTIAL_IDENTITY_RESTORATION / QA_PENDING; RECEIVED DOWN/CLOSE FIXED_IN_CODE / QA_PENDING; TIMER A DESIGN_APPROVED_A / IMPLEMENTATION_PENDING / QA_PENDING**. Date: 2026-10-08.
 Architecture direction: **ARCHITECTURE_DIRECTION_SET**.
 This is the bounded REC-001D design revision for [Issue #20](https://github.com/al-gri/pro-sclpng/issues/20), parent [#5](https://github.com/al-gri/pro-sclpng/issues/5), existing Draft [PR #34](https://github.com/al-gri/pro-sclpng/pull/34).
 Claim `6024304772`; recovery `6025249885`; latest incoming partial completion [6033824631](https://github.com/al-gri/pro-sclpng/issues/20#issuecomment-6033824631).
@@ -762,3 +762,239 @@ Linux executor; the unchanged workflow has no release step. Timer A1–A5 remain
 an Architecture request, not approval. Full new independent debug/release QA of
 the final immutable head and all31/corrective scope is still required. Draft PR34,
 Issue20, parent5 and existing claim/recovery remain; no readiness/merge is granted.
+
+
+## Timer A approval provenance — 2026-10-08
+
+Current Timer status: **DESIGN_APPROVED_A / IMPLEMENTATION_PENDING / QA_PENDING**.
+Decision: `ARCH-REC-001D-TIMER-A-20261008`. The owner delivered the complete
+approved contract through `WORKER-REC-001D-Timer-A-approved.zip`,7263901 bytes,
+SHA256 `26cf0ae5721481ab16e5a910294a2641ab80820f264ebecc11ccecc0356d75f4`.
+Root TASK.txt22723B SHA256 `8ab8184af20f3c530142e4b4c324af178e263ee615d6e2688afb1773c91b83d2`
+is the current authorized routing. Full normative addendum33986B SHA256
+`cf585a92e3bd8372caf90326c67436274fef5abb5a8d163b389aa0a42ab838ba`
+is copied below byte-for-byte, including its complete provenance and T01–T16.
+Its source approval archive367258B SHA256
+`ef492ce7b4ec07e7ed288a827c08412d473574dbdc76c55325806e48c55b30d1`
+and the original previous Down/Close packet are retained unchanged as inputs.
+
+Approved contract is exact ADR0003§15 at immutable
+`d85fa6876258b80a9594b158e87ad5cc7004d799`,tree
+`3d702b6a9d4f01703134a6c1b6a19b64e3aab4e6`, PLUS the complete §15A below.
+§15A prevails over open/incomplete proposal language. Historical §15 and prior
+Timer DESIGN_PROPOSED/TIMER_CONTRACT_BLOCKED statements remain as history;
+they are superseded for this explicitly approved bounded A implementation.
+Option B and caller-supplied disposition remain unauthorized. This approval
+does not approve runtime results, QA-NEW-01, acceptance, READY or merge.
+
+Packet snapshot18937c96de95648ba5254203be6f0c2e274da5dd is an ancestor of actual
+fresh start `8e4e2b49930d38e16d5b48bb165ee0d8d69dd690`,tree
+`eb01f5d529c1e3ffbe65d70c048bca085e1350d0`. The intervening two commits are our
+Down/Close handoff and its recorded allocation-number correction, only ADR/handoff
+paths. Source/test Down/Close commits f80ea219 and18937c96 are preserved.
+Live main/base remains39ff0dba797eb010586238ef06fb80e996340401, PR34 is open/Draft/
+unmerged, canonical checkout initially clean, Rust/Cargo1.98.1. Same Issue20/
+parent5, claim6024304772/recovery6025249885 and feat/REC-001D-ws-supervisor.
+
+This docs-only approval provenance must be committed before dependent Timer
+production edits. Its containing immutable SHA is reported after commit in the
+existing PR/Issue metadata, avoiding a containing-commit self-reference.
+§8, all31 §9 rows and prior Down/Close contracts remain. Only the13 exact allowed
+paths in §15A.6 may implement A. Genuine new-head Linux/Durable debug AND release,
+fresh exact-head CI, updated metadata bounds/T01–T16/31-family evidence and full
+new independent QA remain required. Architecture runtime NOT_RUN is provenance,
+not a worker result. No force push/main write/merge/auto-merge/readiness/closure.
+## 15A. Architecture decision — bounded Timer authority, option A
+
+Decision ID: ARCH-REC-001D-TIMER-A-20261008.
+Status: DESIGN_APPROVED_A / APPROVED_FOR_BOUNDED_IMPLEMENTATION.
+Reviewed immutable proposal: d85fa6876258b80a9594b158e87ad5cc7004d799.
+Reviewed tree: 3d702b6a9d4f01703134a6c1b6a19b64e3aab4e6.
+Proposal parent: 0d0aebb3937fea15fb3dab2dfe817879af016d3e.
+Accepted main/reference: 39ff0dba797eb010586238ef06fb80e996340401.
+Date: 2026-10-08 Europe/Warsaw. Authority: project's Architecture role, as requested by owner and TASK.txt.
+
+The approved design is the exact §15 proposal at the reviewed SHA PLUS this complete mandatory addendum. This addendum resolves A1–A5 and prevails where the proposal leaves an API undecided or differs from the decisions below. §15 alone, cff approval alone, an implementation appendix or green CI is not this approval. Option A is selected; B is not authorized; caller-supplied disposition C is rejected. This decision releases only the bounded Timer design/implementation gate. It does not accept the partial d85 code, close QA-NEW-01, resolve the separately reported Down/Close finding, issue READY, or authorize merge.
+
+MUST/MUST NOT below are normative. Worker MUST copy this exact accepted addendum and its decision provenance to the existing ADR/handoff before implementing the dependent Timer extension. Preserve previous proposal/rejected-head history. Record the new docs/implementation SHA separately; no d85 test result transfers to it.
+
+### 15A.1 A1 — actual admission order and direct-route FIFO
+
+Invariant: INV-03/04/09; ADR0003 §2/4 and Q2 FIFO; original identity, immutable CutSide and conservation of W.
+
+The existing WorkOwner reservation sequence is NOT sufficient evidence of observation admission order: a direct caller can reserve a slot early and associate a received identity later. Keep WorkOwner.id/reservation sequence unchanged. Add one checked, archive-lifetime authority record-admission counter and fixed inline record_admission_order metadata in the existing counted W cells. A received observation gets its immutable order atomically on successful identity admission, not on reserve_work. admit_due_timer reserves/admit-associates its W and order atomically. No caller supplies an ordinal. No new queue, retained history or second work lane is permitted.
+
+For a Timer first-stage operation or a schedule-affecting Up/Pong/Disconnected/epoch-record operation x, let order(x) be its authority-assigned actual record admission order and scope(x) its registered stream scope. Reject iff the bounded W ledger contains y satisfying ALL:
+
+  scope(y) == scope(x)
+  order(y) < order(x)
+  y has an already-admitted required record-bearing stage
+  that stage has neither an authenticated exact receipt nor an authenticated existing no-write obsolete settlement.
+
+Use private distinct-stage progress and original registered scope, not alias count, mutable WorkKind, generic receipt total, timestamp comparison or numeric Timer ID. Choose the earliest blocking order deterministically. Return AuthorityError::TimerOrderBlocked { earlier_work_id } before plan freeze, Close reservation, operational arithmetic, schedule mutation or backend I/O. Preserve both original identities, Pending/W, CutSide, plan, schedule, prefix/watermarks and Close. Rightful FIFO progress then retries the same owner. Existing marker/cut and epoch-dependency gates apply additionally; the new predicate cannot bypass them.
+
+Apply the predicate on the PUBLIC authority/bound-sink path both to Timer selection and authenticated schedule-changing controls. Checking Timer alone is insufficient: a later Pong must not be written first and revoke an earlier admitted Timeout before its plan is selected. A receipt-confirmed earlier stage does not block merely because a result/command alias is held or observation completion has not yet been called. A required unconfirmed stale diagnostic stage does block. Authenticated no-write obsolete control settlement after original Down remains available.
+
+A planned/unadmitted generated H1 output is not a record-bearing FIFO blocker. Merely retaining a generated plan or holding its original Down/Close aliases MUST NOT make it one. If a generated stage is actually activated for record persistence, give that stage a checked order only at its authority-controlled admission, preserve its original provenance separately, and apply the same rule. Stage activation is bounded inline metadata; it follows existing settled-Close/epoch/cut dependencies. Prospective activation checks the predecessors before committing its ordinal; an unready plan cannot install a barrier ahead of received work. F2 coalescing retains the original admitted order and allocates no new ordinal.
+
+Once an active Timeout plan is frozen by the first Timer persistence operation, a same-scope Up/Pong/Disconnected/epoch operation cannot revoke, replace or skip its required Down. An attempt between Timer and Down returns TimerPlanInProgress { work_id } (or the earlier-order error when applicable) before I/O. The intervening observation stays owned. After authenticated same-epoch Down, intervening Connected/Pong may use the existing authenticated no-write obsolete-control settlement. Received Disconnected and legitimate generated epoch stages retain their original exact record/dependency requirements; this decision grants them no new no-write settlement. Unrelated scopes can progress under their own gates. A caller's earlier slot reservation cannot create retroactive precedence.
+
+### 15A.2 A2 — sole authority registration/admission and minimal API
+
+Invariant: INV-03/09/11/18/19; §15 original token/plan association, fixed budgets and no caller disposition.
+
+The owner-minted CaptureSessionAuthority owns the sole scheduler and eligibility ledger. Register it once with the accepted scope registry, retention budget and prefix through the existing CaptureSessionOwner registration path. The domain-level conformance registration uses the same policy. Freeze HeartbeatPolicy::SupervisorV2, revision 2: Ping interval 30_000_000_000 ns and Pong timeout 15_000_000_000 ns. These are the current d85 local engineering constants, not an exchange guarantee, freshness proof or trading threshold. Domain owns this dependency-free fixed preset; market-data consumes/re-exports it without a domain→market-data dependency. Arbitrary durations/revisions are not constructor inputs. Re-registration/policy replacement returns AlreadyRegistered; there is no mutable policy/install-schedule API. Existing binding/budget/lifecycle validation precedes registration commit. A retained compatibility registration wrapper MUST delegate to this same frozen preset, never omit the authority scheduler.
+
+Per configured scope, fixed metadata tracks Disabled/AwaitingPing/AwaitingPong, current epoch, checked schedule generation, due deadline, timer-ID frontier and queued-original association. Init generation/ID frontier is 0 with no eligible schedule. Installing an eligible replacement uses checked next generation; accepted Timer IDs are positive and advance on successful due admission. Epoch/reconnect does not reset either counter. Revocation/Closing disables eligibility without incrementing a generation or calculating a future deadline, so obsolete originals remain recordable at MAX.
+
+Approve the following minimal surface (signature sketch; existing error/wrapper return types retain their established owner-bound meaning):
+
+  pub enum HeartbeatPolicy { SupervisorV2 }
+  pub enum TimerKind { Ping, Timeout } // read-only original information
+
+  CaptureSessionOwner::register_supervisor(
+      &mut self, turn: &mut SessionTurn, scopes: &[ScopeBinding],
+      budget: RetentionBudget, heartbeat_policy: HeartbeatPolicy
+  ) -> Result<(SupervisorSessionHandle, BoundRecordSink), OwnerError>;
+
+  CaptureSessionAuthority::register_supervisor(
+      &self, turn: &mut SessionTurn, scopes: &[ScopeBinding],
+      budget: RetentionBudget, prefix: PrefixBinding,
+      heartbeat_policy: HeartbeatPolicy
+  ) -> Result<SupervisorSessionHandle, AuthorityError>;
+
+  SupervisorSessionHandle::admit_due_timer(
+      &self, turn: &mut SessionTurn, stream: StreamId,
+      observed_stamp: ReceiveStamp
+  ) -> Result<TimerAdmission, AuthorityError>;
+
+  pub enum TimerAdmission {
+      NotDue,
+      AlreadyQueued { original_work_id: u64 },
+      Admitted(AdmittedTimer),
+  }
+
+  SupervisorSessionHandle::timer_progress(
+      &self, turn: &mut SessionTurn, timer_owner: &WorkOwner
+  ) -> Result<TimerProgressView, AuthorityError>;
+
+  SupervisorSessionHandle::take_timer_ping(
+      &self, turn: &mut SessionTurn, timer_owner: &WorkOwner
+  ) -> Result<CommandLease, AuthorityError>;
+
+AdmittedTimer has private fields with read-only access to original kind/identity and borrowed/consuming access to its original WorkOwner. Its authority/scope/epoch/generation/original-ID token is private fixed metadata in that same W, with no public token or permit constructor. TimerProgressView is a bounded read-only diagnostic view of Unselected, TimerOnly(Ping), TimerOnly(Obsolete) or TimerThenDown, exact authenticated stages and associated Close. It is never an input that grants entitlement.
+
+Keep BoundRecordSink::persist_owned as the actual receipt boundary and complete_observation as the settlement boundary. Within the FIRST exact Timer persist_owned operation, authority validates the original identity/token, applies A1, derives active/obsolete eligibility, preflights/reserves the fixed output plan, then invokes backend and commits authenticated progress in one serialized SessionTurn operation. Identity/order and any active Close conflict checks precede terminal operational arithmetic, so a conflicting/foreign call cannot cause TimeOverflow instead of a preserving rejection. Do not introduce a public prepare/install-active operation or a gap in which an external plan/callback chooses entitlement. A caller uses timer_progress after authenticated progress; its mirror is not authority. Repeated stage calls authenticate against the frozen plan, not a new frame-selected plan. For an original Timer, complete_observation derives its required stages from this private plan, never caller obsolete/disposition input: missing required progress returns NotQuiescent; StorageStopped returns StorageStopped; successful complete settles once; repeated completion returns the existing InvalidOwner/OwnerRetired outcome without new progress.
+
+admit_due_timer accepts no caller WorkOwner, kind, ID, deadline, generation, active bool, output plan or success flag. It derives all original fields from the current eligible schedule and supplied original ReceiveStamp; observed monotonic time must be >= original deadline. No eligible/due schedule -> NotDue, no work; already queued current schedule -> AlreadyQueued for the same original, no new W/token/ID. Capacity failure -> WorkExhausted with all frontiers/generation/queued flags unchanged and no fabricated received Timer/failure identity. Capacity is reserved before admission commit. A multi-scope tick visits ascending configured StreamId, reports bounded admitted scopes plus the first typed error, and leaves the rejected proposal retryable. Scope terminal failure/lifecycle/StorageStopped use their existing typed rejection and admission rules.
+
+Close BOTH legacy routes before they can mutate rightful state:
+  admit_observation(... ObservationClass::Timer { ... }) -> TimerAuthorityRequired;
+  generic command(... SendText("ping"), ...) -> TimerAuthorityRequired.
+Historical confirmed_timer, arbitrary W or exact common Timer bytes do not mint a Ping. Owner-bound persistence of a Timer without the new original token/plan also returns TimerAuthorityRequired. Existing generic WAL outside the canonical capture profile is unchanged and is not represented as enforcing this authority contract.
+
+Counter names are TimerId, TimerScheduleGeneration and RecordAdmissionOrder; exhaustion is checked with no wrap/reuse/reset. Due proposals follow the existing generated hard-stop counter/time policy, without inventing a received input identity. Genuine received observation admission-order exhaustion follows the existing reserved terminal received-input failure policy with the represented original identity; it does not fabricate an ordinal. Active deadline overflow retains TimeOverflow provenance. These terminal representational failures are distinct from A5's retryable identity/order rejection. Preflight all needed Timer-plan counters/alias capacity before its backend attempt. Preserve existing RecordNo/epoch/H1/H2 hard-stop behavior; a later H1 failure cannot retract earlier authenticated Down/Close. Do not add speculative future-epoch requirements to obsolete Timer processing.
+
+### 15A.3 A3 — atomic active Ping receipt and one-shot command
+
+Invariant: same-W ownership, exact distinct receipts, no speculative eligibility, INV-03/04/09; B1 and Q2.
+
+For active Ping, before the first Timer backend attempt authority MUST check and reserve the next schedule generation, deadline = original Timer ReceiveStamp.monotonic_ns.checked_add(15_000_000_000), and fixed same-W Ping command ownership/alias capacity. Exact original Timer gate confirmation commits ALL of these atomically: exact stage receipt; AwaitingPong epoch/generation/deadline; original Timer observation progress; retained counted same-W Ping entitlement. No fallible share(), counter/deadline calculation or supervisor callback may be needed afterward to establish that ownership/eligibility. A failed receipt grants no Ping and installs no successful AwaitingPong transition.
+
+take_timer_ping moves the sole previously retained original entitlement into one affine CommandLease without reserving another W, choosing a new disposition or requiring a new alias allocation. Before confirmed active Timer return PingNotReady; after transfer return PingAlreadyTaken; authority-side revocation of an untransferred Ping returns CommandRevoked. Obsolete/non-Ping originals cannot supply a lease. complete_observation may settle the Timer record obligation after its exact required receipt, but cannot erase an untransferred/held command reference or fictionally free W. Caller Drop never implies receipt settlement.
+
+The Ping lease binds original Timer W/epoch and the newly committed AwaitingPong generation. Dispatch revalidates that exact current association, permitted lifecycle/scope, no StorageStopped and no active Timeout freeze. Later authenticated Pong/Connected/Down, scoped terminal failure, Closing or epoch replacement revokes an unsent old Ping. Authority-held nonmandatory command references release truthfully on revocation; held external leases remain counted until consumed/Drop. Neither path settles pending record obligations.
+
+Physical dispatch remains the existing affine command effect. An invoked effect failure is DispatchFailed with AmbiguousEffect::Unknown; Drop/error does not rewind schedule, create a new Ping entitlement or promise absence of physical bytes/effect. Ping retry/reclaim is N/A and no new protocol is authorized. Close retains its separate existing reclaim contract. The AwaitingPong deadline starts from the ORIGINAL recorded Timer stamp, never dispatch time, drain time, a fresh clock sample or a later mirror update.
+
+An authenticated current Connected/Pong Up installs AwaitingPing at original Up/Pong ReceiveStamp.monotonic_ns + 30_000_000_000 with checked generation/deadline prepared before its effectful record. Authentication/order/frozen-plan checks precede that arithmetic. Obsolete Ping records its exact original Timer only, bypasses active arithmetic, emits no command/Down/epoch/reconnect and cannot clear/change the newer schedule.
+
+### 15A.4 A4 — lifecycle transition table
+
+Invariant: §2/3.2/5/6, Q2, R1–R3, B1–B3 and QA-D1/D2; Close remains owned independently of descriptors and aliases.
+
+State                         | New due admission / operational service          | Already-admitted Timer/record progress                           | Close / completion
+Open, healthy scope           | Eligible policy scheduling allowed              | FIFO; derive active/obsolete before first Timer I/O               | Active Timeout rules A5; existing H1 after settled Close
+FailedDiagnostic, failed scope| No new operational Timer/lease for failed scope | Unselected originals TimerOnly(Obsolete); frozen Timeout preserved| Same original terminal Close; no revival/reconnect for failed scope
+FailedDiagnostic, healthy neighbor | DiagnosticOnly transport service remains: lawful Ping/Subscribe/reconnect | Normal authority eligibility/FIFO while storage writable     | Existing neighbor H1 and Close; archive publication/seals remain denied
+Normal Closing                | Admission closed; operational schedules/leases revoked | Unselected admitted Timer -> TimerOnly(Obsolete); already-frozen Timeout still requires Timer->Down | Reserved/held mandatory Close remains; no NEW H1/reconnect plan from a Down confirmed after Closing
+DiagnosticClosing, writable   | No new operational scheduling/leases           | Drain entitled admitted originals/marker under fixed cut; frozen Timeout remains required | Mandatory Close available under A5; generated cancellation only existing checked D1/D2 conditions
+DiagnosticClosed              | No new admission, operational service or append| Retain/report originals, frozen plan, receipts and undrained W; no fictionally successful completion | Existing mandatory Close discovery/reclaim/dispatch remains; no seals/epoch revival
+StorageStopped (overlay)      | No new admission/non-Close operational effect   | No Timer/Down/suffix retry; retain trusted stages, possible suffix and undrained ownership | Selected active Timeout's same Close becomes ready; discovery/reclaim survives descriptor closure
+Finalized                     | No new schedule/admission/progress             | Only already-final immutable reports                            | No new owner/lease; settled Close is never reissued
+
+Normal Closing is not a new generated cancellation entitlement. H1 already owned BEFORE Closing means a generated obligation registered before that transition; a future H1 snapshot inside an unfinished Timer plan alone is not such an obligation. Already-owned H1 may drain its originally required distinct records under existing Close/epoch/cut gates, but grants no Connect/Subscribe/Ping/Reconnect effect and activates no eligible schedule. No new H1 plan may be created from a Timeout Down confirmed after Closing: settle the received Timer->Down obligation only after retaining its same mandatory Close, then keep W counted for that Close/aliases until truthful release.
+
+In DiagnosticClosing, partial fresh H1 output or StorageStopped cannot be canceled under D2. Any originally entitled writable suffix remains controlled by its frozen plan/existing gates; otherwise report it explicitly undrained. Never erase it, claim settlement or issue a final proof merely to obtain closure. Timers are received obligations and never use generated-plan cancellation.
+
+Closing/failed diagnostic closure does not replace, reclassify or discard an already-frozen active Timeout, even if only Timer was confirmed. Preserve its exact required Down and same Close until authenticated progress or explicit terminal storage stop. Normal/Diagnostic Closing makes UNSELECTED Timer originals obsolete without active deadline/epoch arithmetic. Revocation requires no counter increment. StorageStopped takes precedence over writable-drain permissions in every row.
+
+### 15A.5 A5 — rejection, storage stop and new Close reservation delta
+
+Invariant: original Pending/W/identity/CutSide, truthful prefix, R2 one Close, R3 irreversible finalization and D2 no false settlement.
+
+Prewrite validation errors for foreign turn/handle/sink/W/token, replaced identity, wrong/repeated stage, FIFO order or incompatible Close reservation MUST be typed and occur before backend I/O AND rightful reconciliation/schedule/plan/Close mutation. They preserve rightful retry, exact identity, W, cut, schedule, frozen plan, prefix/watermarks and existing Close; they do not create StorageStopped. This guarantee applies on the new Timer and schedule-affecting routes, including complete_observation/take_timer_ping identity checks. Existing rightful reconciliation of genuine abandonment remains a separate operation; a foreign rejected call cannot trigger it. Backend invocation count for these errors is zero.
+
+Actual backend error (including reported before-write failure), weak achieved gate or postwrite receipt mismatch installs/preserves the terminal storage stop and original error. Retain previous trusted progress, frozen plan, W and Close; report possible physical suffix independently from authenticated prefix. No rollback, byte absence, retry/suffix repair, writer substitution or receipt fabrication is promised. Existing terminal checked counter/time hard stops are also terminal and keep their original provenance; do not mislabel them as foreign/order rejection or a successful receipt.
+
+Approve this NEW semantic delta explicitly: an active Timeout first operation reserves exactly one epoch-bound mandatory Close on the ORIGINAL same W before Timer I/O. It does not authenticate Down. Reuse only an existing reservation for that exact authority, scope, epoch and original W; a live incompatible reservation returns TimerCloseConflict before mutation/write. The fixed scope cell and same W carry the reservation; no second owner/lease, nonce/history lane or extra W is added.
+
+The reservation is discoverable as Pending with read-only readiness. Ordinary reclaim before authenticated Down or terminal storage failure returns CloseNotReady without state/counter changes or a lease. After authenticated exact same-observation Down OR terminal storage stop, the SAME owner becomes reclaimable/dispatchable. Timer receipt alone is insufficient. Readiness guards EVERY Timer-associated Close lease issuance/conversion/dispatch route, not merely reclaim. Generic mandatory_close cannot mint or upgrade a Close from an unselected/Ping/obsolete Timer W; it may return only the active Timeout's already-authorized original reference. The scope/epoch and original work association never change; repeat reserve/Down/reclaim cannot produce another owner or active lease.
+
+Compatibility exception required by pre-existing §3.2/R2: if a genuine scoped terminal-failure path occurs after selection while storage is still writable, its inherited immediate fail-safe Close permission makes this SAME reserved owner ready, even without authenticated Down. This is authority terminal-failure evidence, not a caller flag and not a second Close. Frozen Timer->Down remains a record obligation; Close dispatch cannot fake either receipt. This exception preserves terminal Close service and healthy-neighbor behavior.
+
+Leased -> repeated reclaim is AlreadyLeased; Drop/ambiguous effect error returns the same original Close Pending; success/authenticated external closure settles it; Settled cannot be reissued. Existing opaque authenticated external closure may settle the SAME reservation without fabricating Timer/Down receipts: it does not settle their record obligation or grant a new external-evidence constructor. These semantics survive StorageStopped and DiagnosticClosed. Active Timeout complete_observation requires exact original Timer then exact original Down plus retained same-W Close association. Close may still be Pending/Leased when ownership transfers to its legitimate H1 plan. Finalization and H1 epoch completion require actual Close settlement. Timer alone, Down alone, another W's Down/Close, historical Down or numeric-equal foreign identity cannot establish it.
+
+H1 still uses its bounded original old-tag/BookId snapshot and three distinct fresh ordered Connection/Subscription/Book receipts AFTER original Down and settled Close. Later fallible epoch/storage completion cannot erase successful Down/Close. Existing H1/H2 preflight/counter policy is preserved; do not add early future-epoch promises or arithmetic to obsolete Timer processing. No new Timer cancellation API is authorized.
+
+### 15A.6 Exact implementation allowlist and compatibility
+
+This is a bounded subset of unchanged approved §8; use a path only when the Timer contract actually requires it:
+  crates/domain/src/capture_session.rs
+  crates/domain/src/lib.rs
+  crates/domain/tests/capture_session.rs
+  crates/market-data/src/ws_supervisor.rs
+  crates/market-data/src/lib.rs
+  crates/market-data/tests/ws_supervisor.rs
+  crates/recording/src/capture_session.rs
+  crates/recording/src/lib.rs
+  crates/recording/src/file.rs
+  crates/recording/tests/capture_session.rs
+  crates/recording/tests/wal.rs
+  docs/adr/0003-ws-capture-saturation.md
+  docs/handoffs/REC-001D.md
+
+Recording production changes are permitted only for registration/authority/sink/Close integration that is actually necessary. No wildcard or manifest/lockfile/dependency/toolchain/workflow/spec/ADR0002/application/governance change is authorized. Do not extend raw payload/digest or decoder-required disposition authentication in this packet. Existing Timer/Transport/epoch WAL bytes, schema/tags, recovery classification, dense RecordNo, physical-versus-quality reporting and replay limitations stay unchanged. Runtime opaque token/kind metadata is not a new wire field or proof of physical delivery. Unknown exchange quantity/delete constraints remain unchanged.
+
+All schedule/token/ordinal/plan/Ping/Close state is fixed per registered scope or inline in its already-counted W. W+N+1<=M remains invariant on admission/transfer/rejection/Drop/reclaim/storage error. No per-retry growth or token-history cache. Account for every new scalar, enum, reference and allocation in actual size_of-derived metadata ceilings. cap5/cap9 accounting and 100-repeat/teardown checks are mandatory; requested Layout bytes are not RSS, allocator usable heap or network memory.
+
+### 15A.7 Mandatory implementation and independent-QA tests
+
+Every group below requires positive control, negative observations, identity/stage/W/cut/schedule/Close snapshots and backend invocation/prefix assertions as applicable. Public tests use genuine owner-minted handles and original Durable filesystem profile; private counter injection may establish otherwise unreachable finite boundaries but is identified as such. Tests/logs listed here are REQUIRED, NOT_RUN by this Architecture review.
+
+T01 A1: Pong-first/Timeout-second; direct Timeout-first rejects before I/O; rightful Pong commits; exact original Timeout records obsolete. Repeat Connected and D-1/D/D+1. Timer-first/Pong-second: direct Pong-first rejects BEFORE any Timer plan exists; rightful Timer->Down then obsolete control. Unrelated scope progresses.
+T02 A1: pre-reserved owners admitted in reverse reservation order prove actual record-admission order. Earlier Raw/GAP/stale required second stage and actually admitted generated stage block; receipt-confirmed held result/command aliases and unadmitted generated plan do not deadlock. Preserve F2/R1 cut/marker behavior.
+T03 A1/A5: direct active Timer confirmed -> intervening Pong/Connected/epoch attempts -> exact Down; typed rejection preserves intervening original W/CutSide and frozen plan; neighbor writes allowed under its own gates.
+T04 A2: generic Timer admission, tokenless Timer write and generic SendText("ping") mint reject before mutation/I/O, including arbitrary W, obsolete Timer and historical confirmed_timer.
+T05 A2/A5: foreign authority with equal numeric IDs/deadlines, wrong/retired/replayed token, substituted kind/disposition/stream/epoch/both stamps/ID/deadline, unrelated/repeated frames and attempted old-slot reuse reject; original retry succeeds once. Revoked admitted token records original obsolete Timer; consumed token creates no new W/receipt.
+T06 A2: registration freezing/replacement, valid original binding, invalid binding/budget/lifecycle; policy version/values match. Due before D -> NotDue, at/after D -> one admitted original; duplicate tick -> same AlreadyQueued; partial multi-scope capacity reject is truthful and retryable with unchanged rejected frontiers/flags.
+T07 A2/A3: TimerId/ScheduleGeneration/RecordAdmissionOrder/RecordNo checked MAX boundaries and no reset across epoch; active deadline overflow has original typed hard stop; obsolete timers/revocation/Closing at MAX avoid active preflight. Received versus generated counter outcomes keep their different provenance; no fabricated successor/failure identity.
+T08 A3: active Ping exact Timer receipt commits AwaitingPong and same-W command atomically; complete/Drop before extraction cannot free command W; extraction once only; early/second/obsolete/foreign extraction rejected. Force alias/counter/deadline preflight failure and all receipt faults: no late callback/mirror or fallible share can grant success.
+T09 A3: original stamp+15s/+30s deadlines even after delayed drain/dispatch; mutable supervisor mirror cannot choose entitlement. Held Ping revoked by Pong/Connected/Down/Timeout freeze/Closing/epoch change; no callback effect after revocation, no retry/reclaim after Drop or ambiguous dispatch error.
+T10 A4: every lifecycle row, healthy DiagnosticOnly neighbor service, unselected obsolete Timer in Closing, frozen Timeout spanning Closing/DiagnosticClosing, descriptor-closed reporting, StorageStopped dominance and no final seals. Distinguish already-owned H1 drain from forbidden new Closing H1; D2 partial plan never falsely canceled.
+T11 A5: Close reserved/discoverable before Timer I/O; reclaim CloseNotReady before Down; exactly same owner ready after Down OR storage stop. Genuine scoped failure activates inherited SAME fail-safe Close without Down while neighbor continues. Foreign/live-conflicting reservation rejects prewrite; repeated Down/reclaim/Drop/error/settled owner never doubles a lease or W.
+T12 A5: all original Timer and Down error-before-write, actual postwrite mismatch and weak-gate faults, including zero/one confirmed Timer stage; preserve trusted versus physical prefix, original error/plan/W/Close. Correct identity/order rejection creates no stop and permits rightful retry; genuine backend-reported before-write error still stops.
+T13 §15 stages/H1: active Timeout Timer-only and Down-only completion denied; obsolete/Ping Down injection denied; wrong/historical/foreign Close denied. Fresh original Connection->Subscription->Book after settled original Close succeeds; repeated/other-plan/old Down never substitutes. Later completion failure keeps prior Down/Close.
+T14 W/finalization: last-steward/alias Drop before/between/after stages retains Pending/Abandoned obligations; no false free W, cancellation, proof or successful seals. Healthy full completion gives one borrowed proof/finalization; failed latch denies every later publication/finalization.
+T15 bounds: cap5/cap9 true counts and updated size/allocation ceilings; obsolete queued tokens and same-W command/Close; 100 repeats and teardown release; no unbounded metadata/history/per-rejection allocation growth.
+T16 regression gate: unchanged all31 §9 families, Q1/Q2 including12 Q2 storage faults, R1–R3, B1–B3, QA-D1/D2,63 H1 variants, H2, decoder/continuity/DataHealth/publication/WAL/CLI and affine compile-fail regressions. Genuine Linux/Durable debug AND release plus canonical fmt/clippy/build/lock/clean-source checks on the NEW immutable implementation head. Supplemental Written/Flushed/Windows tests do not replace that gate.
+
+### 15A.8 Decision provenance and remaining gates
+
+This decision's input is the owner-attached ARCHITECTURE-REC-001D-d85fa687.zip, SHA256 a458a415a5977ce333c697c2774a563e1b8650f3736930471ade0e34075e5658. All seven manifest payload sizes/hashes were verified. The complete attached ADR and handoff were matched byte-for-byte to their exact GitHub d85 blobs: ADR 53ddb7e7d49ea947630d98c62b76a8c40306781c; handoff 5717c49a903fb95f59d7b8ae43d015371bc21863. Their SHA256 values are respectively fef81a45be7ae0c52770b54cd6eaeddd8fdc13726d55acb2568eeebe02810c5c and da9920df5fc685a9ae66478d64816f6ce77b6a201cb6d8b1abf0b578f2fd5008.
+
+Live commit/tree/parent, actual main and open/Draft/unmerged PR34 were independently checked. The proposal-parent→d85 comparison has one commit and exactly ADR/handoff paths. The supplied exact-docs-proposal.patch (SHA25645528a97de5bd82150d4d447602b686bde179715fe3cc8f3e345fae9b8105719) was applied to verified parent document copies and reproduced both exact d85 blobs. §8 table4919B SHA256784f9e20d61806872deba9d305023660cbf471784bac48bd36677d46eae872af and §9 table11593B/31 rows SHA2567f450da4b09d80a453c2b08344b2d20b8b1023bd406c3f8bc75cee037f4afa84 were recomputed from the reviewed ADR; earlier equality attestations remain identifiable Integrator evidence. Accepted main AGENTS/WORKFLOW/INVARIANTS/ARCHITECTURE, ADR0002, WAL and DataHealth specs and exact d85 domain/supervisor/recording sources informed this review. SOURCE-PROVENANCE.json records retrieved refs, Git blob IDs and SHA256 hashes.
+
+Review method: source/contract analysis with independent FIFO/API, lifecycle/Close and bounds subreviews. No Rust tests, reproduction or production changes were performed. d85 debug425 PASS/release NOT_RUN and residual Down/Close status are supplied Integrator/worker evidence, not new Architecture QA. ENV-01 Linux/Durable release, fresh independent implementation QA, Integrator acceptance, owner merge and post-merge CI remain separate gates.
+
+Existing lineage only: Issue20 / parent5 / claim6024304772 / recovery6025249885 / feat/REC-001D-ws-supervisor / DraftPR34. Worker and Integrator MUST preserve this exact decision ID/addendum hash in ADR/handoff and durable decision records, copy the complete accepted text rather than a summary, and identify the later implementation head independently.
