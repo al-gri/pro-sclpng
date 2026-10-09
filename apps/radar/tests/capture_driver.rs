@@ -29,7 +29,11 @@ const TIMEOUT: u64 = PING + 15_000_000_000;
 struct TempWal(PathBuf);
 impl TempWal {
     fn new() -> Self {
-        let serial = NEXT_PATH.fetch_add(1, Ordering::Relaxed);
+        let serial = NEXT_PATH
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("finite test path counter");
         Self(std::env::temp_dir().join(format!("rec-f2-app-{}-{serial}.wal", std::process::id())))
     }
 }

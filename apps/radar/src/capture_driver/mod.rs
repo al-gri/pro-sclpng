@@ -12,9 +12,9 @@ use std::path::Path;
 
 use domain::capture_session::{
     AmbiguousEffect, AuthorityError, BoundRecordSink, CaptureSessionAuthority, CloseLeaseReport,
-    CloseOwnerRef, CloseState, CommandKind, CommandLease, DispatchReport, HeartbeatPolicy,
-    PersistError, PersistErrorKind, QuiescenceReport, RetentionBudget, ScopeBinding,
-    SessionDisposition, SessionLifecycle, SessionTurn, UnsettledSummary,
+    CloseOwnerRef, CloseState, CommandKind, CommandLease, DispatchReport, FailureCause,
+    HeartbeatPolicy, PersistError, PersistErrorKind, QuiescenceReport, RetentionBudget,
+    ScopeBinding, SessionDisposition, SessionLifecycle, SessionTurn, UnsettledSummary,
 };
 use domain::identity::{RecordNo, SegmentNo};
 use domain::policy::{RecordingGate, WatermarkKind};
@@ -365,6 +365,8 @@ pub struct Summary {
     pub finalized: bool,
     pub not_ready_observed: bool,
     pub storage_stopped: bool,
+    pub storage_error_kind: Option<PersistErrorKind>,
+    pub failure_cause: Option<&'static str>,
     pub finalization_invalidated: bool,
     pub close_retry_same_identity: bool,
     pub close_drop_pending: bool,
@@ -409,6 +411,7 @@ impl Summary {
                 "\"outcome\":\"{}\",\"physical_status\":\"{:?}\",",
                 "\"owner_input_quality\":\"Unknown\",\"recovered_input_quality\":{},",
                 "\"lifecycle\":\"{:?}\",\"failed\":{},\"storage_stopped\":{},",
+                "\"storage_error_kind\":{},\"failure_cause\":{},",
                 "\"finalized\":{},\"not_ready_observed\":{},\"finalization_invalidated\":{},",
                 "\"close_retry_same_identity\":{},\"close_drop_pending\":{},",
                 "\"observations\":{},\"last_record\":{},\"physical_good_offset\":{},",
@@ -426,6 +429,10 @@ impl Summary {
             self.lifecycle,
             self.failed,
             self.storage_stopped,
+            self.storage_error_kind
+                .map_or_else(|| "null".to_owned(), |kind| format!("\"{kind:?}\"")),
+            self.failure_cause
+                .map_or_else(|| "null".to_owned(), |cause| format!("\"{cause}\"")),
             self.finalized,
             self.not_ready_observed,
             self.finalization_invalidated,
@@ -895,6 +902,17 @@ pub fn run_scenario(path: impl AsRef<Path>, scenario: Scenario) -> Result<Summar
         finalized,
         not_ready_observed: not_ready,
         storage_stopped: status.storage_stopped.is_some(),
+        storage_error_kind: status.storage_stopped.map(|error| error.kind),
+        failure_cause: status.first_failure.map(|failure| match failure.cause {
+            FailureCause::QueueOverflow => "QueueOverflow",
+            FailureCause::CaptureAttemptExhausted => "CaptureAttemptExhausted",
+            FailureCause::CounterExhausted(_) => "CounterExhausted",
+            FailureCause::TimeOverflow => "TimeOverflow",
+            FailureCause::StorageFailure => "StorageFailure",
+            FailureCause::ReceiptMismatch => "ReceiptMismatch",
+            FailureCause::WeakGate => "WeakGate",
+            FailureCause::OrderingFailure => "OrderingFailure",
+        }),
         finalization_invalidated: invalidated,
         close_retry_same_identity: retry_same,
         close_drop_pending: drop_pending,

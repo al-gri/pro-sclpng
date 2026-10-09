@@ -29,7 +29,9 @@ fn arguments() -> Result<(Scenario, PathBuf), DriverError> {
             "--output" if output.is_none() => {
                 output = Some(PathBuf::from(
                     args.next()
-                        .ok_or_else(|| DriverError::new("missing_output"))?,
+                        .ok_or_else(|| DriverError::new("missing_output"))?
+                        .into_string()
+                        .map_err(|_| DriverError::new("invalid_output"))?,
                 ));
             }
             _ => return Err(DriverError::new("invalid_arguments")),
