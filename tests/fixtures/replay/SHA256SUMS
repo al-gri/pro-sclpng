@@ -1,0 +1,4 @@
+e967d2cd86a539a7f5b5f03a8767606c4dee3519d36cb73f31732fdca42c511d  tests/fixtures/replay/synthetic-v1.wal
+3ed7b44898dcfcf6523f100614342215b2e65c4fcce9fa4302ff8cc81a111bc6  tests/fixtures/replay/synthetic-v1.expected.txt
+420bb732bc1ac89f9eb244b3834d07e384779c394b698f75a8d257bfeb89428e  tests/fixtures/replay/README.md
+4321075745e2ac13f6bf1a9cfc5de3d45e6e1838833b3f228d7f548a4ed75112  tests/fixtures/replay/manifest.json
