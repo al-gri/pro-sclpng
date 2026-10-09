@@ -257,10 +257,12 @@ F-1. F-2 uses a separate synthetic profile with supervisor venue token `bitget`;
 F-1 pins `Bitget` and does not support the raw subscription ACK. F-2 promises
 reader round-trip diagnostics, not full F-1 replay compatibility.
 
-Draft status: implementation review and final-head verification are **PENDING**.
-The preliminary exit observations below belong to mutable implementation source;
-they are not final-head acceptance. Actual final-head command receipts must be
-recorded in Issue #37 / its Draft PR after all commits.
+The worker checked committed code head `fa4c3ab5122dd7916a4f7a3ac1c0896f69d270b1`
+on Linux: app debug/release17, workspace577 (566 runtime+11 compile-fail), accepted
+F-1 replay24 and focused Timer/QA42 filters passed. The Handoff retains those
+actual code-head checks. The final docs-containing head, repeated checks, fresh
+CI and accessible evidence identities are recorded in Issue #37 / its Draft PR
+after all commits; no prior-head result is silently transferred.
 
 Build and run from the repository root on Linux with verified Rust/Cargo 1.98.1.
 Use a Linux filesystem for Durable file and parent-directory synchronization.
@@ -270,6 +272,12 @@ and its rustfmt/Clippy components are installed and verified there. Worker build
 `CARGO_TARGET_DIR=/tmp/rec-f2-target`; generated WAL and evidence belong in fresh
 directories under `/tmp`, outside Git. Exact environment values and image identity
 belong in the evidence receipt.
+
+Use a clean Linux checkout with `core.autocrlf=false`. Accepted F-1 fixture JSON
+must retain exact Git blob/LF bytes: Windows newline conversion changes embedded
+raw bytes and breaks its golden comparison without a Git source delta. The
+worker retained that failed attempt and reran the same head in canonical Linux
+source; no excluded fixture was edited.
 
 ```sh
 export RUSTUP_TOOLCHAIN=1.98.1
@@ -289,17 +297,17 @@ The CLI accepts exactly one scenario and one fresh output path:
 capture_scripted --scenario nominal|heartbeat-pong|heartbeat-timeout|transport-error|overflow|write-error|shutdown-refused --output <fresh-path.wal>
 ```
 
-| Scenario / input | Purpose | Preliminary observed exit; final verification |
+| Scenario / input | Purpose | Actual code-head exit |
 | --- | --- | --- |
-| `nominal` | Connect, subscription ACK, exact original books bytes in receive order, healthy finalization | `0`; PENDING |
-| `heartbeat-pong` | Library Ping/Pong scheduling using controlled original stamps | `0`; PENDING |
-| `heartbeat-timeout` | Library Timeout -> Down -> the same mandatory Close; diagnostic terminal outcome | `2`; PENDING |
-| `transport-error` | Preserve callback attempts, ambiguous effect and original Close recovery | `2`; PENDING |
-| `overflow` | Terminal item/work exhaustion with truthful failure and unresolved ownership | `2`; PENDING |
-| `write-error` | Public BeforeWrite fault through the real bound sink, terminal StorageStopped | `2`; PENDING |
-| `shutdown-refused` | Previously admitted Raw fails in Closing; finalization is invalidated | `2`; PENDING |
-| Invalid arguments / unknown scenario | Reject input without panic or overwrite | `3`; PENDING |
-| Existing output path | Create-new refusal; existing bytes stay unchanged | `3`; PENDING |
+| `nominal` | Connect, subscription ACK, exact original books bytes in receive order, healthy finalization | `0` |
+| `heartbeat-pong` | Library Ping/Pong scheduling using controlled original stamps | `0` |
+| `heartbeat-timeout` | Library Timeout -> Down -> the same mandatory Close; diagnostic terminal outcome | `2` |
+| `transport-error` | Preserve callback attempts, ambiguous effect and original Close recovery | `2` |
+| `overflow` | Terminal item/work exhaustion with truthful failure and unresolved ownership | `2` |
+| `write-error` | Public BeforeWrite fault through the real bound sink, terminal StorageStopped | `2` |
+| `shutdown-refused` | Previously admitted Raw fails in Closing; finalization is invalidated | `2` |
+| Invalid arguments / unknown scenario / non-Unicode values / bounded path | Reject input without panic or created output | `3` |
+| Existing output path | Create-new refusal; existing bytes stay unchanged | `3` |
 
 The nominal direct process must leave stderr empty. Negative scenarios must
 return their documented nonzero status with truthful diagnostics. A wrapper must
