@@ -419,3 +419,46 @@ and manifest integrity. A local Windows path is not an accessible evidence
 artifact. Publish the final receipt in the existing PR/Issue after all commits,
 then verify the three fresh CI jobs and their actual logs on the same head.
 Independent QA and owner acceptance are separate gates.
+
+## Issue45 experimental transport probes (Linux Docker, not capture acceptance)
+
+The stopped implementation increment and precise allocation gate are documented
+in `docs/handoffs/REC-001F-3-PUBLIC-TEXT-CAPTURE.md`. The probes include actual
+transport helpers but do not enable owner-bound capture or captured replay.
+Use the exact branch head and pinned1.98.1; set CARGO_HOME and CARGO_TARGET_DIR
+to fresh writable directories outside the checkout. In the selected Linux
+runner, prepare locked dependencies before offline operations:
+
+```bash
+CARGO_NET_OFFLINE=false cargo fetch --locked
+CARGO_NET_OFFLINE=true cargo generate-lockfile --offline
+git diff --exit-code -- Cargo.lock
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+cargo build --workspace --locked --offline
+cargo test --workspace --locked --offline
+cargo test -p radar --test public_capture --locked --offline -- --nocapture --test-threads=1
+cargo test -p radar --test public_capture --release --locked --offline -- --nocapture --test-threads=1
+```
+
+The single Linux test runs transport/allocation probes sequentially. Its
+expected-abort child tests must report SIGABRT/Unknown/incomplete and a denial
+before System; their harness PASS is not the production allocation gate PASS.
+The test allocator records diagnostic intervals and is not shipped as a
+production memory bound. Synthetic fixtures include a public localhost test
+key. No raw market archives are committed or published.
+
+Optional endpoint-route probing requires an external ws.bitget.com numeric
+address resolution receipt with time/provenance and elapsed<=3s, plus a private
+`/evidence/live` directory. The app probe never resolves the hostname:
+
+```bash
+GATE45_PROBE_MODE=live GATE45_NUMERIC_ADDRESS='<numeric-ip>:443' \
+  cargo test -p radar --test public_capture --locked --offline -- \
+  --exact implementation_integrated_probes --nocapture --test-threads=1
+```
+
+This is only numeric TCP/TLS/HTTP/Text route evidence, not supervisor ACK/WAL,
+owner Close or replay evidence. Do not put it in normal CI or infer complete
+task45/M1 acceptance. The full implementation remains blocked by the documented
+production TLS/application pre-allocation enforcement gate.

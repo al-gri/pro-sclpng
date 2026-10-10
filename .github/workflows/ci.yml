@@ -58,6 +58,9 @@ jobs:
           rustup which cargo
           rustfmt --version
           cargo clippy --version
+      - name: Prepare exact locked dependencies in this clean runner
+        run: |
+          CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Check formatting
         run: |
           cargo fmt --all -- --check
@@ -108,9 +111,12 @@ jobs:
           rustup which cargo
           rustfmt --version
           cargo clippy --version
+      - name: Prepare exact locked dependencies in this clean runner
+        run: |
+          CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Run Clippy
         run: |
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy --workspace --all-targets --locked --offline -- -D warnings
       - name: Verify clean checkout after checks
         run: |
           set -euo pipefail
@@ -158,6 +164,9 @@ jobs:
           rustup which cargo
           rustfmt --version
           cargo clippy --version
+      - name: Prepare exact locked dependencies in this clean runner
+        run: |
+          CARGO_NET_OFFLINE=false cargo fetch --locked
       - name: Verify Cargo-generated lockfile
         run: |
           set -euo pipefail
@@ -169,10 +178,10 @@ jobs:
           git diff --exit-code -- Cargo.lock
       - name: Build workspace
         run: |
-          cargo build --workspace --locked
+          cargo build --workspace --locked --offline
       - name: Test workspace and real CLI
         run: |
-          cargo test --workspace --locked
+          cargo test --workspace --locked --offline
       - name: Verify clean checkout after checks
         run: |
           set -euo pipefail
