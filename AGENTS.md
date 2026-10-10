@@ -2,17 +2,21 @@
 
 ## Scope and first read
 
-Работай только с `al-gri/pro-sclpng`. Не просматривай другие репозитории пользователя и не переноси оттуда файлы. Внешнюю техническую документацию читать можно; не подменять ей авторские торговые правила.
+Работай только с `al-gri/pro-sclpng`. Не просматривай другие репозитории пользователя. Внешние технические источники не заменяют авторские торговые правила.
 
-Начинай с этого файла, `docs/PROJECT_STATE.md`, `docs/ARCHITECTURE.md`, `docs/INVARIANTS.md`, `docs/WORKFLOW.md`, затем текущего Issue и релевантных specs/ADR. Читай фактический GitHub-контекст, не полагайся на память чата.
+GitHub — единственный источник истины. Прочитай [WORKFLOW](docs/WORKFLOW.md), [PROJECT_STATE](docs/PROJECT_STATE.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [INVARIANTS](docs/INVARIANTS.md), текущий Issue/PR и релевантные принятые specs/ADR. Приоритет имеет явно принятое owner scope/security решение, затем accepted contracts и действующие инструкции; proposed/Draft не равны accepted.
 
-До изменений проверь репозиторий, актуальный base SHA, чистоту рабочего дерева и доступные инструменты. При отсутствии shell, Rust или права записи явно запиши BLOCKED/NOT_RUN. Никогда не выдумывай запуск тестов, commit, PR, benchmark или содержимое недоступного файла.
+До изменений зафиксируй настоящий base, scope, чистоту checkout и фактический способ сборки. Полный environment preflight повторяй при смене executor/toolchain/доступа, не после каждого docs commit. Отсутствующие проверки — NOT_RUN, выполненные с ошибкой — FAIL. Не выдумывай команды, commit, PR, benchmark или PASS.
 
-## Work unit
+## Последовательная работа и приёмка
 
-Один worker = один Issue = одна короткая ветка = один PR. Разрешённые пути и out-of-scope заданы Issue. Не исправляй соседние модули заодно. Не меняй публичные контракты/торговую семантику молча; предложи ADR и останови только зависимую часть работы.
+Одна активная задача, один исполнитель, одна ветка, один PR. Integrator может реализовать простую задачу сам или передать её одному Worker. QA и исправления идут последовательно в этой же задаче. Другую задачу начинать после завершения либо явного откладывания текущей с GitHub handoff. Исторические Draft PR/backlog не дают разрешения на параллельное исполнение.
 
-Не писать напрямую в main, не force-push, не merge/auto-merge, не менять visibility/access/billing/secrets без отдельного разрешения владельца. Разовое создание README в пустом репозитории уже выполнено для первого PR.
+Dependency/handshake/allocation probes входят в implementation, а не требуют готовой реализации до создания ветки. Их обязательные acceptance требования, численные бюджеты и контрактные stops сохраняются. Отсутствие live evidence блокирует live acceptance, но не независимую разрешённую offline-часть.
+
+Scope и файлы заданы Issue. Не исправляй соседние модули заодно. Публичные контракты/торговую семантику меняй только после принятого ADR; останови зависимую часть. Обычные изменения получают применимые checks; критические WAL/sequence/epochs/quantity/ownership/transport/лимиты и milestone требуют независимого review/QA по WORKFLOW. Самопроверка автора не является независимым QA.
+
+Не писать напрямую в main, не merge/auto-merge, не force-push, не менять visibility/access/billing/secrets без отдельного разрешения владельца. Merge остаётся за владельцем.
 
 ## Non-negotiable constraints
 
@@ -30,9 +34,9 @@
 - Source-derived правило, инженерный порог и гипотеза имеют разные provenance.
 - Не публиковать закрытые материалы, API-ключи, cookies, аккаунтные данные или raw market archives.
 
-## Verification
+## Verification and handoff
 
-На bootstrap Rust-команды ещё не существуют. BOOT-001 создаёт workspace и фиксирует toolchain. После этого выполнить и указать результаты:
+Для Rust использовать зафиксированный toolchain и применимые команды:
 
 ```sh
 cargo fmt --all -- --check
@@ -40,6 +44,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Дополнить релевантными negative/property/golden tests по Issue. Фиксировать commit, команды, exit codes и ограничения. Не называть тест, не выполненный в текущей среде или CI, пройденным. CI зелёный не означает доказанную корректность стратегии.
+Фиксируй actual head, среду, команды/exit codes или CI refs. Новые зависимости требуют подготовки locked cache до offline checks; Cargo.lock/workspace/CI меняет Integrator последовательно. Не переносить evidence между изменёнными runtime bytes или executors без проверки применимости.
 
-Заверши работу PR и `docs/handoffs/TASK-ID.md` по шаблону. Передай base/head SHA, список файлов, реальные проверки, deviations и blockers. Не закрывай чужие задачи. Чат можно удалить после сохранения всех результатов и приёмки handoff.
+PR report — Handoff завершённой задачи. Отдельный [Handoff](docs/templates/HANDOFF.md) нужен для прерывания/сложной передачи/milestone либо если прямо задан packet. Исторические packets/handoffs/receipts сохранять; restrictions на закрытие tracking Issues действуют.
+
+## Обязательная автоматическая передача
+
+При каждом переходе/завершении/blocker сам подготовь один следующий шаг. Если нужна другая роль, выдай полный готовый к копированию промпт и packet: Issue/PR, actual refs, ветка, executor, scope/контракты, acceptance/evidence, stops и формат результата. Не ждать отдельной просьбы владельца. Сохрани уникальные материалы в GitHub; будущие роли запускаются по очереди. Подготовка промпта не означает claim, запуск чата, scheduled automation или разрешение merge. Полное правило находится в [WORKFLOW](docs/WORKFLOW.md#автоматическая-подготовка-следующего-шага-и-передачи).
