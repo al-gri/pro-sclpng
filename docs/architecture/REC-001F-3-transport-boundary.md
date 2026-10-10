@@ -90,7 +90,8 @@ The concrete candidate route is `tungstenite::protocol::frame::FrameSocket`
 over an explicitly driven `rustls::ClientConnection` and a deadline-aware
 numeric-address TCP stream. `FrameSocket::read(max_size)` requires only Read;
 its publisher source has no Ping/Pong/Close responder in that raw layer.
-`FrameSocket::write` only queues a frame; `send` includes flush. These are
+`FrameSocket::write` buffers a frame and may already write to the underlying
+stream; it does not establish flush completion. `send` includes flush. These are
 verified library facts, not proof that a future adapter is correctly written.
 Client outbound Text must use a fresh unpredictable mask for every frame through
 the library frame primitives (the raw layer has no client-role masking); retain
@@ -166,7 +167,7 @@ WouldBlock, a partial write, library buffering, or TLS progress.
 | Subscribe / other SendText | Exact framed Text bytes, masking, TLS output and underlying write/flush have completed locally within budget. | Partial/error is Unknown; consume command, stop reading/writing that socket, no automatic resend of buffered suffix. ACK has not been established. | Check exact slot/epoch. Subsequent real ACK is a distinct stamped Text input. Closing/stale lease is revoked before callback by authority. |
 | Timer A Ping | Same local SendText completion for exactly the authority-issued `ping`. | Unknown consumes Ping; no reclaim/retry. Stop socket, report effect Unknown; do not shift Pong deadline to dispatch time. | Held Ping may be revoked by Pong, Down, Closing or epoch change. Dispatch revalidates current generation before effect. |
 | Close | Exact socket and all its local pending operations/buffers are removed/dropped; no local future can emit more bytes. An already absent exact epoch is idempotently ceased. | Failure to establish local cessation returns Err/Unknown; original owner stays Pending. At most two attempts at the **same** original Close; refusal remains explicit. | Never close a newer epoch in a reused slot. No peer ACK or clean TLS/WS handshake claim. No constructor of AuthenticatedClosure is needed. |
-| ReconnectAfter | Only a bounded local observation of the authorized backoff boundary, or an explicit policy refusal before execution. | Do not say enqueue is completed delay. This single-shot slice performs no future Connect: settle/cancel an unactivated inherited plan through existing `cancel_pending_disconnect` where legal; otherwise retain NotReady diagnostic ownership. | No second socket. Never drop an active frozen Timer/partial H1 plan as though settled. At capture stop, pending plan is explicitly canceled only if the accepted API permits it. |
+| ReconnectAfter | Only a bounded local observation of the authorized backoff boundary, or an explicit policy refusal before execution. | Do not say enqueue is completed delay. This single-shot slice performs no future Connect: drive public `drain_one` after DiagnosticClosing/Closed, whose internal cancellation path can cancel a legally unactivated generated plan; `cancel_pending_disconnect` itself is private and is not callable by the app. Otherwise retain NotReady diagnostic ownership. | No second socket. Never drop an active frozen Timer/partial H1 plan as though settled. At capture stop, pending plan is explicitly canceled only if the accepted API permits it. |
 
 For a policy-denied effect, return/report refusal; never manufacture Dispatched
 to make quiescence ready. Denied dispatch returns the rightful lease, Revoked
