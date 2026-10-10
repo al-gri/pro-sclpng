@@ -1075,7 +1075,8 @@ interval or baseline subtraction.
    malloc/System pointer is legal: foreign-family ownership transfers stop.
 6. For a tagged block, global dealloc publishes RETIRED into its prepaid
    record with one release atomic store and returns without allocating or
-   waiting. A bounded record scan claims retired blocks; only that reclaimer
+   waiting. The fixture's separately retained CoreReclaimOwner scans a bounded
+   number of records and claims retired blocks; only that reclaimer
    calls **System.dealloc(base, F)**, and only after that call returns may
    its charge and ledger backing reference be released. A pending or blocked
    physical free remains charged and prevents completion. Hook pointer/Layout
@@ -1137,7 +1138,11 @@ contended record and leave it charged. No record is reused while a producer,
 deallocator or reclaimer can access its old generation. After physical free,
 a debit-pending record may conservatively retain a charge until a serialized
 nonallocating debit completes; pending debit/control is explicit, not a fake
-live backing or duplicate allocation. Ledger/control may outlive every public
+live backing or duplicate allocation. A bootstrap-paid CoreReclaimOwner is
+the raw physical ledger custodian held by the existing fixture driver,
+independently of public strong/Weak counts. It remains available after user
+budget handles disappear; it is neither a second executor nor an app bridge.
+Ledger/control may outlive every public
 handle. Leaks stay live/charged; last Weak may keep control after payload death.
 The final core release occurs only after external references, live/retired
 records and pending debits are gone, then Diagnostic/records/core themselves
@@ -1145,7 +1150,12 @@ are physically freed. Bootstrap backings are raw internally owned family
 blocks with no external self-reference; final reclamation holds their base/F
 and last scalar witness on the caller stack, never accesses a freed ledger,
 and never places these raw bootstrap pointers into std ownership. No
-self-referential header/core ownership cycle is allowed.
+self-referential header/core ownership cycle is allowed. The custodian cannot
+finish with external references/backings/debits remaining. Premature custodian
+Drop retains the raw core and outstanding charges with a nonallocating
+orphaned/pending witness; it neither frees live backing nor reports completion.
+E1's fixture driver drains and destroys the custodian last. Production custody
+and owner binding remain an unaccepted U6 contract.
 
 **Boundedness limit:** native S6 System alloc/free latency is not guaranteed.
 The hook's finite retirement work can be tested independently; physical drain
@@ -1196,7 +1206,7 @@ ABI or dependency patch; its outcome may still reject the production direction.
 
 | Future path | Exact proposed change / copies |
 |---|---|
-| `apps/radar/tests/support/alloc45_u4_core.rs` | **New**, private experimental FamilyAllocator:GlobalAlloc, Header, LedgerCore with inline16-record fixture table, CoreStrong/CoreWeak, CoreClass/CoreFailure, Prepaid/CallPlan/CoreOp, Snapshot/ReclaimReport and sealed Pod. Zero publisher/std copies; no rustls facade or accepted project API. |
+| `apps/radar/tests/support/alloc45_u4_core.rs` | **New**, private experimental FamilyAllocator:GlobalAlloc, Header, LedgerCore with inline16-record fixture table, CoreStrong/CoreWeak/CoreReclaimOwner, CoreClass/CoreFailure, Prepaid/CallPlan/CoreOp, Snapshot/ReclaimReport and sealed Pod. Zero publisher/std copies; no rustls facade or accepted project API. |
 | `apps/radar/tests/alloc45_u4_core.rs` | **New**, isolated integration-test binary installs this one #[global_allocator], includes the support module and allocation/null fault fixtures, exercises real pinned rustls::Error::General(String) source extraction in a fixture wrapper. No sockets/TLS/provider/production activation. |
 | `apps/radar/Cargo.toml` | **Edit only**: nondefault feature `alloc45-u4-experiment = []` and this [[test]] target with required-features=["alloc45-u4-experiment"]. No dependency/version/MSRV/default-feature changes. Cargo.lock remains identical. |
 
@@ -1209,7 +1219,7 @@ inside T; this fixture must not be activated as a production limit.
 Exact proposed private API families (signatures belong only to this new scope):
 
 ```rust,ignore
-fn try_bootstrap(deadline: Instant, stop: &AtomicBool) -> Result<CoreStrong, CoreFailure>;
+fn try_bootstrap(deadline: Instant, stop: &AtomicBool) -> Result<(CoreStrong, CoreReclaimOwner), CoreFailure>;
 impl CoreStrong {
     fn try_share(&self, deadline: Instant, stop: &AtomicBool) -> Result<Self, CoreFailure>;
     fn try_downgrade(&self, deadline: Instant, stop: &AtomicBool) -> Result<CoreWeak, CoreFailure>;
@@ -1222,7 +1232,7 @@ fn try_vec_bytes(op: &CoreOp<'_>, class: CoreClass, capacity: usize) -> Result<V
 fn try_string(op: &CoreOp<'_>, class: CoreClass, text: &str) -> Result<String, CoreFailure>;
 fn try_prepaid_pod_box(op: &CoreOp<'_>, class: CoreClass, value: Pod) -> Result<Box<Pod>, CoreFailure>;
 fn try_resize_bytes(op: &CoreOp<'_>, class: CoreClass, bytes: &mut Vec<u8>, capacity: usize) -> Result<(), CoreFailure>;
-fn collect_retired(core: &CoreStrong, max_steps: usize) -> ReclaimReport;
+fn collect_retired(owner: &mut CoreReclaimOwner, max_steps: usize) -> ReclaimReport;
 ```
 
 CoreOp borrows the original caller context/core; CoreFailure is fixed scalar
@@ -1239,7 +1249,8 @@ actual Layout/alignment/padded headers including over-aligned Pod; POD Box
 ticket consumed or safely unused; compatible std Vec/String/Box final frees;
 moving growth AND shrink old+new peaks/refusal leaving old intact; aliases,
 custom Weak, leaked backing and real extracted/replaced General(String)
-outliving wrapper and user core handle; exact-once debit/no double-count;
+outliving wrapper and user core handle while the charged custodian remains;
+premature custodian Drop retains orphaned/pending accounting; exact-once debit;
 concurrent admission/share/upgrade/retire/free and generation reuse; bounded
 retirement/contended drain after stop/expiry; hook recursion counter=0 and no
 logging/allocating TLS/queue/mutex/thread::current path. Instrument the direct

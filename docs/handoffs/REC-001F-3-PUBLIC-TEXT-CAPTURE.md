@@ -693,3 +693,8 @@ accepted #45 bounds/deadlines/TimerA/sole owner/SessionTurn/same original Close/
 Unknown/native-control/WAL/ACK NotReconstructed/usable_data=false unchanged.
 Production gate FAIL/NOT_PROVEN; capture/WAL/replay/independent QA NOT_RUN.
 M1 not accepted; #21/M2 idle; no merge or second executor/task/PR/QA.
+
+E1 reclamation custody is explicit: a charged CoreReclaimOwner stays with the
+fixture driver after user budget handles disappear, drains actual backing and
+frees the ledger last. Premature custody loss retains pending/orphaned charges;
+production owner binding remains U6, not an application bridge designed here.
