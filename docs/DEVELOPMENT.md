@@ -245,3 +245,177 @@ fresh CI and independent QA must inspect that exact SHA. Draft readiness does
 not claim merge approval, canonical readiness, full REC-001F completion or M1
 completion. Exact executed commands, outcomes and limitations belong in the
 task handoff.
+
+## REC-001F-2 owner-bound scripted capture
+
+This separate synthetic example composes the existing capture owner and public
+supervisor with a synchronous scripted fake transport. Its output is a real
+filesystem WAL read back by the existing `WalReader`. The example adds no live
+socket, TLS, DNS, live clock, signal handler, async runtime or production verifier.
+The accepted F-1 replay profile, fixtures and commands above remain applicable to
+F-1. F-2 uses a separate synthetic profile with supervisor venue token `bitget`;
+F-1 pins `Bitget` and does not support the raw subscription ACK. F-2 promises
+reader round-trip diagnostics, not full F-1 replay compatibility.
+
+The worker checked committed code head `fa4c3ab5122dd7916a4f7a3ac1c0896f69d270b1`
+on Linux: app debug/release17, workspace577 (566 runtime+11 compile-fail), accepted
+F-1 replay24 and focused Timer/QA42 filters passed. The Handoff retains those
+actual code-head checks. The final docs-containing head, repeated checks, fresh
+CI and accessible evidence identities are recorded in Issue #37 / its Draft PR
+after all commits; no prior-head result is silently transferred.
+
+Build and run from the repository root on Linux with verified Rust/Cargo 1.98.1.
+Use a Linux filesystem for Durable file and parent-directory synchronization.
+The worker executor is the `rec-001f-2-worker` Docker Linux container using the
+existing `rust:1.98.1-bookworm` image and an overlayfs filesystem. Rust 1.98.1
+and its rustfmt/Clippy components are installed and verified there. Worker builds use
+`CARGO_TARGET_DIR=/tmp/rec-f2-target`; generated WAL and evidence belong in fresh
+directories under `/tmp`, outside Git. Exact environment values and image identity
+belong in the evidence receipt.
+
+Use a clean Linux checkout with `core.autocrlf=false`. Accepted F-1 fixture JSON
+must retain exact Git blob/LF bytes: Windows newline conversion changes embedded
+raw bytes and breaks its golden comparison without a Git source delta. The
+worker retained that failed attempt and reran the same head in canonical Linux
+source; no excluded fixture was edited.
+
+```sh
+export RUSTUP_TOOLCHAIN=1.98.1
+rustc --version --verbose
+cargo --version
+rustup show active-toolchain
+cargo build --locked -p radar --example capture_scripted
+capture_binary="${CARGO_TARGET_DIR:-target}/debug/examples/capture_scripted"
+capture_check_dir="$(mktemp -d /tmp/rec-001f-2.XXXXXXXX)"
+"$capture_binary" --scenario nominal \
+  --output "$capture_check_dir/nominal.wal"
+```
+
+The CLI accepts exactly one scenario and one fresh output path:
+
+```text
+capture_scripted --scenario nominal|heartbeat-pong|heartbeat-timeout|transport-error|overflow|write-error|shutdown-refused --output <fresh-path.wal>
+```
+
+| Scenario / input | Purpose | Actual code-head exit |
+| --- | --- | --- |
+| `nominal` | Connect, subscription ACK, exact original books bytes in receive order, healthy finalization | `0` |
+| `heartbeat-pong` | Library Ping/Pong scheduling using controlled original stamps | `0` |
+| `heartbeat-timeout` | Library Timeout -> Down -> the same mandatory Close; diagnostic terminal outcome | `2` |
+| `transport-error` | Preserve callback attempts, ambiguous effect and original Close recovery | `2` |
+| `overflow` | Terminal item/work exhaustion with truthful failure and unresolved ownership | `2` |
+| `write-error` | Public BeforeWrite fault through the real bound sink, terminal StorageStopped | `2` |
+| `shutdown-refused` | Previously admitted Raw fails in Closing; finalization is invalidated | `2` |
+| Invalid arguments / unknown scenario / non-Unicode values / bounded path | Reject input without panic or created output | `3` |
+| Existing output path | Create-new refusal; existing bytes stay unchanged | `3` |
+
+The nominal direct process must leave stderr empty. Negative scenarios must
+return their documented nonzero status with truthful diagnostics. A wrapper must
+capture each actual exit code and check it against the recorded expectation;
+`|| true` is not a validation result. Do not assume `CARGO_BIN_EXE_*` exists for
+an example; invoke the example executable produced by the explicit build.
+
+All metadata, IDs, inputs, configuration and stamps are synthetic/unverified.
+The F-2 profile uses an explicitly synthetic repeated `f2` digest token; it is
+local engineering identity, not authenticated Bitget provenance.
+Every report retains `synthetic=true`, `canonical_status=NotEvaluated`,
+`canonical_applicability=BLOCKED_UNVERIFIED` and `usable_data=false`. A physically
+Complete healthy archive has owner input quality Unknown. Missing evidence does
+not become VALID. U09/U10/delete remain BLOCKED, U20 REST healing is FORBIDDEN,
+C01 is BLOCKED and C03 is UNKNOWN; #22, #5 and full M1 remain open.
+
+The application must use the existing owner registration, genuine affine leases,
+bound sink and dispatch path. The library owns Timer identity, generation and
+deadlines under SupervisorV2 revision 2 (30,000,000,000 ns Ping interval and
+15,000,000,000 ns Pong timeout). Original recorded stamps determine deadlines;
+dispatch time never moves them. A local stop uses same-authority mandatory Close
+and lawful reclaim/dispatch. It does not invent a received Disconnected input.
+Timer-only progress cannot make an active Timeout Close ready. Drop is not a
+successful receipt or settlement, and an ambiguous Close retry does not promise
+exactly-once physical effects. StorageStopped denies write retries and final
+seals; diagnostic closure preserves unresolved owners truthfully.
+
+Demo limits are at most 64 observations, 64 effect entries, 4096 bytes per
+payload, 64 KiB total scripted raw bytes, 256 drain/quiescence/reclaim steps and
+two effect attempts per Close identity. Arithmetic and exhaustion must be checked.
+Separate tests distinguish bounded coalesced raw/frame/byte/message loss from
+terminal item/work exhaustion: every overflow does not imply failed latch/Close.
+
+### Repeatable direct-process capture and negative checks
+
+After the example build, use two distinct fresh output paths in separate direct
+processes. Canonical JSON excludes paths, PID, randomness, live time, durations
+and OS error strings; environment details belong in the evidence archive.
+
+```sh
+"$capture_binary" --scenario nominal \
+  --output "$capture_check_dir/one.wal" > "$capture_check_dir/one.json" \
+  2> "$capture_check_dir/one.stderr"
+"$capture_binary" --scenario nominal \
+  --output "$capture_check_dir/two.wal" > "$capture_check_dir/two.json" \
+  2> "$capture_check_dir/two.stderr"
+cmp "$capture_check_dir/one.wal" "$capture_check_dir/two.wal"
+cmp "$capture_check_dir/one.json" "$capture_check_dir/two.json"
+test ! -s "$capture_check_dir/one.stderr"
+test ! -s "$capture_check_dir/two.stderr"
+sha256sum "$capture_check_dir/one.wal" "$capture_check_dir/two.wal" \
+  "$capture_check_dir/one.json" "$capture_check_dir/two.json"
+"$capture_binary" --scenario heartbeat-pong \
+  --output "$capture_check_dir/pong.wal"
+"$capture_binary" --scenario heartbeat-timeout \
+  --output "$capture_check_dir/timeout.wal"
+```
+
+Run each negative scenario separately with a fresh path and preserve stdout,
+stderr and the actual exit status. Repeat negative scripts to compare normalized
+outcomes. For the existing-path check, save its size/hash before the refusal and
+require byte/hash equality afterward. Unknown-scenario and bounds checks must
+reject without panic. Corruption probes mutate separate copies of a genuinely
+owner-created WAL: middle CRC, torn header/payload, removed ArchiveSeal and bytes
+after ArchiveSeal. Compare existing reader status/error/good prefix; retain the
+original archive and never skip, repair or rejoin a corrupt suffix.
+
+### Final-head checks and evidence
+
+Run every command on the actual committed implementation head, with a clean
+checkout and the verified pin. Focused filters must select real tests.
+
+```sh
+git rev-parse HEAD
+git rev-parse 'HEAD^{tree}'
+git status --porcelain
+rustc --version --verbose
+cargo --version
+rustup show active-toolchain
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo build --workspace --locked
+cargo test --workspace --locked
+cargo test --locked -p radar --test capture_driver
+cargo test --locked --release -p radar --test capture_driver
+cargo test --locked -p radar --test replay
+cargo test --locked -p market-data --test ws_supervisor timer_a_
+cargo test --locked -p recording --test capture_session timer_a_
+cargo test --locked -p recording --test capture_session independent_qa_42_
+cargo build --locked -p radar --example capture_scripted
+git diff --check 8b251e1ef09354a1a205fa152ce7726ea5f5749b HEAD
+git diff --name-only 8b251e1ef09354a1a205fa152ce7726ea5f5749b HEAD
+git diff --exit-code
+git diff --cached --exit-code
+git status --porcelain
+```
+
+Verify lock equality separately: materialize a clean verification copy of that
+final head, run `cargo generate-lockfile --offline` there and require
+`git diff --exit-code -- Cargo.lock`. Do not regenerate or commit excluded Cargo
+files in the worker checkout. Any necessary dependency/manifest delta requires
+the Integrator's explicitly agreed sequential integration and new final-head
+checks.
+
+The evidence ZIP must be accessible to an independent QA worker and include raw
+command logs, fresh WAL/stdout/stderr, negative outcomes, actual HEAD/tree/lock
+hash, source inventory and a manifest/receipt with sizes and SHA256. Verify ZIP
+and manifest integrity. A local Windows path is not an accessible evidence
+artifact. Publish the final receipt in the existing PR/Issue after all commits,
+then verify the three fresh CI jobs and their actual logs on the same head.
+Independent QA and owner acceptance are separate gates.
