@@ -593,3 +593,63 @@ Reviewer returns DESIGN_CHANGES_REQUIRED or
 PROPOSED_CONTRACT_ACCEPTED_WITH_EXPLICIT_STOPS, plus explicit status of full
 implementation scope; a direction-only acceptance cannot unblock code.
 No implementation executor/QA is launched by preparing that packet.
+
+## ADR0004 corrective continuation R1–R3 — 2026-10-10
+
+This appendix preserves the entire preceding Handoff/history and supersedes
+only its completed review-request next action. Canonical
+[ARCH-ALLOC45-ADR4-D1-20261010](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6100334905)
+returned **DESIGN_CHANGES_REQUIRED / FULL_IMPLEMENTATION_SCOPE_NOT_ACCEPTED**
+on reviewed/correction-base `d1c3cf543a8cf529eed825512ff16f667c24a348`, tree
+`85bc560211e1536819452062e9347db986888318`. Direction remains experimental
+ALLOC45-D1 / ADR_FIRST; exact ADR contract and implementation scope are not
+accepted. Same sole Integrator claim6097721380, existing branch/Draft PR47.
+
+Accepted actual main/base remains
+`273bfac01bc7a7954644e5270eb96cc99d787fab`, tree
+`abfca247bbaa6fbad0c9f78d643dc9e8df7b3961`; reviewed parent9c and unchanged
+runtime `e6ccef18075f56d73f42f043dfcd506039a975c0` remain historical inputs.
+The new corrective publication SHA/tree/parent and two related diffs are
+bound by the following #45/47 receipt, never guessed in their own commit.
+
+Only this Handoff appendix and [PROPOSED ADR0004](../adr/0004-public-capture-allocation-boundary.md)
+change. Runtime/vendor/manifests/Cargo.lock/CI/frozen contracts/accepted
+ADRs/specs/APIs remain byte-identical to d1c3. No second executor/PR/QA or
+new application accounting bridge. No publisher archive/file audit is rerun.
+Same environment/toolchain/access: no full setup repetition or new local
+live/protected/release suite for this docs correction.
+
+| Required correction | Proposed document decision / unresolved proof |
+|---|---|
+| R1, §3/§3.1/§3.3/§4 | Explicit PROPOSED deadline/stop parameter delta on14 previously context-free methods; exhaustive27-method T/S/O/C policy table. Timed/setup/refcount/copy methods get the governing original caller context; setup is no bypass for accepted dispatch. Pure borrowed/scalar observations are bounded/nonblocking; local retire/Drop/free/rollback finish or truthfully retain existing accounting after stop/expiry, without allocation/new effects/deadline. Bootstrap uses inline original context before a ledger exists; private Op uses explicit arguments/existing phase facts thereafter. Bounded std/deallocator proof and actual caller mapping remain U4/U6 |
+| R2, §3.2/§4/U4 | Each TLS-error child backing keeps its charge through actual free after safe public source extraction/replacement/moves, beyond wrapper/connection/config/user budget lifetime, aliases/Weak and leaks. Outer wrapper Drop cannot release live extracted backing. Allocation-attached header/deallocator is possible proposed enforcement, not proved stable std interoperability or a demonstrated fatal escape; original error semantics unchanged |
+| R3, §7/U6 | Public TLS surface is not a complete application accounting ABI. Same-T FrameSocket/bytes/owner/WAL/decoder/evidence bridge is undefined/unaccepted; exact cross-crate ownership/admission/free contract and scope require separate review before integration/activation. This increment neither designs nor implements it; missing components NOT_RUN, no whole-app PASS demanded upfront |
+
+U1–U7 remain **UNRESOLVED**; C00–C25 remains source inventory, not complete
+closure. Historical future119 copies/17rs+Cargo.toml/3new files are not
+implementation permission. Extra future path/API/dependency needs its own
+exact scope decision. Signature snippets remain design declarations only.
+
+Historical exact-d1c [CI38070738775](https://github.com/al-gri/pro-sclpng/actions/runs/38070738775)
+has three SUCCESS jobs and578/0/0 including11 compile-fail; regression of
+unchanged runtime, not exact-new-head CI or protected API proof. Following
+receipt records actual new-head CI/status and its source applicability.
+Historical [delivery6100154754](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6100154754)
+and [audit6100200309](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6100200309)
+remain untouched. One canonical full next-review packet is saved in GitHub;
+current #45/47 receipts point to it instead of duplicating its full body.
+
+Preserve H1048576/T8388608/three TLS buffers65536each/Diagnostic131072
+inside T; actual layouts/metadata/Weak/last backing free/prepaid old+new;
+no baseline subtraction/double-count. RSS/stack/native/OS remain separate.
+TLS12/13/verification, all #45 limits/deadlines, TimerA/sole owner/SessionTurn,
+Unknown/original pending same Close/physical cessation/native-control
+fail-stop, ACK NotReconstructed and usable_data=false remain unchanged.
+No new input/cert-count cap, budget increase or dependency substitution.
+
+**One next step:** sequential Architecture/owner review of corrected
+PROPOSED ADR0004 on the actual new publication head, focused on R1–R3 with
+all U1–U7 stops retained. Production gate **FAIL/NOT_PROVEN**;
+fork/runtime/dependent activation **STOPPED**; capture/WAL/replay/independent
+QA **NOT_RUN**. M1 unaccepted; #21/M2 idle. No merge/auto-merge/force-push,
+settings changes or issue closure.

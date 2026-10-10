@@ -23,6 +23,14 @@ Design input publication: `9c1d7c5483f0989a18b62d143fbfc9278905f2e8`, tree
 head/tree are bound by the subsequent #45/47 receipt; this document cannot
 contain its own future commit hash.
 
+Corrective revision: **R1–R3 only**, following
+[ARCH-ALLOC45-ADR4-D1-20261010](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6100334905),
+DESIGN_CHANGES_REQUIRED / FULL_IMPLEMENTATION_SCOPE_NOT_ACCEPTED on
+`d1c3cf543a8cf529eed825512ff16f667c24a348`, tree
+`85bc560211e1536819452062e9347db986888318`. That reviewed head is this
+correction's input, not its future publication identity. All U1–U7 remain
+unresolved; C00–C25 remains an inventory, not complete allocation closure.
+
 Inputs: [receipt6099645626](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6099645626),
 [bounded evidence6099645308](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6099645308),
 [sole claim](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6097721380),
@@ -156,26 +164,36 @@ pub struct ProcessSummary {
 }
 
 impl RetainedBudget {
-    pub fn new() -> Result<Self, BudgetedClientError>;
-    pub fn try_share(&self) -> Result<Self, BudgetedClientError>;
-    pub fn try_downgrade(&self) -> Result<RetainedBudgetWeak, BudgetedClientError>;
-    pub fn snapshot(&self) -> Result<BudgetSnapshot, BudgetedClientError>;
+    pub fn new(deadline: std::time::Instant, stop: &std::sync::atomic::AtomicBool)
+        -> Result<Self, BudgetedClientError>;
+    pub fn try_share(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
+    pub fn try_downgrade(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<RetainedBudgetWeak, BudgetedClientError>;
+    pub fn snapshot(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<BudgetSnapshot, BudgetedClientError>;
     pub fn last_refusal(&self) -> Option<ResourceRefusal>;
 }
 impl RetainedBudgetWeak {
-    pub fn try_share(&self) -> Result<Self, BudgetedClientError>;
-    pub fn try_upgrade(&self) -> Result<Option<RetainedBudget>, BudgetedClientError>;
+    pub fn try_share(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
+    pub fn try_upgrade(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Option<RetainedBudget>, BudgetedClientError>;
 }
 impl BudgetedClientConfigBuilder {
     pub fn new_ring(
         budget: &RetainedBudget,
         roots: &'static [rustls::pki_types::TrustAnchor<'static>],
+        deadline: std::time::Instant, stop: &std::sync::atomic::AtomicBool,
     ) -> Result<Self, BudgetedClientError>;
-    pub fn build(self) -> Result<BudgetedClientConfig, BudgetedClientError>;
+    pub fn build(self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<BudgetedClientConfig, BudgetedClientError>;
 }
 impl BudgetedClientConfig {
-    pub fn try_share(&self) -> Result<Self, BudgetedClientError>;
-    pub fn try_clone_owned(&self) -> Result<Self, BudgetedClientError>;
+    pub fn try_share(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
+    pub fn try_clone_owned(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
     pub fn budget(&self) -> &RetainedBudget;
 }
 impl BudgetedClientConnection {
@@ -201,22 +219,35 @@ impl BudgetedClientConnection {
         &mut self, bytes: &[u8], deadline: std::time::Instant,
         stop: &std::sync::atomic::AtomicBool,
     ) -> Result<usize, BudgetedClientError>;
-    pub fn read_plaintext(&mut self, out: &mut [u8])
-        -> Result<usize, BudgetedClientError>;
+    pub fn read_plaintext(&mut self, out: &mut [u8], deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<usize, BudgetedClientError>;
     pub fn peer_certificate_count(&self) -> usize;
     pub fn peer_certificate(&self, index: usize) -> Option<&[u8]>;
-    pub fn try_copy_peer_certificate(&self, index: usize)
-        -> Result<BudgetedBytes, BudgetedClientError>;
+    pub fn try_copy_peer_certificate(&self, index: usize, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<BudgetedBytes, BudgetedClientError>;
     pub fn phase(&self) -> TlsPhase;
     pub fn wants_write(&self) -> bool;
     pub fn retire_local(&mut self) -> Result<(), BudgetedClientError>;
 }
 impl BudgetedBytes {
     pub fn as_bytes(&self) -> &[u8];
-    pub fn try_share(&self) -> Result<Self, BudgetedClientError>;
-    pub fn try_clone_owned(&self) -> Result<Self, BudgetedClientError>;
+    pub fn try_share(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
+    pub fn try_clone_owned(&self, deadline: std::time::Instant,
+        stop: &std::sync::atomic::AtomicBool) -> Result<Self, BudgetedClientError>;
 }
 ```
+
+**R1 PROPOSED signature delta relative to reviewed d1c3:** add the existing
+`deadline: Instant, stop: &AtomicBool` parameter pair to exactly fourteen
+previously context-free methods: RetainedBudget::{new,try_share,
+try_downgrade,snapshot}, RetainedBudgetWeak::{try_share,try_upgrade},
+BudgetedClientConfigBuilder::{new_ring,build},
+BudgetedClientConfig::{try_share,try_clone_owned},
+BudgetedClientConnection::{read_plaintext,try_copy_peer_certificate}, and
+BudgetedBytes::{try_share,try_clone_owned}. No new public type, variant or
+method is added. These declarations supersede the earlier signature proposal
+for review only; they do not accept or implement an API change.
 
 ### 3.1 Constructor, configuration and callback semantics
 
@@ -258,14 +289,63 @@ callbacks that may allocate are not accepted by the proposed signatures.
 This avoids pretending any third-party callback is covered. It still leaves
 pinned TcpStream/std internals in U4 and app transport ownership in U6.
 
-All operations check original deadline/stop before each allocation/I/O and
-bounded processing segment; no new deadline is started. `process_new_packets`
-and I/O calls receive the original deadline of the current accepted operation
-(TLS handshake, frame read, Send or original Close as applicable), not a new
-timeout and not the expired handshake deadline reused for all later traffic.
-The private owner glue must retain that operation deadline across repeated
-leaf calls and reject a later replacement; this composition obligation is U6.
-Within one leaf call no retry/reservation/callback may extend it. Processing
+All **timed/setup/refcount methods** below receive the original caller
+deadline/stop explicitly and check them before allocation/admission, optional
+waiting, I/O and bounded processing segments. The two context-free classes
+are pure observations and mandatory local cleanup, with the exceptions below;
+the earlier unqualified "all operations" promise does not apply to them.
+`process_new_packets` and I/O calls receive the original deadline of the
+current accepted operation (TLS handshake, frame read, Send or original Close
+as applicable), not a new timeout or the expired handshake deadline reused
+for traffic. No method starts a fresh deadline/stop flag. The caller retains
+the same originals across all leaves/repetitions of that operation; private
+owner glue must reject a later replacement. Its concrete mapping is U6.
+
+For setup calls before a timed dispatch, the source is the caller's already
+governing finite setup-operation deadline and stop flag, passed as arguments;
+this ADR creates no new setup timeout/allowance. In an accepted timed dispatch,
+setup/refcount helpers use that dispatch's original context, not a setup
+exception. The new_ring→build construction sequence retains its original
+construction context through build or failure; splitting it cannot renew the
+deadline. If the caller cannot supply/prove the governing original context,
+that route is unproved/stopped under U6, not implicitly unlimited setup.
+
+Table covers **all27 declared public methods**. T means timed operation;
+S means setup/refcount/copy with the same explicit original-context checks;
+O means bounded nonblocking borrowed/scalar observation, without allocation,
+admission/refcount change, waiting or free; C means required local cleanup.
+
+| Every public method (fully qualified) | Policy / exact context or exception |
+|---|---|
+| RetainedBudget::new | S; explicit caller deadline/stop, inline bootstrap context before any heap ledger exists; no configurable budget/setup timeout |
+| RetainedBudget::{try_share,try_downgrade} | S; explicit current caller context, even for a fixed refcount transaction; no context-free share exception |
+| RetainedBudget::snapshot | T; explicit caller context for consistent ledger synchronization; AdmissionBusy/DeadlineExpired/Stopped rather than an unbounded wait |
+| RetainedBudget::last_refusal | O; fixed-size consistent observation only, no hidden blocking lock, clone allocation or physical-completion inference; concrete bounded read is U4 |
+| RetainedBudgetWeak::{try_share,try_upgrade} | S; explicit caller context for checked refcounts/liveness; no new backing or expired-dispatch upgrade entitlement |
+| BudgetedClientConfigBuilder::{new_ring,build} | S; explicit original construction/caller context, including provider/root/verifier work; build failure still performs C cleanup |
+| BudgetedClientConfig::{try_share,try_clone_owned} | S; explicit caller context; owned clone pre-admits every new backing, sharing checks refcounts without changing existing backing charge |
+| BudgetedClientConfig::budget | O; borrowed reference only, no retained-handle clone/admission |
+| BudgetedClientConnection::{new,read_tls,process_new_packets,write_tls,write_plaintext} | T; existing explicit deadline/stop from current original operation; phase/engine I/O facts supply ErrorContext |
+| BudgetedClientConnection::read_plaintext | T; new explicit deadline/stop for copying/popping chunks; a stopped/expired call starts no new read/pop, but required cleanup for work already performed is C |
+| BudgetedClientConnection::try_copy_peer_certificate | T; new explicit current original context before H copy/reservation; borrowed input does not exempt its owned output |
+| BudgetedClientConnection::{peer_certificate_count,peer_certificate,phase,wants_write} | O; borrowed/scalar state access only, no allocation/wait/free or command completion authority |
+| BudgetedClientConnection::retire_local | C; no deadline/stop argument or fresh context; mark unusable and truthfully release/defer existing local backing without I/O/new admission, even after expiry/stop; no Ready/Close success |
+| BudgetedBytes::as_bytes | O; borrowed slice only; no partial-backing charge release |
+| BudgetedBytes::{try_share,try_clone_owned} | S; new explicit caller context; distinguish checked alias refcount from separately pre-admitted true copy |
+
+O/C exceptions cannot authorize allocating work, optional waiting, network
+effects or continued non-Close service in an expired/stopped accepted dispatch.
+Any observed value is diagnostic only. Required Drop/free/rollback/refcount
+decrement and cleanup of a partially executed T/S call are **C**, even after
+the parent context expires/stops: never skip them or remove a still-live charge
+because deadline checks failed. C may not allocate, upgrade/share a new owner,
+retry an effect or wait indefinitely. Completion of actual free/accounting,
+or honest retention in already-paid deferred metadata, is mandatory. Bounded
+std/storage/deallocator/reclamation proof is still U4; exact app ownership/
+deadline composition is U6. A textual exception is not that proof.
+
+Within one leaf call no retry/reservation/callback may extend its deadline.
+Processing
 never writes to the network. `write_plaintext` can enqueue/encrypt locally
 but never performs socket I/O. `write_tls` may write only previously queued
 records, with preflight for its entire reachable operation closure; it is not
@@ -310,9 +390,17 @@ Partial write/read progress is reported as actual returned bytes, never
 rolled back. IoProgress accumulates checked totals for the engine lifetime;
 caller Connect/Send/Close effects predating this engine are additionally
 retained by the adapter. A scalar progress value is diagnostic, not an
-authority-minted completion/absence-of-effect proof. `Tls` error backing
-remains charged until the error itself drops; copying/formatting it outside
-this API is part of the remaining app proof.
+authority-minted completion/absence-of-effect proof. **R2:** each backing
+reachable from `Tls.source: rustls::Error` stays charged through its **actual
+free**, not merely the outer BudgetedClientError's Drop. Safe moves or
+extraction of the public source/its owned fields, replacement of that field
+or enum, and ownership outside the connection/config/user-facing budget
+handle do not release or reclassify surviving backing. An extracted source
+may outlive all those handles. Its aliases/control blocks remain charged
+through last actual backing/Weak free; leaked backing remains charged.
+Separately copied error backing requires its own identity/pre-admission;
+copying/formatting outside this API remains part of U4/U6, not protected by
+the wrapper. Original certificate/protocol error semantics are unchanged.
 
 ### 3.3 Required private provider/verifier/parser/storage interfaces
 
@@ -323,6 +411,18 @@ it creates no heap or new timeout. Private storage types own their charged
 backing and have no infallible Clone or escape to untracked Vec/Box/Arc.
 The declarations fix inputs/outputs/error propagation for the required
 adapters; U1–U4 still block their implementation and interoperability.
+
+R1 context construction: T/S leaves build private Op from their explicit
+original deadline/stop and existing ledger, never Instant::now()+timeout or
+a new flag. Connection methods copy their current phase/cumulative I/O facts;
+standalone setup/ledger/config/bytes methods have local Setup/zero-I/O facts,
+which say nothing about earlier caller effects. The adapter preserves those
+earlier facts separately. Before RetainedBudget::new has a ledger, bootstrap
+uses the same borrowed deadline/stop and inline Setup facts; it does not
+construct an Op requiring a nonexistent budget. Once initialized, it can
+borrow that ledger. O needs no Op. C cleanup must not synthesize a fresh Op
+to evade expiry or demand a still-live operation token; it uses existing
+ownership/accounting metadata and the mandatory §4 reclamation obligation.
 
 ```rust,ignore
 struct Op<'a> {
@@ -529,6 +629,19 @@ last strong. Ledger core itself survives while any allocation/deallocator or
 weak handle references it; its charge is not removed when ACTIVE/handshake or
 the last user-facing connection ends. Leaked/referenced backing stays charged.
 
+R2 includes public rustls::Error source extraction/replacement and moves of
+its String/Vec/other owned children. The allocation identity, original H/T
+membership and ledger retention must follow **each allocation**, independent
+of which Rust wrapper currently contains its pointer. Dropping an outer
+error guard cannot free a live extracted source's charge. An allocation-
+attached header/deallocator retaining the ledger is a possible proposed
+mechanism, not established interoperability with ordinary stable std-owned
+storage or every copied/error variant. Source moved beyond the connection/
+config/budget, aliases/Weak and leaks must obey the same physical-free rule.
+U4 explicitly blocks any claim of lawful enforcement until that mechanism
+is proved; this precision neither demonstrates a fatal escape nor changes
+accepted error semantics.
+
 Admission synchronization never holds its lock while invoking provider,
 verifier, user callback, logging, System allocator or I/O. Reservation and
 commit are separate short transactions while reserved bytes remain visible.
@@ -540,6 +653,14 @@ physical free and authenticated accounting update; any deferred record must
 use already-paid metadata and retain backing safely. The exact nonblocking
 reclamation protocol, deadlines and Arc interoperability are **U4**, not a
 claim that this text proves them. Race/recursive-free tests must close U4.
+
+R1 cleanup is required even after stop/deadline expiry. Operational admission
+may refuse, but existing allocations/reservations/refcount decrements cannot
+be abandoned by a stop check. If bounded reclamation cannot finish, retain
+real ownership/charges with already-paid metadata and report the unresolved
+state; do not claim free, zero retained bytes or physical owner completion.
+No unbounded cleanup allowance, new deadline or invented successful result
+is granted; its actual storage/deallocator bound remains U4/U6.
 
 Refusal is a fixed inline enum/scalars plus a bounded slot overwrite; no
 format!, Vec, String, Arc/Box creation, IO error boxing, unwinding, panic,
@@ -690,6 +811,17 @@ validator clones/encoder Vecs, JSON/decoded copies, signals, config/evidence
 or capture/replay ownership. They need the same T ledger and separate source/
 pre-admission/lifetime proof of the real application composition.
 
+**R3 / explicit U6 ABI stop:** the §3 public TLS surface is **not a complete
+application accounting ABI**. Borrowing/sharing RetainedBudget does not define
+a general cross-crate admission/storage/free interface. The same-T bridge
+for FrameSocket/bytes/config/owner/supervisor/WAL/decoder/evidence is still
+**undefined and unaccepted**. Its exact cross-crate ownership, admission,
+allocation identity, alias/free/lifetime contract and permitted API/path
+scope require a separate Architecture/owner review before U6 integration
+or activation. This corrective increment does not design or implement that
+bridge or add a general-purpose app budget API. Absent components remain
+NOT_RUN; there is no demand for whole-app PASS before they exist.
+
 An existing one-byte Bytes payload+clone retains131072 backing +40 shared
 metadata until final alias drop. Conservative owner encoding workspace
 8×MAX_FRAME_LEN and supervisor decoder report24,146,960 are reports, not
@@ -763,9 +895,9 @@ and no unapproved packages are required, not assumed (U5).
 | U1 rustls helper/provider closure beyond17 | At minimum `src/builder.rs`, `src/client/common.rs`, `src/msgs/message/mod.rs`, `src/msgs/message/outbound.rs`, `src/hash_hs.rs`, `src/crypto/mod.rs`, `src/crypto/ring/{mod,kx,hash,hmac,tls12,tls13}.rs`, `src/crypto/{hash,hmac,tls12,tls13,cipher}.rs`, `src/tls12/mod.rs`, `src/webpki/{server_verifier,verify}.rs`, `src/check.rs`, `src/rand.rs`, `src/x509.rs`, `src/msgs/persist.rs` contain C03/C09/C12–17/C22/C25 allocations or direct-return allocation callback contracts outside17; `src/record_layer.rs` reaches initial cipher constructors and needs explicit zero-sized Layout/branch proof, not an automatic edit | Request a reviewed, exact additional rustls path/API delta OR a source-complete equivalent bypass/prepaid implementation design confined to17. This ADR requests neither automatic expansion nor algorithm removal; original17 cannot be accepted as a closed scope without that resolution |
 | U2 pki-types/webpki ownership/error closure | pki-owned Clone/into_owned plus webpki `src/verify_cert.rs:565–585,667–670` owned EKU diagnostic growth and rustls error conversion | Decide how a lawful pre-admitted upper bound/fallible storage preserves all verification/EKU/error semantics. A pki/webpki patch would require separately named version/files/contract/provenance; not in ALLOC45-D1 and not approved here |
 | U3 ring RSA working heap | ring `src/arithmetic/bigint/{boxed_limbs,modulus,modulusvalue}.rs`, `src/arithmetic/bigint.rs`, `src/rsa/{verification,public_key,public_modulus}.rs` reachable zero/clone/Montgomery temporaries; callback Result does not make them fallible | Require complete per-algorithm allocation multiplicity/lifetime/upper-bound and lawful allocator-null mechanism. Any ring source/API change is a separate dependency delta; keep all current verification algorithms, no native exclusion or substitution |
-| U4 stable storage/std/ledger concurrency | Box/Arc direct-return interfaces, Weak backing, pinned1.98.1 std allocation/IO/error source, intrusive header alignment, atomic reservation and contention-safe free/refcount/bootstrap not yet implemented/proved | Review concrete stable fallible ownership/storage plus linearizable nonallocating reclamation and deadline contract before implementation. No nightly, private Arc Layout, unwind, null→abort or ACTIVE baseline workaround |
+| U4 stable storage/std/ledger concurrency | Box/Arc direct-return interfaces, Weak backing, pinned1.98.1 std allocation/IO/error source, intrusive header alignment, atomic reservation and contention-safe free/refcount/bootstrap not yet implemented/proved; R1 timed-versus-required-cleanup bounds and R2 public extracted/replaced TLS-error backing lifetime still need actual stable allocation/deallocator interoperability | Review concrete stable fallible ownership/storage plus linearizable nonallocating reclamation and original-context contract before implementation. Each extracted error child/alias/Weak/leak remains charged to actual free beyond wrapper/connection/config/budget lifetime; allocation-attached enforcement is only a proposal. No proven fatal escape or accepted error change; no nightly, private Arc Layout, unwind, null→abort or ACTIVE baseline workaround |
 | U5 integration/provenance | Vendor workspace membership, publisher119-file manifest, fork feature graph/dev deps/offline resolution and Cargo-generated lock not instantiated | Full future allowlist must name permitted manifest/lock integration and preserve other package versions. No vendor/manifests/lock change during docs stage |
-| U6 remaining application proof | FrameSocket/bytes/owner/WAL/decoder/evidence/config/signal paths are not protected by this fork; full application is absent | Separate actual composition/admission proof in existing allowed app paths; accepted project APIs untouched. Missing components NOT_RUN, live gate blocked |
+| U6 remaining application proof / accounting ABI | FrameSocket/bytes/owner/WAL/decoder/evidence/config/signal paths are not protected by this fork; full application is absent; R3 same-T cross-crate ownership/admission/free bridge and original caller-context mapping are undefined/unaccepted, and §3 is not a complete application accounting ABI | Separate review of exact bridge contract/API/path scope is required before U6 integration/activation, followed by actual composition/admission/lifetime proof. This increment neither designs that bridge nor grants scope; accepted project APIs untouched. Missing components NOT_RUN, no upfront whole-app proof demand, live gate blocked |
 | U7 complete call-site audit | Current source map follows reachable families, not compiler-certified exhaustive graph; derived Clone/Codec variants/error/drop/callback feature branches need individual coverage | Implementation packet must attach all source sites/Layouts/capacities, callback envelopes and tests on exact versions. Any new reachable path/API/dependency is a stop; never mark this inventory complete because representative probes pass |
 
 These are concrete blockers to a full implementation scope, not permission
@@ -809,12 +941,12 @@ be resolved before those tests can justify gate acceptance.
 | Bootstrap/control/evidence | First allocation preceded by full T precheck; core/headers/diagnostics/control all included; partial null rollback and last Weak free | NOT_RUN |
 | Exact limits/overflow | T/H/every buffer limit−1/equal/+1; checked Layout/add/mul/refcounts, no saturation; refusal counters and underlying alloc calls0 | NOT_RUN |
 | Allocation/realloc/null | Fallible alloc success/null, prepaid old+new moving growth and shrink, failure preserves old pointer/cap/content, old free ordering; allocator-null calls1 distinguished | NOT_RUN |
-| Aliases/true copies/phase | Config/root/peer-chain sharing versus deep copies, partial chunk, Weak controls, phase transfer, retained error backing, final free; ledger itself remains charged | NOT_RUN |
+| Aliases/true copies/phase | Config/root/peer-chain sharing versus deep copies, partial chunk, Weak controls, phase transfer, TLS-error public source extraction/replacement/moved children outliving connection/config/budget, leaks and each actual final free; ledger itself remains charged | NOT_RUN |
 | Concurrency/recursion | Competing T/H/buffer admissions never overcommit; reserve/consume/free/rollback/refcount races; nonallocating refusal/logging/drop; deadline-safe contention, no recursive allocator lock | NOT_RUN |
 | Normal TLS12/13 | Protected config creation→handshake→traffic→retire/free, real cert/name/signature verification, both protocol versions, no resumption/0RTT | NOT_RUN |
 | Adversarial TLS | Fragmented large lists/empty DER/malformed DER, nested extensions/OCSP, wrong EKU/OID errors, RSA/ECDSA/Ed25519 chains, tickets/key updates/alerts and unknown messages; no new input/cert-count cap | NOT_RUN |
 | Returned outcomes | Over-budget zero underlying alloc/I/O calls before rejected proposal; typed returned ResourceRefused, no quota SIGABRT/panic/unwind; no invented certificate/owner/Close success | NOT_RUN |
-| Network/deadlines/owner | Refusal before and after actual TCP/TLS read/partial write, original deadlines/stop/quantum; genuine dispatch Unknown; original same Close Pending on Err/Drop and only genuine physical cessation completion | NOT_RUN |
+| Network/deadlines/owner | R1 all27-method policy/context mapping, original-context T/S checks and nonblocking O/C exceptions; mandatory free/rollback/Drop after stop/expiry without new effects/deadline; refusal before/after actual TCP/TLS read/partial write, original deadlines/stop/quantum; genuine dispatch Unknown, same Close Pending on Err/Drop and only genuine physical cessation completion | NOT_RUN |
 | Remaining application | Actual FrameSocket/bytes/config/authority/supervisor/storage/decoder/evidence composition, all backing counted once, baseline included; separate RSS/stack/native/OS disclosure | NOT_RUN |
 | Migration/regression | Frozen F1/F2, accepted crates/ADR/spec/WAL byte hashes unchanged; same ownership/TimerA/native-control/ACK diagnostics | Runtime unchanged in this docs stage; future implementation NOT_RUN |
 | Build/provenance | Exact publisher/fork source and feature closure, pinned1.98.1, locked online preparation then offline fmt/Clippy/build/tests AND release; decoded exact-head CI and clean checkout | Future implementation NOT_RUN; current docs CI reported in #45/47 after publication |
