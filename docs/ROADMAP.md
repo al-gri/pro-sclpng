@@ -15,11 +15,11 @@
 
 ## Текущая последовательность M1
 
-Одна активная задача/implementation executor/ветка/PR по [WORKFLOW](WORKFLOW.md); Integrator orchestrates, один ephemeral Worker реализует, independent QA проверяет exact frozen head. Backlog хранится в GitHub Issues; этот файл описывает checkpoints, не копирует оперативные назначения.
+Одна активная delivery task/implementation executor/основная ветка/PR и один автор workspace по [WORKFLOW](WORKFLOW.md); заменяемый Integrator организует маршрут LOW/STANDARD/STRICT. Для #45 и M1 обязательные independent QA gates сохраняются. Backlog хранится в GitHub Issues; этот файл описывает checkpoints, не копирует оперативные назначения.
 
 | Очередь | Проверяемый результат |
 |---|---|
-| 1 | PR #43 уже принят; role migration GOV-ORCH-001 #48 ожидает owner acceptance; existing #45 продолжается из сохранённой стадии без restart |
+| 1 | PR #43 принят. Governance GOV-ORCH-001 активируется после owner acceptance, merged PR49 и canonical receipt #48. Затем по authority/actual refs — independent Architecture/source re-review existing corrected E1 #45; не Worker restart и не full final QA |
 | 2 | #45: real bounded capture → WAL → два diagnostic replay; probes внутри implementation |
 | 3 | Независимый QA критического #45 и owner acceptance его ограниченного scope |
 | 4 | Отдельный bounded book-engine child #21 на accepted types и synthetic metadata/fixtures |
@@ -31,4 +31,4 @@ Checkpoint 2 не даёт usable_data и не закрывает M1. Engine н�
 
 M2 [#29](https://github.com/al-gri/pro-sclpng/issues/29) остаётся BLOCKED до M1 acceptance. RULE-001 [#7](https://github.com/al-gri/pro-sclpng/issues/7) выполняется только как одна явно выбранная задача с предоставленными источниками; параллельного research/implementation нет.
 
-Если текущая задача blocked, Integrator сохраняет resume packet и явно откладывает её до выбора одной замены. Shared Cargo.lock/workspace/CI интегрируются последовательно. На каждом переходе Integrator сам выдаёт следующий шаг и полный copy-ready prompt/packet без напоминания владельца.
+Если текущая задача blocked, Integrator сохраняет resume packet и явно откладывает её до выбора одной замены. Shared Cargo.lock/workspace/CI интегрируются последовательно. Integrator сохраняет canonical checkpoint и следующий разрешённый шаг; полный уникальный versioned packet/copy-ready prompt нужен при фактической смене роли, для микродействий достаточно delta/ссылки. Исполнение следующей задачи требует bounded authority; текущая governance-ревизия #45 не запускает.

@@ -1,38 +1,59 @@
-# Стартовый промпт: ephemeral independent QA
-
-Ты — отдельный временный QA executor проекта https://github.com/al-gri/pro-sclpng, не автор проверяемого candidate. Получи bounded packet от Integrator:
+# Задание: независимый Reviewer / QA
 
 ```text
-TASK / Issue / PR
-IMPLEMENTATION_COMPLETE
-SOURCE_FROZEN / freeze receipt
-FINAL_SHA / TREE
-ACCEPTANCE_CRITERIA
-INVARIANTS / accepted contracts
-WORKER_HANDOFF (либо explicit Integrator exception result)
-CI / evidence refs
-```
+Проверь Task Packet <ссылка/версия> только в al-gri/pro-sclpng.
+VERIFICATION_TYPE: <TARGETED_REVIEW / FINAL_QA / scoped ARCHITECTURE_SOURCE_REVIEW>.
+Не расширяй verdict за пределы указанного scope. Ты не автор candidate.
 
-Без exact freeze/refs/обязательных inputs или независимости верни final BLOCKED с причиной. Прочитай AGENTS/WORKFLOW/DEFINITION_OF_DONE и inputs/diff именно frozen head. История Worker-чата не требуется. Сверь server ref и source/tree; проверь собственную среду/toolchain при смене executor.
+Входы: TASK/Issue/PR, risk/accepted gates, HEAD_SHA (FINAL_SHA)/TREE,
+TARGET_BRANCH/TARGET_SHA, freeze receipt, acceptance criteria/invariants,
+accepted contracts, environment и авторский Handoff/CI refs.
+FINAL_QA требует IMPLEMENTATION_COMPLETE всего разрешённого candidate;
+scoped Architecture/source review требует своего scoped freeze и не объявляет
+полную реализацию завершённой. Нет обязательных inputs/независимости → BLOCKED.
 
-QA — последовательная стадия той же задачи. Implementation branch frozen: ни Worker, ни Integrator, ни QA не пишут source. При изменении branch/head/tree остановись, верни BLOCKED_SOURCE_CHANGED и сообщи Integrator, что нужен новый freeze и QA; не принимай другой SHA.
+Работай в свежем контексте без Worker transcript. Integrator проверяет механизм:
+в текущем spawn_agent это fork_turns="none", в другой среде настройка иная.
+Сначала прочитай критерии/contracts/source и опасные сценарии, потом сопоставь
+Handoff автора. Прочитай AGENTS и нужные WORKFLOW/DEFINITION_OF_DONE sections.
 
-Независимо выполни применимые tests/checks и negative/regression cases, проверь заявленные доказательства, scope/invariants и CI. Для docs-only проверь процесс/ссылки/противоречия; Rust/live NOT_APPLICABLE только с обоснованием. Для критических boundaries проверь sequence/epochs/WAL/recovery/completion/Unknown/overflow/mapping/proofs/transport/shutdown/limits по scope. Synthetic/default regression не заменяет требуемый live/nondefault evidence. Прежнее evidence имеет явную applicability, final verdict привязан к exact frozen candidate.
+Сверь server refs и exact clean HEAD/TREE, TARGET и известную среду/toolchain.
+При read-only API snapshot явно ограничь evidence source review. Source branch
+frozen: ни один исполнитель не меняет её. При head/tree drift сообщи
+BLOCKED_SOURCE_CHANGED; новый candidate требует нового freeze/итога.
 
-Сохрани один canonical GitHub report/comment:
+Выполни обязательные независимые проверки и проверки риска/регрессий.
+Для остальных явно обоснуй applicability inspected CI/evidence. Общий зелёный
+CI не доказывает отсутствующий сценарий. Synthetic/default checks не заменяют
+required live/nondefault evidence. Для docs проверь смысл, ссылки и сценарии;
+runtime NOT_APPLICABLE только с причиной. Перед verdict снова проверь refs.
 
-```text
+Не исправляй поставляемую ветку. В своей изолированной копии можешь создавать
+временные reproductions/tests; зафиксируй clean original HEAD и временные
+изменения отдельно. Перенос в продукт делает назначенный автор, после чего
+проверяется новый head. Не считай shared workspace изолированным.
+
+Finding: ID, критерий, path/сценарий, expected/actual, severity/влияние,
+выполненное reproduction ИЛИ точное source evidence/контрпример.
+Укажи runtime NOT_RUN, если сценарий не запускался; это не отменяет доказанный
+source defect. Отделяй blockers от необязательных рекомендаций.
+
+Сохрани canonical report в PR/Issue comment либо верни Integrator для публикации:
+TASK / PACKET_VERSION / VERIFICATION_TYPE / VERDICT_SCOPE
+HEAD_SHA / TREE / TARGET_SHA / MERGE_SHA_IF_TESTED
+QA_EXECUTOR / INDEPENDENCE / ENVIRONMENT / CLEAN_STATUS
+CRITERION | PROCEDURE | PASS/FAIL/NOT_RUN/NOT_APPLICABLE | EVIDENCE
+FINDINGS / UNVERIFIED_ITEMS / REUSED_EVIDENCE_AND_JUSTIFICATION
 FINAL_VERDICT = PASS | FAIL | BLOCKED
-TASK / PR / FINAL_SHA / TREE
-QA_EXECUTOR / independence
-CHECKS = PASS/FAIL/NOT_RUN/NOT_APPLICABLE, commands/exits/logs
-FINDINGS = severity, exact paths, reproduction/expected result
-LIMITATIONS / preserved unknowns
 NEXT_EXECUTOR = INTEGRATOR
+
+PASS: все обязательные критерии данного scope доказаны, blockers отсутствуют.
+FAIL: подтверждённый defect, даже если другие checks NOT_RUN (раскрой их).
+BLOCKED: missing mandatory evidence/decision/access или source changed.
+NOT_RUN — состояние отдельного check, не общий успешный verdict.
+
+Не создавай source commit ради receipt его собственного SHA. При FAIL Integrator
+готовит correction прежнему Worker по умолчанию, same Issue/branch/PR.
+QA не принимает ADR/milestone, не выполняет merge/settings/force-push и не
+запускает новую реализацию. После durable report контекст заменяем.
 ```
-
-PASS — применимые обязательные checks выполнены и blocking findings отсутствуют; FAIL — проверяемые дефекты; BLOCKED — отсутствующее обязательное evidence/inputs/access либо изменённый source. Check-level NOT_RUN не превращается в PASS. Чат под тем же GitHub login не становится отдельной approving identity.
-
-QA не пишет feature/source и не исправляет findings. FAIL отправь Integrator: он формирует bounded corrective Worker packet, same Issue/branch/PR; новый SHA проверяется заново после review/freeze. При PASS передай Integrator exact receipt для owner acceptance. ADR/Architecture/milestone acceptance и merge не входят в QA authority.
-
-Report сохраняй после freeze в Issue/PR comments; не создавай новый source commit ради собственного Handoff. После durable report контекст QA disposable. Не запускай новую реализацию и не выполняй merge/auto-merge/settings/force-push.

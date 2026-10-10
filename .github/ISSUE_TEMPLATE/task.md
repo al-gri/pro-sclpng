@@ -1,45 +1,57 @@
 ---
 name: Sequential engineering task
-about: Одна bounded задача; ephemeral Worker и независимый QA после freeze
+about: Одна bounded задача; проверка по риску с сохранением обязательных gates
 labels: ''
 assignees: ''
 ---
 
-## TASK / objective / result
+## Канонический указатель / TASK
 
-## Lifecycle / dependencies / assignment
+PACKET_VERSION / latest authorized transition receipt:
+UI_STAGE = READY | IMPLEMENTING | VERIFYING | READY_TO_MERGE | DONE (либо BLOCKED/PAUSED):
+DETAILED_STATUS / BRANCH / PR:
+CURRENT_WRITER / WORKSPACE / FREEZE / BLOCKERS / NEXT_ACTION:
 
-STATUS = READY_FOR_WORKER | WORKER_ACTIVE | IMPLEMENTATION_READY | INTEGRATOR_REVIEW | SOURCE_FROZEN | QA_ACTIVE | QA_FAILED | CORRECTION_READY | QA_PASSED | OWNER_ACCEPTANCE | ACCEPTED_IN_MAIN | BLOCKED_*
-BASE_SHA:
-BRANCH / PR:
-Integrator / one Worker / separate QA identity:
-EXECUTOR_EXCEPTION / REASON / SCOPE (только если Integrator пишет):
-Environment / pinned toolchain / actual spawn capability:
+Этот блок указывает на единственный актуальный packet/result; история сохраняется. Последний произвольный comment не заменяет авторизованный переход.
 
-## Bounded inputs / scope / contracts
+## Bounded packet
 
-Accepted specs/ADR/invariants; files_allowed; forbidden scope. Root Cargo.toml/Cargo.lock/workspace/CI — sequential Integrator ownership; никаких concurrent writers.
+GOAL / ACCEPTANCE (criterion IDs):
+SCOPE / FILES_ALLOWED / NON_GOALS:
+CONTRACTS / ACCEPTED_DECISIONS / DEPENDENCIES:
+START_SHA / TARGET_BRANCH / TARGET_SHA:
+ENVIRONMENT / CLEAN_CHECKOUT / TOOLCHAIN:
+WRITER / SHARED_FILES_OWNER (paths, existing claim/transfer):
+EXECUTOR_EXCEPTION / REASON / SCOPE (если Integrator автор):
+RISK = LOW | STANDARD | STRICT / REASON / REVIEW_TYPE / REQUIRED_GATES:
+AUTHORITY (link, bounded actions/queue, stops):
+HANDOFF_TO:
 
-## Acceptance commands / evidence
+LOW — только опечатка/несемантическое оформление. Governance/specs/contracts/security/изменение gate не LOW. STANDARD — Worker и fresh independent targeted review; STRICT — independent QA и принятые gates. Existing CI обязателен. Shared/lock/CI имеют одного packet owner; текущий claim сохраняется до передачи.
 
-Applicable positive/negative/replay checks; actual/synthetic provenance; required evidence.
-Feasibility probes внутри implementation; contract/budget/activation gates сохраняются.
+## Checks / evidence
 
-## Start / stop / blocker
+| Criterion | Procedure / command | Expected result | Evidence / required independent run |
+|---|---|---|---|
 
-Start: accepted inputs/scope, exact base, один implementation executor и способ проверок.
-Stop: непринятый contract/ADR, scope violation, source changed during QA, unsafe behavior.
-Live NOT_RUN блокирует live acceptance. Cause/action/retained refs/resume condition сохраняются перед откладыванием.
+Feasibility probes внутри implementation; contract/budget/activation gates сохраняются. Live NOT_RUN блокирует live acceptance, synthetic не выдаётся за real capture.
 
-## Delivery / freeze / independent QA
+## Start / stop / recovery
 
-Worker result: TASK / BASE_SHA / FINAL_SHA / TREE / PR / CHANGED_PATHS / CHECKS / KNOWN_UNKNOWNS_PRESERVED / HANDOFF_PATH.
-Integrator review -> IMPLEMENTATION_COMPLETE / SOURCE_FROZEN / FINAL_SHA / TREE -> separate QA packet.
-QA final PASS/FAIL/BLOCKED; FAIL -> Integrator bounded corrective Worker, same Issue/branch/PR, new freeze/QA. Source writes during QA запрещены.
+Start: accepted inputs/scope/authority, START_SHA, один автор и способ проверки.
+Stops: непринятый contract/ADR, scope/ownership conflict, drift frozen source, missing required evidence.
+Cause / owner action / retained refs or patch / resume condition:
 
-## Durable handoff / один следующий шаг
+## Delivery / review
 
-Canonical packet/result/CI/QA/acceptance receipts в GitHub; контекст Worker/QA disposable.
-NEXT_EXECUTOR / actual AUTOSPAWN or UNAVAILABLE_IN_CURRENT_ENVIRONMENT:
-Full saved copy-ready prompt / packet URL:
-Owner/Architecture authority и отдельный merge сохраняются.
+Worker result: TASK/PACKET_VERSION/START_SHA/HEAD_SHA/TREE/TARGET_SHA/CHANGED_PATHS/CHECKS/KNOWN_UNKNOWNS_PRESERVED/HANDOFF_PATH/dirty files.
+Integrator review → IMPLEMENTATION_COMPLETE/SOURCE_FROZEN/exact HEAD/TREE/TARGET → проверка по риску.
+Verdict PASS/FAIL/BLOCKED; check-level NOT_RUN/NOT_APPLICABLE отдельно. Новый commit → новый итог; receipts в comments, не self-SHA commit. QA пишет временные reproductions только в своей копии.
+
+## Передача / checkpoint
+
+NEXT_EXECUTOR / actual agent status либо AUTOSPAWN=UNAVAILABLE_IN_CURRENT_ENVIRONMENT:
+Canonical versioned full packet / copy-ready prompt URL:
+Freeze / evidence / unresolved findings / one next authorized action:
+
+Полный уникальный пакет сохранять при реальном role transfer; микрообновления — delta/ссылки. Merge/ADR/milestone — отдельная authority. Goal/расписание/новые пользовательские чаты и сообщения другим чатам не подразумеваются задачей.

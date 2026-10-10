@@ -1,21 +1,22 @@
 # Definition of Done
 
-Применять [последовательный WORKFLOW](WORKFLOW.md). Начало реализации, готовность PR и принятие milestone — разные решения.
+Применять [WORKFLOW](WORKFLOW.md) и его условия активации. Начало реализации, готовность PR и milestone acceptance — разные решения.
 
 ## Любая задача
 
-- Scope соблюдён; отсутствуют неутверждённые изменения contracts/семантики.
-- Код/документ и результат сохранены в GitHub. PR report содержит actual base/head и выполняет роль Handoff.
-- Применимые checks имеют PASS/FAIL/NOT_RUN, executor и exit code/log/CI reference. NOT_APPLICABLE допустим с причиной для проверки вне scope.
-- IMPLEMENTATION_COMPLETE / SOURCE_FROZEN / exact FINAL_SHA/TREE сохранены после Integrator review/shared edits. Final independent QA PASS и требуемые review/CI относятся к этому candidate; любой новый source commit требует нового review/freeze/QA. Применимость прошлого специального evidence указана явно.
-- Отдельный ephemeral QA после freeze возвращает PASS/FAIL/BLOCKED; documentary scope не выдумывает runtime tests. Риск определён по последствиям; критические boundaries сохраняют дополнительные independent review/negative gates. Самопроверка автора отмечается отдельно. QA FAIL исправляет один Worker по corrective packet Integrator, same Issue/branch/PR; QA source не пишет.
-- Нет секретов, приватных источников и больших raw archives; limitations/blockers/evidence refs явны.
-- Владелец принимает merge. DONE не означает только Draft PR или зелёный CI.
-- Integrator автоматически сохраняет один следующий bounded packet/full prompt и при доступном orchestration запускает Worker/QA последовательно. При unavailable spawn честный fallback. Worker/QA result содержит exact refs/tree/checks/preserved unknowns/Handoff; их contexts disposable, GitHub — durable context. Owner/Architecture принятие ADR/milestone и merge остаются отдельными.
+- Scope/accepted contracts соблюдены; риск и причина записаны в canonical packet. Один автор/workspace, shared owner и authority известны.
+- Результат сохранён в GitHub; Issue содержит canonical pointer, PR — Handoff со START/HEAD/TREE/TARGET и средой/clean status. MERGE_SHA только фактический, если проверен.
+- Критерии связаны с checks/evidence. Check-level PASS/FAIL/NOT_RUN/NOT_APPLICABLE (с причиной) отделены от общего verdict PASS/FAIL/BLOCKED.
+- После integration edits зафиксированы IMPLEMENTATION_COMPLETE/SOURCE_FROZEN/exact candidate. LOW: diff и подходящие checks; STANDARD: Worker и свежий independent targeted review; STRICT: independent QA и все accepted gates. Все обязательные CI сохраняются, включая для LOW. Новый commit получает новый итог по риску; reuse evidence обоснован.
+- Самопроверка автора обозначена отдельно. Review/QA идёт в свежем контексте без inherited Worker transcript и на чистом закреплённом snapshot/известной среде. QA не пишет delivery branch; временные reproductions в своей копии описаны отдельно. Finding может иметь точное source evidence при runtime NOT_RUN.
+- FAIL возвращается прежнему Worker по умолчанию через bounded packet Integrator, same Issue/branch/PR; два цикла той же ошибочной гипотезы требуют смены подхода. BLOCKED имеет cause/action/resume condition.
+- Нет секретов/private sources/raw archives; limitations/unknowns и evidence refs явны. Исторические receipts не переписаны.
+- Перед merge actual HEAD/TARGET, required checks/up-to-date protection и findings перепроверены; есть отдельное owner решение. DONE — подтверждённый результат в main с required integration checks, не Draft/CI PASS. ADR/milestone authority остаётся отдельной.
+- Checkpoint и один следующий разрешённый шаг сохранены. Полный уникальный packet/copy-ready prompt нужен для реальной передачи роли; микродействия не дублируют его. Spawn по risk route при доступном orchestration; иначе честный fallback. Новая задача — только в границах bounded authority после принятия/явного откладывания текущей.
 
 ## Docs-only
 
-Проверить scope, ссылки, статусы, provenance и отсутствие противоречий действующим правилам. Runtime локально обычно NOT_APPLICABLE; если CI реально запустил Rust, указать его отдельно и честно. Новые source/semantic policies и архитектурные решения требуют содержательного независимого review/owner acceptance по риску.
+Проверить scope, ссылки, статусы, provenance и смысловую согласованность сценариев. Только опечатка/несемантическое оформление может быть LOW. Governance/specs/contracts/security и изменение gate исключены из LOW; эта ревизия #48/PR49 требует independent documentary QA и existing CI. Runtime локально обычно NOT_APPLICABLE с причиной; реально выполненный CI указать отдельно. Source/semantic policy/архитектурные решения требуют принятия по authority, даже без Rust diff.
 
 ## Rust code
 

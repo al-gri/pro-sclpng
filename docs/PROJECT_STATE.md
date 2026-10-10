@@ -1,6 +1,12 @@
 # Project state
 
-## Текущий governance snapshot — GOV-ORCH-001
+## Рабочий указатель governance
+
+Актуальное состояние — canonical pointer [Issue #48](https://github.com/al-gri/pro-sclpng/issues/48) и результат [PR49](https://github.com/al-gri/pro-sclpng/pull/49). [Ревизия 2026-10-10](https://github.com/al-gri/pro-sclpng/issues/48#issuecomment-6102286926) разрешает сбалансированный процесс в том же PR; старый freeze снят для этой ревизии, старый QA не принимается за verdict нового candidate. Новый head требует independent documentary QA и existing CI. Эта редакция активируется после owner acceptance, merged PR49 и canonical acceptance receipt #48; до этого действует принятая база и bounded revision scope. Проверять actual refs/receipt вместо переноса датированного pending статуса в будущее.
+
+Короткий вход — [DAILY_WORKFLOW](DAILY_WORKFLOW.md). Integrator заменяем по checkpoint; LOW/STANDARD/STRICT не меняют technical/M1 gates. #45/PR47 и claim остаются paused/unchanged в этой governance-ревизии. Следующий технический шаг после активации и сверки authority — existing corrected E1 independent Architecture/source re-review. Политика читается из actual main + receipt #48/#49; #45 branch не merge/rebase ради инструкций перед review.
+
+## Исторический governance snapshot — 2026-10-10 до balanced revision
 
 Проверено 2026-10-10: actual main `273bfac01bc7a7954644e5270eb96cc99d787fab`, tree `abfca247bbaa6fbad0c9f78d643dc9e8df7b3961`; PR #43 MERGED. [#48](https://github.com/al-gri/pro-sclpng/issues/48) готовит новый role contract, **PROPOSED / OWNER_ACCEPTANCE_PENDING**, не объявляет его accepted содержащим этот текст commit. Следующие baseline/acceptance записи сохранены как история соответствующих scoped receipts.
 
@@ -122,7 +128,7 @@ Every report remains synthetic/unverified, `canonical_status=NotEvaluated`, `can
 
 ## Управление
 
-Постоянный Integrator управляет одной активной задачей; ordinary implementation выполняет один ephemeral Worker. После Integrator scope/shared review — exact SHA/tree SOURCE_FROZEN и separate independent QA; FAIL возвращается bounded corrective Worker в той же задаче/branch/PR. ONE ACTIVE IMPLEMENTATION EXECUTOR сохраняется, shared edits последовательны. Role migration #48 вступает в силу после governance acceptance; подробности и spawn/fallback — [WORKFLOW](WORKFLOW.md). Merge/ADR/milestone authority остаются за Owner/Architecture.
+Заменяемый Integrator управляет одной delivery task; ordinary implementation выполняет один Worker. LOW/STANDARD/STRICT определяют проверку по [WORKFLOW](WORKFLOW.md): STANDARD требует свежего independent targeted review, STRICT — принятые independent QA gates. Exact HEAD/TREE/TARGET и freeze связывают evidence с candidate. FAIL возвращается bounded correction прежнему Worker по умолчанию, same Issue/branch/PR. Один автор workspace, shared owner по packet и существующие claims сохраняются. Условия активации #48/PR49 — в WORKFLOW; merge/ADR/milestone authority остаются за Owner/Architecture.
 
 GitHub — единственный источник истины: accepted main/specs/ADR; Issue assignments/blockers; PR result/checks/Handoff. Этот файл — milestone snapshot; не обновляется отдельным PR после каждого микрошагa. Исторические packets/handoffs/receipts сохраняются.
 
@@ -140,4 +146,4 @@ PR #43 уже принят. Existing [#45](https://github.com/al-gri/pro-sclpng/
 
 Оставшиеся full-M1 gates — в [GitHub integration checklist](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6096975470): нормализация/applicability, artifacts/proofs, recovery/lifecycle и final canonical replay/QA. Checkpoint не закрывает M1. #37/#22/#5 остаются OPEN; M2 #29 BLOCKED. RULE-001 #7 допускается только как одна выбранная задача при наличии источников.
 
-Integrator на каждом переходе сохраняет один bounded prompt/packet в GitHub и при доступном orchestration сам запускает Worker/QA последовательно; unavailable spawn — честный copy-ready fallback. Worker/QA context disposable. После freeze receipts пишутся в comments; source changes требуют нового freeze/QA. Новая задача не выполняется одновременно; scheduled automation, merge/settings и расширение runtime scope этим правилом не разрешены.
+Integrator сохраняет один canonical checkpoint/указатель в Issue и полный unique versioned packet при фактической смене роли; микродействия — delta/ссылки. Доступный orchestration запускает роли последовательно по риску; unavailable spawn — честный полный fallback. После freeze receipts — comments; source changes требуют нового candidate/итога по риску. Новый Integrator восстанавливает authority/refs/writer/freeze/findings/следующий шаг. Следующая задача только по bounded authority; Goal/расписание, пользовательские чаты/сообщения и merge/settings этим правилом не разрешены.

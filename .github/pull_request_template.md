@@ -1,52 +1,48 @@
 ## Проблема и результат
 
-TASK / Issue:
-STATUS:
-BASE_SHA:
-FINAL_SHA / TREE:
-Branch:
-Worker / Integrator / independent QA identities:
+TASK / canonical Issue pointer / PACKET_VERSION:
+UI_STAGE / DETAILED_STATUS:
+START_SHA / HEAD_SHA (FINAL_SHA) / TREE:
+TARGET_BRANCH / TARGET_SHA / MERGE_SHA_IF_TESTED:
+BRANCH / WORKSPACE / WRITER / SHARED_FILES_OWNER:
+RISK / REASON / VERIFICATION_TYPE / REQUIRED_GATES:
 EXECUTOR_EXCEPTION / REASON / SCOPE (если Integrator автор):
 Governance: [WORKFLOW](../docs/WORKFLOW.md)
 
 ## Scope / accepted contracts
 
-CHANGED_PATHS; accepted inputs/ADR/invariants; scope deviations.
-KNOWN_UNKNOWNS_PRESERVED:
-HANDOFF_PATH = этот canonical PR report либо отдельный файл:
+CHANGED_PATHS / accepted inputs/ADR/invariants / deviations:
+KNOWN_UNKNOWNS_PRESERVED / authority:
+HANDOFF_PATH = этот PR report либо explicit отдельный файл:
 
 ## Проверки и evidence
 
-| Check | PASS/FAIL/NOT_RUN/NOT_APPLICABLE | Executor / command / exit / CI or log URL |
-|---|---|---|
+| Criterion | Procedure | PASS/FAIL/NOT_RUN/NOT_APPLICABLE | Executor / environment / exit / CI or log URL |
+|---|---|---|---|
 
-Developer checks, independent QA и CI отдельно. Документальные checks по scope; runtime/live evidence не выдумывается и имеет explicit applicability.
+Авторские checks, independent review/QA и CI отдельно. Runtime/live не выдумывать; reuse evidence имеет applicability. LOW только опечатки/несемантическое оформление; governance/specs/contracts/security/изменения gate не LOW. STANDARD требует fresh independent targeted review, STRICT — все accepted QA gates; обязательный CI сохраняется.
 
-## Freeze / независимый QA
+## Freeze / review
 
-IMPLEMENTATION_COMPLETE:
-SOURCE_FROZEN receipt / exact FINAL_SHA / TREE:
-QA_EXECUTOR / independence:
-FINAL_VERDICT = PASS | FAIL | BLOCKED:
-FINDINGS / report URL:
+IMPLEMENTATION_COMPLETE / SOURCE_FROZEN receipt / exact HEAD_SHA / TREE / TARGET_SHA:
+CLEAN_STATUS / REVIEW_EXECUTOR / fresh context and independence:
+VERDICT_SCOPE / FINAL_VERDICT = PASS | FAIL | BLOCKED:
+FINDINGS / source evidence or reproduction / runtime status / report URL:
 
-После freeze source branch не меняется; any source commit -> new review/freeze/QA. After-freeze receipts — comments, не source commits. FAIL исправляет Worker через Integrator, same Issue/branch/PR; QA source не пишет.
+LOW без independent review указывает AUTHOR_CHECK и не выдумывает QA_PASS. Source frozen до итога либо явной отмены; любой commit → новый итог по риску. Receipts в comments, не содержащий собственный SHA commit. QA временные reproductions только в своей копии; fixes — назначенный автор через Integrator, same Issue/branch/PR.
 
-## Ограничения / blockers / один следующий шаг
+## Recovery / один следующий шаг
 
-Missing evidence / preserved UNKNOWN / real-synthetic provenance:
-Cause / action / resume condition:
-NEXT_EXECUTOR:
-Actual AUTOSPAWN / fallback reason:
-Canonical saved bounded packet / full copy-ready prompt URL:
+Blocker / action owner / resume condition / dirty files or retained patch:
+NEXT_EXECUTOR / actual agent status / unavailable spawn reason:
+Canonical checkpoint / versioned full role-transfer packet URL:
 
-Контекст Worker/QA disposable после durable сохранения. QA PASS не принимает ADR/milestone и не разрешает automatic merge.
+Не копировать полный packet на каждое микродействие. Контекст исполнителя заменяем после durable result. QA PASS не принимает ADR/milestone и не разрешает merge.
 
 ## Перед merge
 
 - [ ] Scope/contracts/technical gates сохранены; секретов/private sources/raw archives нет.
-- [ ] Применимые checks реальны; обязательное missing evidence отмечено.
-- [ ] Независимый QA PASS и требуемые review/CI относятся к exact frozen FINAL_SHA/TREE.
-- [ ] Acceptance/integration receipt сохранён, следующий шаг/packet подготовлен.
-- [ ] Owner/Architecture decisions для scope/ADR/milestone получены где требуются.
-- [ ] Владелец отдельно принимает merge; auto-merge не включено.
+- [ ] Риск обоснован, его review/QA и required CI выполнены на actual candidate; missing evidence раскрыто.
+- [ ] HEAD/TARGET и up-to-date protections перепроверены, blocking findings отсутствуют.
+- [ ] Receipt/checkpoint/следующий шаг сохранены; required Architecture/owner решения получены.
+- [ ] Владелец отдельно разрешил merge этого готового candidate; future auto-merge не разрешён.

@@ -2,84 +2,126 @@
 
 ## Решение и область действия
 
-Последовательная база принята в main через PR #43. GOV-ORCH-001 ([#48](https://github.com/al-gri/pro-sclpng/issues/48)) меняет контракт ролей: Integrator управляет, ephemeral Worker реализует, отдельный ephemeral QA проверяет frozen source. Изменение процесса вступает в силу после owner acceptance/merge governance PR; до этого сохраняется принятая база main и явно разрешённый governance scope. Исторические Issues/PR/packets/handoffs/receipts не переписываются.
+Последовательная база принята в main через PR #43. Эта редакция GOV-ORCH-001 действует после owner acceptance, merge [PR #49](https://github.com/al-gri/pro-sclpng/pull/49) и канонического acceptance receipt в [Issue #48](https://github.com/al-gri/pro-sclpng/issues/48). До выполнения условий действует принятая база main и явно разрешённый scope [ревизии](https://github.com/al-gri/pro-sclpng/issues/48#issuecomment-6102286926). Текст в ветке не означает принятие. После merge проверять receipt/actual refs, не трактовать датированный pending snapshot как вечный статус. Исторические Issues/packets/handoffs/receipts сохраняются.
 
-Обязательные инварианты: **ONE ACTIVE TASK / ONE ACTIVE IMPLEMENTATION EXECUTOR / ONE BRANCH / ONE PR**. Постоянный Integrator не является вторым implementation executor, пока только управляет и проверяет scope. Реализацию обычно выполняет ровно один ephemeral Worker. Integrator integration edits, независимый QA и corrections идут последовательно: два Worker, две implementation branches или запись source во время QA запрещены. Сохранённые Draft PR/backlog/tracking Issues не являются активными задачами.
+**Одна активная задача поставки, один implementation executor, один автор каждой рабочей копии, одна основная delivery branch и один PR.** Read-only исследование и проверочная копия закреплённого commit допустимы; это не вторая feature delivery. Два автора source, параллельные feature-задачи и запись поставляемой ветки во время review/QA запрещены. Draft PR/backlog/tracking Issues не являются активными задачами.
 
-## Роли
+Короткий путь: [AGENTS](../AGENTS.md) → канонический указатель текущего Issue → актуальный packet/PR и нужные разделы WORKFLOW. [PROJECT_STATE](PROJECT_STATE.md) — карта проекта. ARCHITECTURE, INVARIANTS, specs/ADR и capability reports читать по scope, не всю историю на каждом шаге. Для нового технического scope затронутые принятые контракты и инварианты обязательны. Пользовательский маршрут — [DAILY_WORKFLOW](DAILY_WORKFLOW.md).
+
+## Роли и владение
 
 | Роль | Ответственность |
 |---|---|
-| Владелец al-gri | Приоритеты, существенный scope, принятые политики, merge и milestone |
-| Architecture | Контракты, ADR, инварианты и межмодульные решения; отдельное требуемое принятие |
-| Постоянный Integrator | Выбор одной задачи, Issue/Task Packet, запуск ролей, scope/integration review, shared edits, freeze, corrective packets и acceptance receipt |
-| Один ephemeral Worker | Bounded implementation и developer checks; без расширения scope/контрактов, merge или milestone acceptance |
-| Отдельный ephemeral QA | Независимая проверка exact frozen FINAL_SHA/TREE; PASS/FAIL/BLOCKED с findings; source не исправляет |
+| Владелец al-gri | Приоритеты, существенный scope, политики, merge и milestone |
+| Architect / Architecture | Контракты, ADR, инварианты и межмодульные решения; требуемое отдельное принятие |
+| Integrator | Одна задача, packet, назначение автора, запуск ролей, scope/integration review, freeze и receipt |
+| Один Worker | Bounded implementation и авторские проверки в принятом scope |
+| Независимый Reviewer / QA | Целевой review STANDARD либо обязательный QA STRICT на exact candidate |
 
-Integrator не погружается в feature implementation, если её можно безопасно делегировать. Он автоматически запускает одного Worker и затем отдельного QA, когда orchestration доступен. Контекст Worker/QA disposable после сохранения результата в GitHub. Самопроверка автора не является независимым QA; разные чаты под одним GitHub login не дают разных GitHub approving identities.
+Постоянна роль Integrator, а не чат. Каждый исполнитель заменяем после сохранения checkpoint в GitHub. Самопроверка автора не является независимым review; два чата под одним GitHub login не создают две approving identities.
 
-### Исключение: Integrator пишет сам
+### Integrator как автор и shared files
 
-Допустимы только явно классифицированные INTEGRATION_ONLY, root Cargo.toml/Cargo.lock, CI/workflow, неделегируемый shared integration glue, conflict resolution после Worker, governance/project-state/task-packet changes либо отдельно обоснованный минимальный emergency fix. Перед записью зафиксировать в Issue/packet:
+Integrator может выполнить LOW либо документированное исключение: INTEGRATION_ONLY, shared integration glue, конфликт после Worker, governance/project-state/task-packet, root Cargo/workspace/lock/CI или обоснованный минимальный emergency fix. До записи packet содержит `EXECUTOR_EXCEPTION=INTEGRATOR`, конкретные `REASON`, `SCOPE` (exact paths), `WORKSPACE/WRITER`. Малый размер feature/runtime diff не делает его LOW или исключением. Обычные features выполняет Worker. Перед integration edits Worker прекращает запись и передаёт владение; авторство Integrator не отменяет gates STANDARD/STRICT.
 
-```text
-EXECUTOR_EXCEPTION = INTEGRATOR
-REASON = конкретная причина и классификация
-SCOPE = exact allowed paths и действие
-```
+Для root Cargo.toml/Cargo.lock/workspace/CI и общих файлов packet явно назначает одного `SHARED_FILES_OWNER` и paths; по умолчанию это Integrator. Worker может получить их только явным bounded packet после передачи существующего claim. Отсутствие нового назначения не отменяет текущего владельца. Concurrent edits запрещены; lock генерируется закреплённым Cargo. Существующий claim #45 и его ограничения эта ревизия не меняет.
 
-Integrator edits выполняются после остановки Worker и до freeze. Обычная feature/runtime задача не становится исключением из-за малого размера. Если сам Integrator был implementation author, final QA всё равно выполняет независимый исполнитель. Governance #48 использует явно записанное исключение, не разрешает Integrator снова стать feature executor.
-
-## GitHub — единственный источник истины
+## GitHub — каноническая память
 
 | Место | Что хранится |
 |---|---|
-| main и принятые specs/ADR | Принятый код, контракты и архитектура |
-| Issue | Scope, назначение, зависимости, состояние и blocker |
-| PR | Конкретный результат, head, CI/review/QA и принятие |
-| PROJECT_STATE | Краткий снимок milestone и ссылки на активную работу |
+| main и accepted specs/ADR | Принятый код и контракты |
+| Issue | Один канонический указатель: версия packet, последний авторизованный переход, автор/workspace, candidate, blockers и следующий шаг |
+| PR | Результат/diff, head, checks/review/QA, Handoff и acceptance receipts |
+| PROJECT_STATE | Карта milestone, датированные snapshots и ссылки |
 
-Новые owner decisions сохраняются в GitHub с датой, scope и явным статусом. Чат не переопределяет accepted contract без такой записи и требуемого ADR. Proposed policy, Draft PR, зелёный CI и наблюдаемый payload не равны принятому контракту или milestone.
+Issue ссылается на PR/result вместо копии полного отчёта; PR — на указатель Issue. Последний комментарий не обязательно является последним авторизованным решением. Owner decisions имеют дату, scope и статус. Proposed/Draft, CI PASS и наблюдаемый payload не равны accepted contract/milestone. Уникальных решений только в чате быть не должно.
 
-В действующей задаче ссылки на accepted contracts и явно утверждённый scope обязательны. Процесс не меняет цены/quantity, Timer A, ownership/completion, WAL, proof/applicability, UNKNOWN или usability. Публичный контракт меняется только через отдельно принятое решение/ADR. Исторические packets/handoffs/receipts не переписываются.
+Процесс не меняет цены/quantity, Timer A, ownership/completion, WAL, proof/applicability, UNKNOWN или usability. Публичный контракт требует отдельно принятого решения/ADR; зависимый код до этого остановлен. Raw archives остаются вне публичного Git; в GitHub — manifest/digest и доступная проверяющему evidence-ссылка. Секреты и приватные источники не публикуются.
 
-Большие raw market archives остаются вне публичного Git; в GitHub сохраняются manifest/digest и проверяемая evidence-ссылка. Секреты не включаются в чаты или Git.
+## Review по риску
 
-## Один цикл
+Уровень и причина записываются в packet по последствиям ошибки. Принятые task-specific, technical/M1 gates и существующие обязательные CI имеют приоритет; общая классификация их не снижает.
 
-1. Integrator проверяет фактический main, blockers/dependencies и accepted inputs; выбирает одну задачу, сохраняет Task Packet и полный Worker prompt в GitHub.
-2. Запускается один Worker. Он подтверждает actual base/checkout/environment, выполняет bounded implementation и developer checks, сохраняет exact SHA/tree и Handoff, затем прекращает source edits.
-3. Integrator сверяет base/head/tree, changed paths, scope, public-contract compatibility, shared workspace/Cargo.lock/CI. Integration-owned edits выполняет только он, последовательно и с объявленным scope.
-4. После полной реализации Integrator публикует IMPLEMENTATION_COMPLETE, SOURCE_FROZEN, FINAL_SHA и TREE. На этом exact source запускается отдельный независимый QA.
-5. QA возвращает PASS/FAIL/BLOCKED. FAIL -> Integrator готовит bounded corrective packet -> новый или возобновлённый Worker в том же Issue/branch/PR -> новый SHA -> review/freeze -> QA заново. QA сам не исправляет.
-6. PASS -> Integrator сохраняет acceptance/integration receipt для exact SHA/tree -> owner acceptance/merge. Ни QA PASS, ни receipt не принимают ADR или milestone автоматически.
-7. После принятия/merge Integrator сверяет actual main и scope, сохраняет состояние и автоматически готовит ровно одну следующую задачу. При blocker сначала явно откладывает текущую с resume packet; будущий Worker не запускается одновременно.
+| Уровень | Scope | Минимальный маршрут |
+|---|---|---|
+| LOW | Только опечатка или несемантическое оформление без изменения поведения/требований | Один назначенный автор → просмотр diff и подходящая лёгкая проверка; обязательный CI сохраняется; отдельный review только если его требует действующий gate |
+| STANDARD | Ограниченное изменение поведения внутри принятых контрактов, без STRICT boundary | Worker → авторские checks → Integrator → свежий независимый целевой review frozen candidate → применимые CI |
+| STRICT | Governance, specs/контракты/инварианты, security, публичный API, concurrency/unsafe, сохранность данных, миграция, сложная FSM; sequence/epochs, WAL/recovery, quantity/delete, ownership, transport/TLS, критические лимиты, milestone | Принятое решение где требуется → Worker либо допустимое exception → integration review → независимый QA и все принятые дополнительные gates |
 
-### Lifecycle
+Governance, specs, contracts, security и изменения статуса gate **никогда не LOW, даже docs-only**. Если отсутствие семантического влияния не доказано, LOW не выбирать. Эта ревизия #48/PR49 проходит independent documentary QA и существующий CI; #45 и M1 остаются STRICT. Architecture/owner acceptance контрактов, ADR и milestone не заменяются review/QA.
 
-| Статус | Условие перехода / следующий исполнитель |
+STANDARD reviewer проверяет затронутое поведение, негативные случаи и evidence, а не повторяет механически весь CI. STRICT packet перечисляет обязательные независимые запуски и специальные gates. Docs-only правка не требует нового live capture при неизменных runtime/profile/inputs/assumptions; применимость старого evidence объясняется. Это не перенос PASS на новые runtime bytes или неизвестную среду.
+
+## Один цикл и пять стадий
+
+1. Integrator сверяет actual refs, scope/authority, блокеры и автора; сохраняет один версионированный packet и выбранный риск.
+2. Один Worker (или документированный Integrator exception) подтверждает START_SHA/checkout/environment, реализует scope, выполняет авторские checks и передаёт результат; запись прекращается.
+3. Integrator проверяет diff/contracts/paths/shared ownership, последовательно завершает integration edits, фиксирует candidate и freeze.
+4. LOW получает назначенную лёгкую проверку; STANDARD — отдельный свежий целевой review; STRICT — независимый QA с обязательными gates. Branch frozen до результата или явной отмены freeze.
+5. FAIL → bounded correction прежнему Worker по умолчанию, same Issue/branch/PR → новый candidate/review/freeze и проверка по риску. BLOCKED → причина, ответственный и resume condition.
+6. Подтверждённый результат → integration receipt → отдельное owner решение о merge. Перед merge проверить actual HEAD, target, findings, required checks и authority; после merge — actual main/MERGE_SHA и обязательные integration checks.
+7. Сохранить checkpoint и подготовить один следующий шаг. Следующую задачу выполнять только в пределах заданной bounded очереди/полномочий и после принятия либо явного откладывания текущей.
+
+| Стадия для владельца | Существующие детальные события |
 |---|---|
-| READY_FOR_WORKER | Packet/inputs/base готовы; следующий Worker |
-| WORKER_ACTIVE | Ровно один назначенный Worker пишет allowed source |
-| IMPLEMENTATION_READY | Worker закончил, сохранил result/handoff; Integrator |
-| INTEGRATOR_REVIEW | Scope/compatibility и последовательная shared integration |
-| SOURCE_FROZEN | IMPLEMENTATION_COMPLETE и exact FINAL_SHA/TREE сохранены; source writes остановлены |
-| QA_ACTIVE | Отдельный QA проверяет только frozen candidate |
-| QA_FAILED | QA FAIL, findings сохранены; Integrator |
-| CORRECTION_READY | Integrator сохранил bounded findings packet; один Worker в той же задаче |
-| QA_PASSED | QA PASS на exact SHA/tree; Integrator receipt |
-| OWNER_ACCEPTANCE | Требуемые review/QA/CI есть; решение владельца |
-| ACCEPTED_IN_MAIN | Принятый scope в проверенном actual main; следующая задача может готовиться |
+| READY | READY_FOR_WORKER; готовый packet для LOW/exception |
+| IMPLEMENTING | WORKER_ACTIVE, IMPLEMENTATION_READY, INTEGRATOR_REVIEW; QA_FAILED → CORRECTION_READY перед повторной реализацией |
+| VERIFYING | SOURCE_FROZEN, QA_ACTIVE; тип STANDARD — TARGETED_REVIEW, LOW — AUTHOR_CHECK |
+| READY_TO_MERGE | QA_PASSED для независимого review/QA, OWNER_ACCEPTANCE после gates; LOW хранит check receipt без выдуманного QA |
+| DONE | ACCEPTED_IN_MAIN после проверки результата и required integration checks |
 
-BLOCKED_* содержит конкретную причину, ответственного, сохранённые refs и resume condition. BLOCKED_QA не равен QA_FAILED и не оправдывает выдуманный PASS. BACKLOG допустим для неактивной работы. Не использовать общий IN_PROGRESS, если известна стадия. Старые статусы исторических receipts/packets сохраняются; M1 IN_PROGRESS остаётся aggregate milestone, а не статусом executor. Явные restrictions на закрытие tracking Issues сохраняются. Записанное Integrator exception может пропустить Worker stages, но не review/freeze/independent QA.
+BLOCKED/PAUSED содержат причину, ответственного, retained refs и resume condition; детальные BLOCKED_* сохраняются. BLOCKED_QA не равен QA_FAILED. M1 IN_PROGRESS — aggregate milestone. Исторические labels/receipts и restrictions на закрытие tracking Issues не переименовываются. Для LOW/exception ненужные роли пропускаются явно; запуск Worker/QA не выдумывается.
 
-### Exact source freeze
+## Идентичность кандидата и freeze
 
-QA packet требует IMPLEMENTATION_COMPLETE / SOURCE_FROZEN / FINAL_SHA / TREE / PR / acceptance criteria / invariants / Worker Handoff (либо явно объявленный Integrator exception result). QA сверяет server ref и локальный source/tree либо проверенный API snapshot. Никто не меняет implementation branch до окончания QA. Metadata/QA receipts публикуются в Issue/PR comments и не требуют нового source commit.
+```text
+START_SHA = состояние начала работы исполнителя (historical BASE_SHA может быть alias)
+HEAD_SHA = полный SHA проверяемого кандидата (FINAL_SHA в прежних receipts)
+TREE = tree кандидата
+TARGET_BRANCH / TARGET_SHA = целевая ветка и проверенное состояние совместимости
+MERGE_SHA = проверенный результат объединения, если создан; иначе NOT_CREATED
+```
 
-Любой новый source commit, включая docs/lock/CI/integration change, отменяет final QA acceptance для нового SHA. Integrator останавливает QA либо помечает его verdict superseded, выполняет необходимые affected checks, заново фиксирует exact SHA/tree и запускает QA. Прежний PASS не переносится автоматически. Допустимое прежнее runtime/live evidence можно сохранить как историческое с явной applicability; новый QA verdict всё равно привязан к новому candidate. Rebase/merge-base/source-tree changes также требуют сверки inputs и нового freeze.
+Не смешивать START_SHA с merge-base, HEAD с target или GitHub test merge SHA. Review/QA получает HEAD/TARGET, чистый checkout HEAD_SHA либо проверенный read-only API snapshot и известную среду: OS/toolchain/lock/features/существенные flags. API source review не доказывает runtime checks. SHA не описывает dirty files или внешнюю среду.
 
-Architecture/source review может быть отдельной последовательной стадией accepted isolated scope. Она не означает IMPLEMENTATION_COMPLETE всего PR и не заменяет final implementation QA. QA не заменяет требуемое Architecture/owner принятие контракта/ADR.
+После разрешённой реализации Integrator публикует IMPLEMENTATION_COMPLETE / SOURCE_FROZEN / exact HEAD_SHA (FINAL_SHA) / TREE / TARGET_SHA, критерии и Handoff. SOURCE_FROZEN — запись, не техническая блокировка: авторы действительно остановлены, проверка читает закреплённую копию. Refs сверяются перед verdict и merge. Никто не меняет поставляемую ветку до конца проверки либо явной отмены freeze.
+
+Любой новый source commit, включая docs/lock/CI, требует нового candidate, review/freeze и нового итога по риску. Старый verdict historical/superseded для нового SHA; evidence переиспользуется только с applicability и без пропуска gates. Head/tree drift → BLOCKED_SOURCE_CHANGED. Изменение main требует анализа diff/совместимости и affected integration checks; само по себе не требует ритуального rebase. Required up-to-date checks и реальные repository protections исполняются. Force-push без отдельного разрешения запрещён.
+
+Commit не может содержать собственный окончательный SHA без изменения этого SHA. Сначала фиксируются source/документы, затем receipt публикуется в Issue/PR comment или CI. Handoff-файл в branch описывает предшествующий проверенный commit; содержащий его новый commit получает собственный итог. After-freeze receipts не создают source commit.
+
+Architecture/source review isolated accepted scope — отдельный тип проверки. Он не означает IMPLEMENTATION_COMPLETE всего PR и не заменяет final implementation QA. Scoped freeze всегда называет границы проверки.
+
+## Независимая проверка и corrections
+
+Reviewer/QA не автор candidate; получает критерии/contracts/scope, самостоятельно читает source и опасные сценарии, затем сверяет Handoff автора. Для STANDARD и STRICT нужен свежий контекст без inherited Worker transcript. В текущем доступном механизме spawn_agent это `fork_turns="none"`; в иной среде проверить её механизм. Новый агент сам по себе не гарантирует чистую историю или filesystem isolation. Если fresh/independence gate нельзя обеспечить, раскрыть ограничение и вернуть BLOCKED.
+
+QA не исправляет поставляемую ветку. В своей изолированной проверочной копии допустимы временные tests/reproductions: записать исходный clean HEAD, состав временных файлов и результаты отдельно от candidate. Нужный продукту тест переносит назначенный автор, затем проверяется новый head. Shared workspace не является изоляцией; нужны закреплённая копия и учёт shared ports/services/caches.
+
+| Verdict | Значение |
+|---|---|
+| PASS | Все обязательные критерии данного verification scope доказаны, blocking findings отсутствуют |
+| FAIL | Подтверждено нарушение критерия/инварианта |
+| BLOCKED | Обязательное evidence/решение/доступ отсутствует либо source изменился |
+
+Check-level PASS/FAIL/NOT_RUN/NOT_APPLICABLE (последнее с причиной) отделены от verdict PASS/FAIL/BLOCKED. Отсутствие найденных дефектов не доказывает непроверенный критерий. Подтверждённый defect даёт FAIL даже при других NOT_RUN, которые также раскрываются.
+
+Finding содержит ID, критерий, path/сценарий, ожидаемое/фактическое, severity/влияние и воспроизведение **либо точное source evidence/контрпример**. Runtime NOT_RUN раскрывается и не обесценивает доказанный source defect. Рекомендации отделены от blockers; стилистическое пожелание само по себе не запускает correction.
+
+Для локальных findings по умолчанию возобновляется прежний Worker. После двух циклов с той же ошибочной гипотезой Integrator меняет подход: уточняет контракт, назначает другого исполнителя либо передаёт конкретный спор Architect. QA завершается до возобновления автора; same Issue/branch/PR — default.
+
+## Packet, checkpoint и передача
+
+Packet может быть секцией Issue или версионированным comment. Полный уникальный bounded packet для **каждой фактической смены роли** сохраняется в GitHub с PACKET_VERSION, ссылками и copy-ready заданием; историю чата не переносить. Для микродействий внутри той же роли достаточно status/evidence delta и ссылки — полный prompt не дублировать.
+
+Минимум packet: TASK/Issue/PR, PACKET_VERSION, GOAL, ACCEPTANCE с ID, SCOPE/files_allowed/NON_GOALS, accepted CONTRACTS, START_SHA, TARGET_BRANCH/TARGET_SHA, BRANCH, WORKSPACE/WRITER/SHARED_FILES_OWNER, ENVIRONMENT, RISK/REVIEW_TYPE/gates, CHECKS (критерий → процедура → ожидаемый результат), AUTHORITY, STOP_CONDITIONS, HANDOFF_TO. Review/QA дополнительно получает HEAD_SHA/TREE/freeze и авторский result. Критерии не заменять голым списком команд.
+
+Worker result: TASK/PACKET_VERSION, START_SHA, HEAD_SHA/TREE, TARGET_SHA, PR, CHANGED_PATHS, CHECKS/evidence/exit codes, dirty files либо clean status, limitations/KNOWN_UNKNOWNS_PRESERVED, HANDOFF_PATH. PR report достаточен. Отдельный [Handoff](templates/HANDOFF.md) нужен для прерывания/сложной передачи/milestone или explicit packet deliverable.
+
+Recovery checkpoint в каноническом Issue: последний авторизованный переход/receipt, packet version/authority, actual branch/START/HEAD/TREE/TARGET, writer/workspace/agent status, freeze, завершённые критерии/evidence, findings/blockers, retained patch/dirty files и **один следующий разрешённый шаг**. Сохранять при смене роли, stop/resume, завершении и замене Integrator. PROJECT_STATE обновлять при milestone/существенном решении/главном blocker, не после микродействий.
+
+Новый Integrator читает указатель Issue, AGENTS и нужные rules/inputs; сверяет refs, dirty files, фактических авторов и authority. Не запускает завершённый шаг из старого prompt. Конфликт решает по authority/evidence, не по «самому новому тексту» или памяти чата.
 
 ## Начать, слить PR и принять milestone
 
@@ -93,64 +135,35 @@ Dependency/features/MSRV, handshake/partial-write, allocator и shutdown probes 
 
 Недоступный live endpoint блокирует live acceptance, но разрешённая offline-часть той же задачи может продолжаться. Не скрывать FAIL/NOT_RUN и не называть synthetic fixture реальным capture. Численные бюджеты #45, включая 8 MiB и ограничения TLS, сохраняются до отдельного утверждённого изменения; RSS/container limit не доказывает pre-allocation bound.
 
-## Review по риску
+## Среда и блокировки
 
-| Изменение | Проверка |
-|---|---|
-| Обычные docs/статус | Документальные проверки, Integrator scope review, отдельный final QA по documentary scope |
-| Простая внутренняя реализация | Worker developer checks, tests/CI, Integrator review и отдельный final QA после freeze |
-| Sequence/epochs, WAL/recovery, quantity/delete, ownership, transport/TLS, критические лимиты | Дополнительно независимый review и целевые QA-проверки конкретного PR |
-| Контракты, инварианты, политики неизвестных данных, scope milestone | Architecture и принятие владельцем |
-| Завершённый milestone | Независимый интеграционный QA и принятие владельцем |
+Среда настраивается один раз с командами/identity. Полный preflight повторять при смене executor/toolchain/access; refs/checkout/ownership — при start/resume/передаче/freeze/merge. Внутри этапа проверять изменившиеся предпосылки. Не переносить PASS между неизвестными средами/caches. Новые dependencies требуют verified versions/features/provenance, Cargo-generated lock и clean-runner fetch --locked либо verified vendoring до offline checks.
 
-Риск определяется последствиями дефекта, включая содержание документа. Source/semantic policy не становится обычным docs PR только из-за отсутствия Rust diff. Быстрые автоматические suites сохраняются. QA ищет дополнительные failure cases, не дублирует механически все прошлые команды.
-
-CI относится к текущему final head. После изменений повторить затронутые проверки и явно обосновать применимость прежнего evidence. Документальная правка не требует повторного live capture, если код, profile, inputs/evidence и assumptions не изменились; это не перенос runtime PASS на новые runtime bytes.
-
-## Короткий packet и один Handoff
-
-Packet: TASK/Issue/PR; exact base/dependencies; branch и executor; bounded inputs/accepted contracts; files_allowed; forbidden scope; acceptance commands/evidence; starts/stops; expected Handoff. Не передавать всю историю чата. Технические спецификации передаются ссылками.
-
-Минимальный Worker result: TASK, BASE_SHA, FINAL_SHA, TREE, PR, CHANGED_PATHS, CHECKS с PASS/FAIL/NOT_RUN, KNOWN_UNKNOWNS_PRESERVED, HANDOFF_PATH (файл или canonical PR report URL). Минимальный QA input: TASK, PR, FINAL_SHA, TREE, ACCEPTANCE_CRITERIA, INVARIANTS, WORKER_HANDOFF и freeze receipt. QA final verdict только PASS/FAIL/BLOCKED; check-level NOT_RUN/NOT_APPLICABLE имеют конкретную причину.
-
-Канонические durable objects: Issue, Task Packet, PR, commit SHA/tree, CI receipts, docs/handoffs/**, accepted ADR/specs и PROJECT_STATE milestone snapshots. Уникальных решений/файлов только в чате быть не должно. Новый Worker/QA восстанавливается из этих объектов без истории предшественника.
-
-PR report выполняет роль Handoff завершённой задачи: base/head, файлы, реальные проверки, ограничения, blockers/evidence и следующий шаг. Issue ссылается на PR вместо одинаковых длинных receipts. Отдельный Handoff нужен для сложной передачи, прерывания или milestone, либо если он явно остаётся deliverable активного packet. Исторические Handoff-файлы сохраняются.
-
-PROJECT_STATE обновляется при milestone, существенном решении или изменении главного blocker; отдельный state-sync PR после каждого микрошагa не требуется. Связанные текущие docs могут обновляться в том же PR в разрешённом scope.
-
-## Среда, main и блокировки
-
-Рабочую среду настроить один раз, сохранить воспроизводимые команды и её identity/toolchain. Полный preflight повторяется при смене среды/toolchain/доступа; каждый новый код получает свои применимые tests. Не переносить PASS между executors или неизвестными caches. Root Cargo.lock, workspace и CI интегрирует только Integrator, последовательно; при исполнении им же отдельная передача этих файлов не нужна.
-
-Изменение main само по себе не перезапускает задачу. Integrator проверяет относящийся diff; совместимые изменения позволяют продолжать, конфликт разрешается с affected tests, изменение входного контракта требует решения. Обновить фактический base/интеграционные refs в PR. Не требовать rebase как ритуал; force-push без отдельного разрешения запрещён.
-
-При blocker сохранить в Issue причину, завершённую часть, branch/commit/patch, владельца действия и условие продолжения. Можно продолжать независимую разрешённую часть этой же задачи. Чтобы перейти к другой, Integrator явно откладывает текущую задачу, прекращает её исполнение и выдаёт один новый packet. Одновременная работа запрещена.
+При blocker сохранить причину, завершённую часть, branch/commit/patch, владельца действия и resume condition. Для другой delivery задачи текущую явно отложить, остановить автора и выдать один новый packet. Параллельная feature delivery не разрешена.
 
 ## Автоматическая подготовка следующего шага и передачи
 
-Не ждать просьбы владельца о prompt/packet. На каждой границе задачи, смене роли или blocker Integrator сам сохраняет один следующий шаг и bounded copy-ready prompt в GitHub: Issue/PR, exact refs/branch, executor/environment, inputs/accepted contracts, files_allowed/shared ownership, acceptance/evidence, starts/stops и expected result.
+Integrator сам сохраняет следующий шаг и выполняет уже разрешённые обратимые действия. При доступном orchestration запускает одного Worker и затем требуемого Reviewer/QA последовательно по риску. Следит за actual identities/statuses, ownership/freeze. Read-only Researcher/Architecture reviewer не становится вторым автором.
 
-Если доступен реальный subagent orchestration, Integrator автоматически запускает ровно одного Worker, передаёт bounded packet и после review/freeze запускает отдельного независимого QA. Не передавать весь постоянный чат. Отслеживать фактические agent identities/statuses; никакого второго implementation writer или source edits во время QA. При QA FAIL сначала закончить QA, затем сформировать corrective packet и запустить одного Worker в том же Issue/branch/PR.
+Если spawn действительно недоступен, сохранить полный уникальный packet/copy-ready prompt и честно указать NEXT_EXECUTOR=WORKER (либо REVIEWER/QA), AUTOSPAWN=UNAVAILABLE_IN_CURRENT_ENVIRONMENT. Подготовленный prompt не означает запущенного агента. Orchestration не доказывает shell/Rust/network/live access; missing mandatory evidence → BLOCKED.
 
-Если spawn действительно недоступен, сохранить уникальный packet/Handoff в GitHub, выдать полный copy-ready prompt и честно указать:
+Подзадачи текущего запуска выполнять subagents. Новый пользовательский чат создаётся только по явному запросу пользователя; отправка сообщения другому пользовательскому чату требует явной пользовательской авторизации. Наличие инструмента/соседнего чата не выдаёт такое право. Внутренний subagent и отдельный пользовательский чат — разные механизмы.
 
-```text
-NEXT_EXECUTOR = WORKER
-AUTOSPAWN = UNAVAILABLE_IN_CURRENT_ENVIRONMENT
-```
+## Полномочия и продолжение
 
-Для QA fallback NEXT_EXECUTOR=QA; тот же freeze/lifecycle. Не утверждать, что агент создан, если только подготовлен prompt. При доступном orchestration ручной fallback не используется. Orchestration capability не доказывает shell/Rust/network/toolchain/exchange access: отсутствующее обязательное evidence -> BLOCKED_*.
+Один раз определить bounded задачу/очередь, разрешённые edit/check/commit/push/Draft PR/report действия, архитектурную authority и stops. Уже выданное разрешение повторно не запрашивать. Новый scope/непринятый контракт/действие вне мандата требует конкретного решения после подготовки reviewable результата.
 
-Read-only Researcher/Architecture reviewer может помогать без второго implementation executor; он не пишет branch. Architecture review не заменяет final QA, QA не принимает ADR/milestone. Для архитектурной передачи сохраняется точная область решения и требуемая authority.
+Merge остаётся отдельным решением владельца для конкретного готового candidate. Процесс не разрешает будущий automatic merge/auto-merge, force-push, settings/access/billing/secrets, private API или live execution. QA PASS/receipt сами по себе merge не разрешают. Restrictions на закрытие #37/#22/#5 сохраняются.
 
-Это выполнение роли при текущей передаче, не scheduled automation, не автоматическое merge и не расширение scope. Owner не работает курьером при доступном spawn. Нужные prompts/packets остаются сохранёнными, даже если текущий executor disposable.
+Обычный активный запуск, Goal и расписание различны. Goal создаётся только по явному запросу для измеримого результата и не расширяет authority. Возврат позже/мониторинг требует отдельно запрошенного доступного расписания; локальному исполнению нужны включённый компьютер, работающее приложение и доступный проект. Не обещать работу после активного запуска без механизма продолжения. Монитор сообщает о существенном изменении/готовности/сбое/необходимом решении, не о каждом неизменном опросе.
 
 ## Миграция текущей #45 / PR #47
 
-[Canonical governance/resume packet](task-packets/GOV-ORCH-001.md) и [#48](https://github.com/al-gri/pro-sclpng/issues/48) фиксируют текущую точку. #45 приостановлен для единственной governance задачи; существующие branch/Draft PR/claim/source и история сохраняются. E1-CORR-01 уже доставлен на 4f599f5ab687ca1fddb43c2dd8a814e3cd70ad5a; не запускать его повторно по устаревшему промпту.
+[Сохранённый packet и revision appendix](task-packets/GOV-ORCH-001.md) и указатель [#48](https://github.com/al-gri/pro-sclpng/issues/48) фиксируют переход. Snapshot 2026-10-10: #45 приостановлен для governance; existing branch/Draft PR/claim/source/history сохранены. E1-CORR-01 доставлен на `4f599f5ab687ca1fddb43c2dd8a814e3cd70ad5a`; не выполнять его снова по старому prompt.
 
-После governance acceptance Integrator перечитывает actual refs и возобновляет последовательный Architecture/source re-review existing corrected E1. При новых findings следующий implementation executor — один Worker с corrective packet в той же #45/ветке/PR, если нет отдельно записанного допустимого exception. Full implementation final QA начинается только после завершения разрешённой реализации всего кандидата и нового exact freeze. ADR0004 PROPOSED, U1–U7 UNRESOLVED, production FAIL/NOT_PROVEN, M1 unaccepted и все technical stops сохраняются.
+После governance acceptance/merge и сверки authority/refs следующий технический шаг — sequential independent Architecture/source re-review **existing corrected E1** в accepted isolated scope. Это не запуск Worker и не full final QA; данная governance-ревизия #45 не возобновляет. Читать действующую governance policy из actual main и receipt #48/#49, даже если сохранённая #45 branch содержит старые process docs. Не merge/rebase #45 ради обновления инструкций перед pending review; runtime/spec inputs проверять на exact #45 head с учётом отдельно принятых решений.
+
+При новых findings — один corrective Worker same #45/branch/PR по новому packet. Full implementation QA только после полной разрешённой реализации и нового exact freeze. ADR0004 PROPOSED, U1–U7 UNRESOLVED, production FAIL/NOT_PROVEN, M1 unaccepted и все technical stops сохраняются.
 
 ## Последовательные результаты M1
 
@@ -165,9 +178,3 @@ Read-only Researcher/Architecture reviewer может помогать без в
 Integrator оформляет engine как отдельный bounded child #21 только при достижении этого шага. Engine не нормализует реальные Bitget quantities, не создаёт production proofs и не устанавливает usable_data. U-09/U-10/snapshot-zero и profile applicability блокируют live canonical portion, а не исследование алгоритма на принятых нормализованных inputs. Если принятый API не позволяет выбранный engine boundary, требуется ADR до зависимого кода.
 
 Policy в PR #46 сохраняет blocker; её принятие не разрешает normalizer. Изменение семантики требует конкретного evidence/policy решения. Diagnostic capture и synthetic book tests не закрывают M1. M2 #29 остаётся BLOCKED до отдельного принятия M1; RULE-001 выполняется только как выбранная единственная задача при наличии источников.
-
-## Полномочия и заменяемость
-
-Merge остаётся за владельцем. Этот процесс не делегирует merge/auto-merge, settings/access/billing/secrets, force-push, private API или live execution. Нужное owner approval запрашивается только для конкретного готового результата.
-
-Чат заменяем, когда в GitHub сохранены код/ветка или patch, результаты/refs, решения, ограничения и следующий шаг. Новый участник читает AGENTS, PROJECT_STATE, accepted contracts и текущий Issue/PR; уникальной памяти только в переписке нет.
