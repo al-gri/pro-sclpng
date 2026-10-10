@@ -10,3 +10,14 @@ default-run = "radar"
 domain = { path = "../../crates/domain" }
 market-data = { path = "../../crates/market-data" }
 recording = { path = "../../crates/recording" }
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+rustls = { version = "=0.23.45", default-features = false, features = ["std", "ring", "tls12"] }
+webpki-roots = "=1.0.9"
+signal-hook = { version = "=0.4.5", default-features = false }
+
+[features]
+alloc45-u4-experiment = []
+
+[[test]]
+name = "alloc45_u4_core"
+required-features = ["alloc45-u4-experiment"]
