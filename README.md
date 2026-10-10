@@ -2,13 +2,13 @@
 
 Bitget → recorder → replay → горизонтальные уровни → два сетапа → shadow-алерты.
 
-**Начать здесь: [пошаговый запуск](docs/START_HERE.md).**
+**Начать здесь: [ежедневный маршрут и готовые задания](docs/DAILY_WORKFLOW.md); [точка продолжения](docs/START_HERE.md).**
 
 ## Текущий статус
 
 M0 принят; M1 в работе. Workspace/CI, decoder, WAL, DataHealth и supervisor library приняты; F-1/F-2 приняты только в partial diagnostic/synthetic scopes. Реальный capture и canonical local book ещё не приняты, usable_data=false. Актуальные accepted baseline и blockers — в [PROJECT_STATE](docs/PROJECT_STATE.md) и GitHub Issues.
 
-Разработка последовательная: одна активная задача, один исполнитель, один PR. [WORKFLOW](docs/WORKFLOW.md) задаёт проверки по риску и обязательную автоматическую подготовку следующего шага/prompts/packet. Следующая implementation — [#45](https://github.com/al-gri/pro-sclpng/issues/45) после принятия governance PR #43 и подтверждения способа сборки.
+Разработка последовательная: одна delivery task, один implementation executor/автор workspace, одна основная ветка и PR. Заменяемый Integrator восстанавливает работу по canonical Issue pointer; [WORKFLOW](docs/WORKFLOW.md) задаёт LOW/STANDARD/STRICT с обязательными technical/CI gates. Редакция GOV-ORCH-001 активируется после owner acceptance, merged [PR49](https://github.com/al-gri/pro-sclpng/pull/49) и canonical receipt [#48](https://github.com/al-gri/pro-sclpng/issues/48); actual статус проверяется по этим записям. Датированный checkpoint 2026-10-10 сохраняет #45/PR47 paused и выполненный E1-CORR-01: следующий технический шаг после активации и проверки authority — existing E1 independent Architecture/source re-review по [packet](docs/task-packets/GOV-ORCH-001.md), без restart.
 
 ## Источники истины
 

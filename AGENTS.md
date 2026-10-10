@@ -2,21 +2,27 @@
 
 ## Scope and first read
 
-Работай только с `al-gri/pro-sclpng`. Не просматривай другие репозитории пользователя. Внешние технические источники не заменяют авторские торговые правила.
+Работай только с `al-gri/pro-sclpng`; другие репозитории пользователя не просматривай. Внешние технические источники не заменяют авторские торговые правила.
 
-GitHub — единственный источник истины. Прочитай [WORKFLOW](docs/WORKFLOW.md), [PROJECT_STATE](docs/PROJECT_STATE.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [INVARIANTS](docs/INVARIANTS.md), текущий Issue/PR и релевантные принятые specs/ADR. Приоритет имеет явно принятое owner scope/security решение, затем accepted contracts и действующие инструкции; proposed/Draft не равны accepted.
+GitHub — каноническая память. Начни с этого файла, канонического указателя текущего Issue, актуального packet/PR и нужных разделов [WORKFLOW](docs/WORKFLOW.md). [PROJECT_STATE](docs/PROJECT_STATE.md) — карта, не замена actual refs. Читай ARCHITECTURE/INVARIANTS и accepted specs/ADR по затронутому scope; всю историю на каждом шаге загружать не нужно. Явно принятое owner scope/security решение имеет приоритет, затем accepted contracts и действующие инструкции; proposed/Draft не равны accepted. Условия активации этой редакции — в WORKFLOW; containing commit не объявляет собственное принятие.
 
-До изменений зафиксируй настоящий base, scope, чистоту checkout и фактический способ сборки. Полный environment preflight повторяй при смене executor/toolchain/доступа, не после каждого docs commit. Отсутствующие проверки — NOT_RUN, выполненные с ошибкой — FAIL. Не выдумывай команды, commit, PR, benchmark или PASS.
+Перед start/resume/передачей/freeze/merge сверь actual START/HEAD/TARGET refs, clean checkout либо сохранённые dirty files, scope/authority и единственного автора. Полный environment preflight повторяй при смене executor/toolchain/access; внутри этапа проверяй изменившиеся предпосылки. NOT_RUN не PASS; не выдумывай команды, commit, PR, benchmark или результаты.
 
 ## Последовательная работа и приёмка
 
-Одна активная задача, один исполнитель, одна ветка, один PR. Integrator может реализовать простую задачу сам или передать её одному Worker. QA и исправления идут последовательно в этой же задаче. Другую задачу начинать после завершения либо явного откладывания текущей с GitHub handoff. Исторические Draft PR/backlog не дают разрешения на параллельное исполнение.
+Одна active delivery task, один implementation executor, один автор рабочей копии, одна основная branch/PR. Изолированные read-only/review snapshots допустимы; параллельная feature delivery не разрешена. Integrator — заменяемая роль, восстанавливаемая по Issue checkpoint. Обычный feature пишет Worker; Integrator — только документированный LOW/integration exception с REASON/SCOPE/WORKSPACE/WRITER. Shared/lock/CI files имеют одного явно назначенного владельца в bounded packet, существующий claim сохраняется до передачи.
 
-Dependency/handshake/allocation probes входят в implementation, а не требуют готовой реализации до создания ветки. Их обязательные acceptance требования, численные бюджеты и контрактные stops сохраняются. Отсутствие live evidence блокирует live acceptance, но не независимую разрешённую offline-часть.
+- LOW — только опечатки/несемантическое оформление: один автор, diff и подходящие checks.
+- STANDARD — поведенческие изменения: Worker, авторские checks, Integrator и свежий независимый целевой review.
+- STRICT — governance/specs/contracts/security и критические boundaries: independent QA и все accepted gates. Governance/spec/security/изменения статуса gate никогда не LOW, даже docs-only. #48/PR49 требует documentary QA и existing CI; #45/M1 gates неизменны.
 
-Scope и файлы заданы Issue. Не исправляй соседние модули заодно. Публичные контракты/торговую семантику меняй только после принятого ADR; останови зависимую часть. Обычные изменения получают применимые checks; критические WAL/sequence/epochs/quantity/ownership/transport/лимиты и milestone требуют независимого review/QA по WORKFLOW. Самопроверка автора не является независимым QA.
+Перед review/QA — exact HEAD_SHA (FINAL_SHA)/TREE/TARGET_SHA, известная среда и freeze; source writers остановлены. Любой source commit требует нового candidate и нового итога по риску. QA не меняет поставляемую ветку; временные reproductions допустимы в своей изолированной копии. Source-evidence finding допустим с честным runtime NOT_RUN. Verdict PASS/FAIL/BLOCKED отделён от check-level результатов.
 
-Не писать напрямую в main, не merge/auto-merge, не force-push, не менять visibility/access/billing/secrets без отдельного разрешения владельца. Merge остаётся за владельцем.
+FAIL → Integrator packet → прежний Worker по умолчанию, same Issue/branch/PR → review/freeze и новая проверка. После двух циклов той же ошибочной гипотезы изменить подход/передать спор Architect. Не начинать другую delivery задачу до принятия либо явного откладывания текущей с resume checkpoint.
+
+Не расширяй Issue scope. Public contracts/торговую семантику меняй только после принятого ADR; зависимую часть останови. Dependency/handshake/allocation probes входят в implementation; их acceptance budgets/stops сохраняются. Нет live evidence → нет live acceptance; разрешённая offline-часть может продолжаться. Самопроверка не заменяет независимый review или M1 QA.
+
+Не писать напрямую в main, не merge/auto-merge/force-push/settings/access/billing/secrets без отдельного owner разрешения. Merge для конкретного готового результата остаётся за владельцем; этот процесс не делегирует будущие merges.
 
 ## Non-negotiable constraints
 
@@ -36,7 +42,7 @@ Scope и файлы заданы Issue. Не исправляй соседние
 
 ## Verification and handoff
 
-Для Rust использовать зафиксированный toolchain и применимые команды:
+Для Rust применять pinned toolchain и проверки по scope:
 
 ```sh
 cargo fmt --all -- --check
@@ -44,10 +50,10 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Фиксируй actual head, среду, команды/exit codes или CI refs. Новые зависимости требуют подготовки locked cache до offline checks; Cargo.lock/workspace/CI меняет Integrator последовательно. Не переносить evidence между изменёнными runtime bytes или executors без проверки применимости.
+Фиксируй actual candidate/target, среду, команды/exit codes/CI refs. New dependencies требуют locked cache preparation до offline checks. Existing mandatory CI и technical gates не отменяются уровнем риска.
 
-PR report — Handoff завершённой задачи. Отдельный [Handoff](docs/templates/HANDOFF.md) нужен для прерывания/сложной передачи/milestone либо если прямо задан packet. Исторические packets/handoffs/receipts сохранять; restrictions на закрытие tracking Issues действуют.
+В Issue один canonical pointer; PR report — результат/Handoff. Полный уникальный versioned packet/copy-ready prompt нужен при фактической передаче роли; микродействия используют delta и ссылки без повторения полных prompts. After-freeze receipts публикуются comments: commit не может содержать собственный окончательный SHA. Исторические packets/handoffs/receipts и tracking Issue restrictions сохранять.
 
-## Обязательная автоматическая передача
+Integrator сам готовит следующий разрешённый шаг, сохраняет checkpoint и запускает роли через доступные subagents по risk route. Свежий review/QA без Worker transcript: текущий механизм spawn_agent требует `fork_turns="none"`; механизм другой среды проверить. При unavailable spawn — полный packet, NEXT_EXECUTOR и честный AUTOSPAWN=UNAVAILABLE_IN_CURRENT_ENVIRONMENT. Новый пользовательский чат/сообщение другому чату требуют соответствующей явной пользовательской авторизации. Goal/расписание — только по отдельному запросу, не обещание фоновой работы и не расширение scope/merge rights.
 
-При каждом переходе/завершении/blocker сам подготовь один следующий шаг. Если нужна другая роль, выдай полный готовый к копированию промпт и packet: Issue/PR, actual refs, ветка, executor, scope/контракты, acceptance/evidence, stops и формат результата. Не ждать отдельной просьбы владельца. Сохрани уникальные материалы в GitHub; будущие роли запускаются по очереди. Подготовка промпта не означает claim, запуск чата, scheduled automation или разрешение merge. Полное правило находится в [WORKFLOW](docs/WORKFLOW.md#автоматическая-подготовка-следующего-шага-и-передачи).
+Подробнее: [автоматическая передача](docs/WORKFLOW.md#автоматическая-подготовка-следующего-шага-и-передачи), [короткий запуск](docs/DAILY_WORKFLOW.md), [Handoff](docs/templates/HANDOFF.md).

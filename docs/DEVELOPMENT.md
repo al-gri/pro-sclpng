@@ -1,5 +1,7 @@
 # Development — BOOT-001
 
+Active role/lifecycle authority and activation conditions are in [WORKFLOW](WORKFLOW.md): replaceable Integrator, one delivery task/writer and LOW/STANDARD/STRICT verification. STANDARD requires Worker plus fresh independent targeted review; STRICT retains mandatory frozen-candidate QA and technical/CI gates. Review identifies START/HEAD/TREE/TARGET and a clean known environment. Shared/lock/CI ownership is assigned explicitly in the bounded packet; existing claims remain until transferred. The dated implementation/baseline commands, ownership claims and readiness labels below retain their original scoped meaning; they neither override current governance nor transfer PASS to another executor/head.
+
 ## Scope
 
 Exactly two workspace members: `crates/domain` (library) and `apps/radar`

@@ -1,27 +1,57 @@
 ---
 name: Sequential engineering task
-about: Один проверяемый результат для одного текущего исполнителя
+about: Одна bounded задача; проверка по риску с сохранением обязательных gates
 labels: ''
 assignees: ''
 ---
 
-## Task ID / цель и результат
+## Канонический указатель / TASK
 
-## Dependencies / base / assignment
-Фактический base при claim, один executor/role, branch; risk и нужен ли independent QA.
+PACKET_VERSION / latest authorized transition receipt:
+UI_STAGE = READY | IMPLEMENTING | VERIFYING | READY_TO_MERGE | DONE (либо BLOCKED/PAUSED):
+DETAILED_STATUS / BRANCH / PR:
+CURRENT_WRITER / WORKSPACE / FREEZE / BLOCKERS / NEXT_ACTION:
 
-## Scope и contracts
-Allowed modules/paths; ссылки на accepted specs/ADR; out of scope. Shared files — Integrator.
+Этот блок указывает на единственный актуальный packet/result; история сохраняется. Последний произвольный comment не заменяет авторизованный переход.
 
-## Acceptance / evidence
-Применимые positive/negative/replay checks; real vs synthetic; обязательное evidence.
-Feasibility probes выполняются внутри implementation. Не требовать готового adapter до старта ветки.
+## Bounded packet
 
-## Start / stop / blocker
-Start: scope, available input contracts, один исполнитель и способ сборки.
-Stop: непринятый contract/ADR, scope violation, конкретное небезопасное поведение.
-Недоступный live блокирует live acceptance. При откладывании сохранить branch/patch, owner/action/resume condition.
+GOAL / ACCEPTANCE (criterion IDs):
+SCOPE / FILES_ALLOWED / NON_GOALS:
+CONTRACTS / ACCEPTED_DECISIONS / DEPENDENCIES:
+START_SHA / TARGET_BRANCH / TARGET_SHA:
+ENVIRONMENT / CLEAN_CHECKOUT / TOOLCHAIN:
+WRITER / SHARED_FILES_OWNER (paths, existing claim/transfer):
+EXECUTOR_EXCEPTION / REASON / SCOPE (если Integrator автор):
+RISK = LOW | STANDARD | STRICT / REASON / REVIEW_TYPE / REQUIRED_GATES:
+AUTHORITY (link, bounded actions/queue, stops):
+HANDOFF_TO:
 
-## Delivery и автоматическая передача
-Один PR report/Handoff с actual head/checks/limitations; отдельный Handoff при необходимости.
-Integrator сам выдаёт один следующий шаг и полный copy-ready prompt/packet нужной роли; уникальные материалы сохраняются в GitHub. Не ждать просьбы владельца. Merge — владелец.
+LOW — только опечатка/несемантическое оформление. Governance/specs/contracts/security/изменение gate не LOW. STANDARD — Worker и fresh independent targeted review; STRICT — independent QA и принятые gates. Existing CI обязателен. Shared/lock/CI имеют одного packet owner; текущий claim сохраняется до передачи.
+
+## Checks / evidence
+
+| Criterion | Procedure / command | Expected result | Evidence / required independent run |
+|---|---|---|---|
+
+Feasibility probes внутри implementation; contract/budget/activation gates сохраняются. Live NOT_RUN блокирует live acceptance, synthetic не выдаётся за real capture.
+
+## Start / stop / recovery
+
+Start: accepted inputs/scope/authority, START_SHA, один автор и способ проверки.
+Stops: непринятый contract/ADR, scope/ownership conflict, drift frozen source, missing required evidence.
+Cause / owner action / retained refs or patch / resume condition:
+
+## Delivery / review
+
+Worker result: TASK/PACKET_VERSION/START_SHA/HEAD_SHA/TREE/TARGET_SHA/CHANGED_PATHS/CHECKS/KNOWN_UNKNOWNS_PRESERVED/HANDOFF_PATH/dirty files.
+Integrator review → IMPLEMENTATION_COMPLETE/SOURCE_FROZEN/exact HEAD/TREE/TARGET → проверка по риску.
+Verdict PASS/FAIL/BLOCKED; check-level NOT_RUN/NOT_APPLICABLE отдельно. Новый commit → новый итог; receipts в comments, не self-SHA commit. QA пишет временные reproductions только в своей копии.
+
+## Передача / checkpoint
+
+NEXT_EXECUTOR / actual agent status либо AUTOSPAWN=UNAVAILABLE_IN_CURRENT_ENVIRONMENT:
+Canonical versioned full packet / copy-ready prompt URL:
+Freeze / evidence / unresolved findings / one next authorized action:
+
+Полный уникальный пакет сохранять при реальном role transfer; микрообновления — delta/ссылки. Merge/ADR/milestone — отдельная authority. Goal/расписание/новые пользовательские чаты и сообщения другим чатам не подразумеваются задачей.
