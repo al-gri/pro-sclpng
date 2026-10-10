@@ -498,3 +498,98 @@ continues this branch; no second executor/PR or QA is started. Only after a
 proved actual gate may bounded Text→WAL→two captured diagnostic replays
 with genuine ACK binding become the next implementation substep. QA packet
 is emitted only for a completed final implementation head.
+
+## ADR-first docs continuation — 2026-10-10
+
+This appendix supersedes the historical next-action packet above; all older
+receipts, probes and ALLOC45-D1 history are retained. Architecture accepted
+**ALLOC45-D1 AS_EXPERIMENTAL_DIRECTION / ADR_FIRST** in current
+[#45](https://github.com/al-gri/pro-sclpng/issues/45), authorizing only this
+Handoff and [PROPOSED ADR0004](../adr/0004-public-capture-allocation-boundary.md).
+**Exact ADR contract/API and full implementation scope remain unaccepted.**
+No vendor/runtime/manifest/lock/CI/accepted ADR/spec is changed in this docs
+increment. Same sole Integrator [claim6097721380](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6097721380),
+branch `feat/REC-001F-3-public-text-capture`, existing Draft PR47. No second
+executor, PR, QA, merge or tracking-issue closure.
+
+Design input publication head `9c1d7c5483f0989a18b62d143fbfc9278905f2e8`,
+tree `140ae5c18650f9eef3c06b7c140d8578b21bfd8c`; accepted actual main/base
+`273bfac01bc7a7954644e5270eb96cc99d787fab`, tree
+`abfca247bbaa6fbad0c9f78d643dc9e8df7b3961`. Runtime remains exactly
+`e6ccef18075f56d73f42f043dfcd506039a975c0`, tree
+`e53017a5c747680d630d4620bc553d619831a9ad`. Subsequent delivery receipt in
+existing #45/47 binds the actual ADR commit/tree, document checks and new
+exact-head CI; neither file embeds its own future commit hash.
+
+Unchanged environment: Windows PowerShell→Linux Docker/RustCargo1.98.1,
+same Integrator/toolchain/access. Full environment setup is not repeated.
+This stage performs source/document verification, not new runtime/protected
+route experiments. Prior [receipt6099645626](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6099645626),
+[evidence6099645308](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6099645308)
+and [receipt6097976919](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6097976919)
+remain historical, with their exact scopes. Prior exact9c
+[CI38066971016](https://github.com/al-gri/pro-sclpng/actions/runs/38066971016)
+is three jobs SUCCESS,578/0/0 including11 expected compile-fail; no gate or
+independent QA follows from that regression result.
+
+ADR0004 now proposes:
+
+- Exact public Result signatures for ledger/config builder/config sharing
+  and owned clones, connection I/O/processing/plaintext, borrowed peer chain
+  and explicit H copies, local retirement and fixed typed error mapping.
+  Exact private provider/verifier/root/parser/DER/OCSP/buffer/crypto signatures
+  identify the fallible adapter obligations without pretending upstream
+  direct-return Box traits implement them.
+- Explicit T/H/three TLS-buffer/diagnostic membership; T8388608 includes
+  ledger/core/headers/control/evidence, H1048576 includes retained chain/
+  verification/crypto work, each TLS buffer65536, diagnostic131072 inside T.
+  No baseline subtraction, phase reclassification, Rust-heap-as-native
+  exclusion, double-counted aliases or realloc delta discount.
+- Actual-backing lifetime through last free/Weak, checked transactional
+  pre-admission/rollback and prepaid old+new moving growth/shrink; refusal
+  has zero rejected underlying allocator calls and no heap recursion,
+  quota panic/unwind/SIGABRT. Stable storage/contended free remain explicit
+  design stops, not already proved implementation.
+- Source-backed C00–C25 Layout/capacity/ownership/free/pre-reservation map
+  over pinned rustls/pki-types/webpki/ring/std/callbacks. Unknown sizes/
+  counts are NOT_ESTABLISHED, not invented safe envelopes.
+- Phase-specific before/after-I/O refusal preserves accepted dispatch
+  Unknown and existing original pending same Close; no fictional Ready,
+  completion, retry or shutdown. FrameSocket/bytes/owner/WAL/decoder and
+  the remaining actual application composition need their own proof.
+- Exact original future119 publisher copies,17 .rs+Cargo.toml and three
+  new vendor files; remaining copies checksum-identical. This is a proposal,
+  never permission to implement or silently expand that list.
+- Opt-in private capture migration, fork/update provenance and maintenance,
+  complete validation matrix; all protected implementation cells NOT_RUN.
+
+Concrete unresolved review decisions in ADR §8.1:
+
+| Stop | Required disposition |
+|---|---|
+| U1 | Helper/message/hash/provider/verifier paths and direct-return crypto traits outside17 require an exact additional path/API decision or a source-complete equivalent confined design; no implicit expansion |
+| U2 | pki owned conversions/clones and webpki EKU/OID error Vecs require lawful unchanged-verification pre-admission/fallible storage, or separately reviewed dependency delta |
+| U3 | ring RSA BoxedLimbs/Montgomery/clone working heap requires exact simultaneous bounds and lawful null outcome; it is Rust heap, not native |
+| U4 | Pinned stable1.98.1 storage/std interoperability, bootstrap/header/Weak and linearizable nonallocating deadline-safe reclamation need a concrete accepted mechanism |
+| U5 | Future vendor workspace/features/provenance/offline manifest/lock integration is not instantiated or authorized |
+| U6 | Remaining real application composition is unprotected by the fork; missing components NOT_RUN, accepted project APIs untouched |
+| U7 | All individual Codec/Clone/error/drop/callback/feature call sites and Layout bounds still need exhaustive source-backed coverage |
+
+Production gate **FAIL / NOT_PROVEN**. Fork/runtime/dependent activation
+**STOPPED** until concrete ADR and complete implementation-scope acceptance.
+Capture/WAL/replay/independent QA **NOT_RUN**. SIGABRT remains
+KILLED/Unknown/incomplete. No measured retained1MiB breach or impossibility
+of every adapter is inferred from diagnostic peaks/old+new arithmetic.
+
+Preserved: TLS12/13/certificate verification; exact budgets and all #45
+deadlines; TimerA/sole owner/SessionTurn; native-control fail-stop; ACK
+NotReconstructed, usable_data=false; accepted WALv1/F1/F2/project APIs/
+ADRs/specs byte-identical. M1 unaccepted; #21/M2 not launched.
+
+**One next step:** sequential Architecture/owner review of PROPOSED ADR0004
+on its actual publication head. The complete copy-ready review packet,
+actual source/check/CI refs and hashes are published in existing #45/47.
+Reviewer returns DESIGN_CHANGES_REQUIRED or
+PROPOSED_CONTRACT_ACCEPTED_WITH_EXPLICIT_STOPS, plus explicit status of full
+implementation scope; a direction-only acceptance cannot unblock code.
+No implementation executor/QA is launched by preparing that packet.
