@@ -6,7 +6,9 @@ Bitget → recorder → replay → горизонтальные уровни →
 
 ## Текущий статус
 
-M0: организационная и архитектурная база. Исполняемый скринер, Cargo workspace и CI пока НЕ реализованы. Этот bootstrap предложен на review; слияние владельцем принимает baseline. Первая задача с кодом — [BOOT-001 / #2](https://github.com/al-gri/pro-sclpng/issues/2).
+M0 принят; M1 в работе. Workspace/CI, decoder, WAL, DataHealth и supervisor library приняты; F-1/F-2 приняты только в partial diagnostic/synthetic scopes. Реальный capture и canonical local book ещё не приняты, usable_data=false. Актуальные accepted baseline и blockers — в [PROJECT_STATE](docs/PROJECT_STATE.md) и GitHub Issues.
+
+Разработка последовательная: одна активная задача, один исполнитель, один PR. [WORKFLOW](docs/WORKFLOW.md) задаёт проверки по риску и обязательную автоматическую подготовку следующего шага/prompts/packet. Следующая implementation — [#45](https://github.com/al-gri/pro-sclpng/issues/45) после принятия governance PR #43 и подтверждения способа сборки.
 
 ## Источники истины
 

@@ -13,24 +13,22 @@
 | M6 | demo/paper execution (отдельное разрешение) | account risk, fills, reconciliation, stop/kill policies |
 | M7 | ограниченный live (отдельное разрешение) | независимый release review |
 
-## Созданные задачи
+## Текущая последовательность M1
 
-- [GOV-001 #1](https://github.com/al-gri/pro-sclpng/issues/1): принять bootstrap.
-- [BOOT-001 #2](https://github.com/al-gri/pro-sclpng/issues/2): первый код workspace/CI.
-- [SPEC-001 #3](https://github.com/al-gri/pro-sclpng/issues/3): domain/event/WAL/DataHealth.
-- [MD-001 #4](https://github.com/al-gri/pro-sclpng/issues/4): официальная feed specification и fixtures.
-- [REC-001 #5](https://github.com/al-gri/pro-sclpng/issues/5): M1 integration-эпик.
-- [QA-001 #6](https://github.com/al-gri/pro-sclpng/issues/6): независимая проверка конкретных SHA.
-- [RULE-001 #7](https://github.com/al-gri/pro-sclpng/issues/7): source validation и минимальный rule registry.
+Одна активная задача/исполнитель/PR по [WORKFLOW](WORKFLOW.md). Backlog хранится в GitHub Issues; этот файл описывает checkpoints, не копирует оперативные назначения.
 
-## Порядок сейчас
+| Очередь | Проверяемый результат |
+|---|---|
+| 1 | Governance PR #43 принят владельцем; фактический способ сборки для #45 |
+| 2 | #45: real bounded capture → WAL → два diagnostic replay; probes внутри implementation |
+| 3 | Независимый QA критического #45 и owner acceptance его ограниченного scope |
+| 4 | Отдельный bounded book-engine child #21 на accepted types и synthetic metadata/fixtures |
+| 5 | Конкретное принятое Bitget normalization/applicability решение и его реализация |
+| 6 | Canonical book + artifacts/proofs + recovery + replay integration |
+| 7 | Independent integrated QA и owner acceptance полного M1 |
 
-```text
-GOV-001 → BOOT-001 → domain implementation
-       ↘ SPEC-001 ────────────────┐
-       ↘ MD-001 ─────────────────┼→ REC-001 → QA M1 gate
-       ↘ QA design ──────────────┘
-       ↘ RULE-001 → M2/M3 (не блокирует чистый recorder)
-```
+Checkpoint 2 не даёт usable_data и не закрывает M1. Engine не конвертирует реальные неизвестные quantities или source zero в canonical effects. #46 сохраняет U09/U10/snapshot-zero/profile blockers; принятие его proposed fail-closed policy само по себе не разрешает normalizer. Публичный API/ADR и numerical budget изменения требуют отдельного принятия.
 
-После BOOT-001 допускаются максимум два активных implementation PR с непересекающимися файлами. Specs/QA чтение могут идти параллельно. Общие workspace/schema-файлы меняет только Integrator. REC-001 разбить на decoder/book, WAL/replay, WS supervisor, integration; не запускать их вслепую до contracts.
+M2 [#29](https://github.com/al-gri/pro-sclpng/issues/29) остаётся BLOCKED до M1 acceptance. RULE-001 [#7](https://github.com/al-gri/pro-sclpng/issues/7) выполняется только как одна явно выбранная задача с предоставленными источниками; параллельного research/implementation нет.
+
+Если текущая задача blocked, Integrator сохраняет resume packet и явно откладывает её до выбора одной замены. Shared Cargo.lock/workspace/CI интегрируются последовательно. На каждом переходе Integrator сам выдаёт следующий шаг и полный copy-ready prompt/packet без напоминания владельца.

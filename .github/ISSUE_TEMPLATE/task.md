@@ -1,34 +1,27 @@
 ---
-name: Bounded engineering task
-about: Одна проверяемая задача для одного worker
+name: Sequential engineering task
+about: Один проверяемый результат для одного текущего исполнителя
 labels: ''
 assignees: ''
 ---
 
-## Task ID / цель
+## Task ID / цель и результат
 
-## Зависимости и base commit
-Указать фактический SHA при claim задачи.
+## Dependencies / base / assignment
+Фактический base при claim, один executor/role, branch; risk и нужен ли independent QA.
 
-## Роль / reviewer / branch
+## Scope и contracts
+Allowed modules/paths; ссылки на accepted specs/ADR; out of scope. Shared files — Integrator.
 
-## In scope
+## Acceptance / evidence
+Применимые positive/negative/replay checks; real vs synthetic; обязательное evidence.
+Feasibility probes выполняются внутри implementation. Не требовать готового adapter до старта ветки.
 
-## Out of scope
+## Start / stop / blocker
+Start: scope, available input contracts, один исполнитель и способ сборки.
+Stop: непринятый contract/ADR, scope violation, конкретное небезопасное поведение.
+Недоступный live блокирует live acceptance. При откладывании сохранить branch/patch, owner/action/resume condition.
 
-## Разрешённые пути
-
-## Входные и выходные контракты
-
-## Инварианты
-
-## Acceptance tests
-- [ ] Положительный сценарий.
-- [ ] Ошибочный/аварийный сценарий.
-- [ ] Replay/causality, если применимо.
-
-## Stop conditions
-Изменение публичного контракта, отсутствие источника или необходимость редактировать чужую область.
-
-## Deliverables
-PR, код/документ, реальные результаты проверок, `docs/handoffs/TASK-ID.md`.
+## Delivery и автоматическая передача
+Один PR report/Handoff с actual head/checks/limitations; отдельный Handoff при необходимости.
+Integrator сам выдаёт один следующий шаг и полный copy-ready prompt/packet нужной роли; уникальные материалы сохраняются в GitHub. Не ждать просьбы владельца. Merge — владелец.
