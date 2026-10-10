@@ -698,3 +698,41 @@ E1 reclamation custody is explicit: a charged CoreReclaimOwner stays with the
 fixture driver after user budget handles disappear, drains actual backing and
 frees the ledger last. Premature custody loss retains pending/orphaned charges;
 production owner binding remains U6, not an application bridge designed here.
+
+
+## ALLOC45-U4-ARC-D1 — PROPOSED Arc-child dossier
+
+The [ADR0004 §13 dossier](../adr/0004-public-capture-allocation-boundary.md#alloc45-u4-arc-d1)
+records **PROPOSED / UNAVAILABLE_WITH_CURRENT_STABLE_PUBLIC_BOUNDARY /
+BLOCKED_WITH_NAMED_DELTA: ARC-DELTA-01**. Locked rustls0.23.45's current
+stable public OtherError Arc surface provides no established full
+pre-allocation returned-refusal/bounded-sharing route. Conditional
+allocation-attached lifetime accounting is separate: original class charges
+must survive owning extraction, aliases, outer context Drop and Weak until
+matching physical free returns. Unknown Layouts remain symbolic; arbitrary
+destructor, custody, foreign/thread-exit and System latency remain stops.
+No universal impossibility claim or implemented adapter follows.
+
+[Docs-only transfer](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6102972726)
+and [AUTHOR-v2](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6102980219)
+appoint the current local Integrator as sole author of exactly these two
+appends. Earlier claim6097721380 history is retained; runtime/shared-file
+ownership remains frozen. Input HEAD4f599f5ab687ca1fddb43c2dd8a814e3cd70ad5a,
+TREE8c9cf1f05ca9c85f140ad53087a925cc3a31d845; actual main
+TARGETcae130b70f68a501c63e20ca109e421d2d7f8f4d. The containing commit's
+identity, author checks and new freeze are saved after commit in PR47.
+
+ARC-DELTA-01 names a later ownership/API decision at rustls
+src/error.rs::OtherError and src/webpki/mod.rs::{pki_error,crl_error};
+it is **UNACCEPTED / NOT_IMPLEMENTED**, neither a future edit allowlist nor
+a sufficient complete closure. Existing document prefixes are retained.
+ADR0004 PROPOSED, D2 DESIGN_PASS, completed E1 PASS_WITH_RESIDUAL_STOPS,
+U1–U7 UNRESOLVED/FULL_IMPLEMENTATION_SCOPE_NOT_ACCEPTED and every accepted
+budget/TLS/error/deadline/TimerA/owner/SessionTurn/Unknown/same-original-Close/
+native-control/WAL/ACK gate remain unchanged. Production FAIL/NOT_PROVEN;
+capture/WAL/replay/final production QA NOT_RUN; activation STOPPED;
+usable_data=false; F1/F2 frozen; M1 unaccepted; #21/M2 idle.
+No E1/runtime/probe rerun or source/API implementation is performed here.
+
+Next after new candidate freeze: fresh independent STRICT documentary QA and
+existing exact-head CI, then separate sequential Architecture/owner disposition.

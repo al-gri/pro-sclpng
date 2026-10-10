@@ -1277,3 +1277,158 @@ accepted #45 bound/deadline/TimerA/SessionTurn/Unknown/same original Close/
 native-control/ACK NotReconstructed/usable_data=false remain unchanged.
 Production gate FAIL/NOT_PROVEN; capture/WAL/replay/independent QA NOT_RUN;
 dependent activation STOPPED. No experiment has been executed for this dossier.
+
+
+<a id="alloc45-u4-arc-d1"></a>
+
+## 13. ALLOC45-U4-ARC-D1 — PROPOSED Arc-child feasibility dossier
+
+**PROPOSED / UNAVAILABLE_WITH_CURRENT_STABLE_PUBLIC_BOUNDARY /
+BLOCKED_WITH_NAMED_DELTA: ARC-DELTA-01.** This focused negative construction
+conclusion is a documentary result, not U4 closure or a proof that every
+possible source-complete prepaid adapter is impossible. Lifetime accounting
+below is conditional; no adapter, replacement, prototype or experiment is
+implemented or authorized by this dossier.
+
+Authority: [Architecture AUTHORIZE_DOCS_ONLY](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6102765362),
+[docs-only transfer](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6102972726)
+and [AUTHOR-v2](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6102980219).
+The current owner-appointed local Integrator is the sole two-document author.
+The earlier claim6097721380 remains historical; shared/runtime ownership is
+retained and frozen. Source input HEAD is
+4f599f5ab687ca1fddb43c2dd8a814e3cd70ad5a, TREE
+8c9cf1f05ca9c85f140ad53087a925cc3a31d845; actual main TARGET is
+cae130b70f68a501c63e20ca109e421d2d7f8f4d, TARGET_TREE
+b694234e7d0a8ceb57820774778bfdfdfd8e7242. These are checked predecessors;
+the containing commit's final identity is recorded after commit in PR47.
+Earlier proposed next actions in §§12.5–12.6 remain historical. E1 is already
+complete and is not repeated here.
+
+### 13.1 Exact sources and public/private distinction — ARC-D01
+
+Unchanged Cargo.lock pins rustls0.23.45, official archive SHA256
+0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634.
+The [official archive](https://static.crates.io/crates/rustls/rustls-0.23.45.crate)
+was rechecked against that checksum; its .cargo_vcs_info.json binds VCS path
+rustls to official commit2976d90fd1c2db6b518700dd101b714069cfcb17.
+Seven focused cached rustls source files matched the archive's ordered lines.
+The unchanged toolchain is Rust/Cargo1.98.1, compiler
+48a229ceaefd4985c50990b14116b6d856af0985, Cargo
+797e8a9bca276c1c9f9f738d2a20f484fa4eea9d, Linux x86_64.
+Official Rust tag1.98.1 resolves to that compiler commit; focused existing
+source identities were checked against exact official files. This is identity
+verification, not signature verification or a repeated publisher-closure audit.
+All source links below use these immutable commits, never latest/nightly.
+
+| ID | Verified fact / supported contract versus implementation observation |
+|---|---|
+| A1 | [rustls error.rs1032–1048](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/error.rs#L1032-L1048): std OtherError is a public tuple containing Arc of dyn StdError + Send + Sync, deriving Clone. [lib.rs420–427](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/lib.rs#L420-L427) aliases ordinary alloc::sync::Arc with the default allocator. Tuple construction moves an existing Arc; it does not create or admit its backing. |
+| A2 | [pki_error139–142 and crl_error177–180](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/webpki/mod.rs#L59-L190) construct Arc::new in catch-all branches before wrapping. [verify.rs138–181](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/webpki/verify.rs#L138-L181) and [server_verifier.rs232–295](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/webpki/server_verifier.rs#L232-L295) show source reachability via certificate verification/parsing and CRL conversion, not an executed branch witness. The examined radar manifest enables std/ring/tls12 with default features off; [AWS-LC module gate](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/crypto/mod.rs#L24-L30) excludes its additional origins for that manifest. No feature/runtime audit is claimed. |
+| A3 | [Arc::new382–437](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L382-L437) allocates private ArcInner through Box::new. [try_new589–599](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L589-L599) and [try_new_in987–999](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L987-L999) are unstable allocator_api, not supported stable constructors here. Private ArcInner is an implementation observation, not a public ABI to reconstruct. |
+| A4 | [Box allocation247–291](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/boxed.rs#L247-L291) invokes handle_alloc_error on failure. [The handler513–543](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/alloc.rs#L513-L543) diverges; configured panic/default abort is not returned refusal. [Arc::from_raw1598–1620](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L1598-L1620) requires Arc-origin provenance. An independently allocated lookalike is not a lawful Arc bootstrap. |
+| A5 | [Arc clone2399–2432](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L2399-L2432) and [Weak clone3429–3443](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3429-L3443) share backing and abort on overflow. [Downgrade1936–1968](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L1936-L1968) can spin; [upgrade3279–3307](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3279-L3307) retries and asserts against overflow. Upgrade None means no strong ownership, not quota/deadline refusal. No finite contention bound follows. |
+| A6 | [Weak's public contract324–334](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L324-L334) retains backing. [Last strong2132–2143](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L2132-L2143) invokes payload Drop; [last Weak3506–3521](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3506-L3521) deallocates backing. Without explicit Weak, payload Drop completes before the implicit weak release; surviving explicit Weak prolongs control storage. |
+| A7 | [OtherError conversions/display/source1050–1079](https://github.com/rustls/rustls/blob/2976d90fd1c2db6b518700dd101b714069cfcb17/rustls/src/error.rs#L1050-L1079) move the wrapper, delegate formatting, and return a borrowed source. Public Error/CertificateError/CertRevocationListError Other variants and derived Clone expose the child; no custom Drop in error.rs closes its lifetime. OtherError's derived clone is a shallow Arc clone, not a deep payload copy. |
+
+Let L_arc be the unknown complete requested Rust Layout for actual Arc backing,
+including control, data, alignment and padding. In §12's conditional allocator
+family, F(L_arc) adds its own charged header/padding; separately allocated
+ledger, record, custody, metadata and nested children each need their own paid
+Layout. No numeric private header, handle-size bound or libc usable-size
+subtraction is substituted. A hook seeing L_arc after entry supplies no earlier
+complete pre-admission plan. Moving webpki::Error into Arc does not prove all
+nested owned children inline or prepaid. Public traits guarantee neither
+nonallocating formatting nor bounded destruction.
+
+### 13.2 Focused construction and full retained-lifetime matrix — ARC-D02
+
+All accounting statements are requirements/conditional inferences from §12,
+not implemented enforcement. Each real backing retains its immutable original
+§2 H/T membership; charge does not migrate to a new caller context. T counts
+the same allocation once. A shallow alias adds no second backing charge;
+separately allocated controls/children are never omitted.
+
+| Route | Construction / lawful refusal boundary | Retained backing and physical free/debit boundary |
+|---|---|---|
+| Built-in pki_error/crl_error OtherError | A2/A3 call infallible Arc::new; no separate returned resource-refusal surface. Prior complete Layout/branch/nested plan is missing. Null, panic or abort is not that refusal. | Original F(L_arc) and every separately paid nested child remain charged. Trait unsizing does not remove control or children. |
+| External existing Arc passed to public tuple | A1 moves existing ownership without allocating. It cannot retroactively prove admission, original class or allocator-family provenance; a foreign/unproved origin is a stop. | If already lawfully tagged, moving the handle preserves the original charge and custody. Otherwise the matrix grants no protected admission. |
+| Error move/extraction/replacement; wrapper/config/budget Drop | Public .0 permits owning extraction; A7 source() itself is only a borrow. Moves have no new backing admission. Replacement may independently create/drop another child and needs its own plan. | Surviving owning alias or Weak defeats debit on outer-wrapper/context Drop. The independently paid ledger/custodian must outlive all retained children. |
+| OtherError shallow clone; Arc/Weak clone, downgrade/upgrade | A5 adds references to existing backing, not new payload storage. Overflow abort/assert and contention retry are not bounded fallible sharing. Other error-variant Clone allocation closure remains U7. | Original backing is charged once through aliases and Weak; no early debit or invented clone backing. Any actual new nested allocation requires separate admission. |
+| Last strong / dynamic payload Drop | A6 starts arbitrary dyn Error destruction. Send/Sync/Error provides no bound on allocation, blocking, panic or nested retention. No returned allocation-refusal contract is inferred from Drop. | Nested backing can be freed only according to its own physical lifetime. Arc control/backing remains paid through payload destruction and surviving explicit/implicit Weak. |
+| Last Weak / retired physical backing | A6 reaches the matching allocator. Under §12's proposed family, retirement records are independently prepaid; publication is not physical free. | Original charge persists while retired/free/debit is pending. Only returned matching physical free permits that backing's debit; paid ledger/custody remains until all records/references/debits finish. |
+| Leak, foreign callback, thread exit or lost custodian | No constructor/cleanup bound follows. Foreign pointer/Layout adoption is stopped; thread exit supplies no guaranteed reclamation deadline. | Leaks and orphaned/pending work stay charged and prevent completion. Losing public budget handles or custody cannot synthesize physical cessation/free/debit. |
+| Fallibly prepared Box then Box-to-Arc conversion | [sync.rs2243–2260](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L2243-L2260) allocates new Arc backing before releasing Box backing. The Arc step remains infallible. | Prepay the simultaneous old Box + new Arc peak, headers/controls and children; no old-allocation credit before free. Even hypothetical [try_new_in546–552](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/boxed.rs#L546-L552) takes owned input: inference, refused allocation can run ordinary input cleanup, whose arbitrary destructor is not bounded. |
+
+[GlobalAlloc90–193](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/alloc/global.rs#L90-L193)
+permits null and allocation elision, forbids allocator unwind, and requires
+matching allocator/pointer/Layout for free. These contracts do not make an
+infallible caller return refusal. [System74–85](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/alloc.rs#L74-L85)
+forbids assuming allocator interfaces interchangeable; [Unix System5–58](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/alloc/unix.rs#L5-L58)
+calls libc. No finite System allocation/free latency is specified by these
+sources (inference from missing timing contract). [TLS destructor81–108](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/thread/local.rs#L81-L108)
+is best effort with shutdown caveats; it cannot replace proven custody.
+Conditional allocation-attached lifetime interception and bounded creation
+are separate proof obligations.
+
+### 13.3 Minimal later decision and sufficiency limit — ARC-D03
+
+The unchanged stable public OtherError Arc boundary does not provide the
+required supported pre-allocation returned-refusal route with known full
+backing/control plan and bounded fallible sharing. Result around Arc::new,
+catch_unwind, null/abort recovery, fallible Box conversion, nightly constructor
+or private ArcInner/from_raw reconstruction does not establish it. A later
+source-complete finite prepaid leaf could only be assessed with its own exact
+Layout/branch/refcount/nested/destructor proof; this dossier supplies none.
+
+**ARC-DELTA-01 — UNACCEPTED / NOT_IMPLEMENTED:** one necessary later
+Architecture decision must address the supported fallible ownership boundary
+at locked rustls **src/error.rs::OtherError**, including its public Arc field,
+and **src/webpki/mod.rs::{pki_error,crl_error}** producers. The decision must
+either retain the existing public Arc API and prove a supported stable
+construction/admission/sharing route, or explicitly accept a public ownership/
+error API change with known backing/control Layout, original immutable class
+identity and bounded fallible sharing/refusal propagation. A different pointer
+cannot silently replace the public tuple field. Caller/error semantics and
+all relevant producers require review.
+
+This is a narrowly named necessary decision surface, not an accepted edit
+allowlist, implementation sketch, or claim of the smallest sufficient complete
+solution. U1 direct-return/provider propagation, U2 nested webpki/pki ownership,
+U4 arbitrary destructors/foreign/thread-exit/custody/System latency, U6 original
+context/application ABI/charged custodian and U7 exhaustive error/Clone/drop/
+callback/features closure remain dependencies/stops. U3 and U5 also remain
+UNRESOLVED. No new cap, algorithm exclusion or accepted contract change removes
+these obligations; no source/fork/std/dependency/API experiment is started.
+
+### 13.4 Delivery checks and preserved gates — ARC-D04–D05
+
+The authorized increment is only this append plus the short Handoff append.
+The author must compare the full 103285-byte ADR and 55385-byte Handoff START
+prefixes, inspect START-to-candidate paths/diff/whitespace, compare all other
+tree blobs/modes and verify immutable citations/anchors/statuses. Actual TARGET
+compatibility is assessed separately from cumulative main-to-PR history.
+After commit, PR47 records exact new HEAD/TREE/TARGET, actual check outcomes,
+clean checkout and SOURCE_FROZEN with the sole author stopped. Fresh independent
+STRICT documentary QA reads that candidate and criteria before author-result
+reconciliation; unchanged existing exact-head CI remains separately required.
+Author documentary PASS alone accepts no technical mechanism.
+
+ADR0004 remains **PROPOSED**; D2 R1–R3 DESIGN_PASS and completed E1
+E1_REVIEW_PASS_WITH_RESIDUAL_STOPS are retained without rerun. **U1–U7
+UNRESOLVED / FULL_IMPLEMENTATION_SCOPE_NOT_ACCEPTED**. H1048576/T8388608,
+RxPlain/TxPlain/TxRecord65536each and Diagnostic131072 inside T plus charged
+control/header overhead remain unchanged; no baseline subtraction/double count.
+All accepted N1/M16/R4/B262144, message65536/outbound4096,
+capture60s/4096/16MiB, WAL32MiB/32768, TCP2s/TLS3s/upgrade2s within7s,
+frame2s/quantum<=50ms/Send1s, Close1s/256steps/two SAME ORIGINAL attempts
+and cooperative5s only after storage return remain unchanged. TLS12/13,
+certificate verification/errors/all algorithms, TimerA/sole owner/SessionTurn/
+Unknown/Pending/physical cessation/native-control fail-stop/ACK
+NotReconstructed are unchanged. RSS/stack/native/OS/static TLS remain
+separately unproved. Production gate **FAIL/NOT_PROVEN**; capture/WAL/replay/
+final production QA **NOT_RUN**; activation **STOPPED**; usable_data=false;
+F1/F2 frozen, M1 unaccepted and #21/M2 idle.
+
+One next step after author freeze is independent STRICT documentary QA plus
+existing exact-head CI. Eventual Architecture/owner disposition of the
+PROPOSED negative dossier/ARC-DELTA-01 is a separate sequential decision.
