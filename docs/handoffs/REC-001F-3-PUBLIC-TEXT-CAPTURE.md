@@ -653,3 +653,43 @@ all U1–U7 stops retained. Production gate **FAIL/NOT_PROVEN**;
 fork/runtime/dependent activation **STOPPED**; capture/WAL/replay/independent
 QA **NOT_RUN**. M1 unaccepted; #21/M2 idle. No merge/auto-merge/force-push,
 settings changes or issue closure.
+
+## ALLOC45-U4-D1 — PROPOSED ownership feasibility dossier
+
+Source input: `3a59dc5bccb6ee11891dd98e28c4983df6b89bbe`, tree
+`d8223cb3a9183f6d03b6ca4e143dee5a6acbe9d8`; accepted main/base remains
+`273bfac01bc7a7954644e5270eb96cc99d787fab`. Same sole Integrator/claim6097721380,
+branch and Draft PR47. [D2 review6100686192](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6100686192)
+gave R1–R3 DESIGN_PASS / PROPOSED_CONTRACT_ACCEPTED_WITH_EXPLICIT_STOPS for
+partial TLS requirements; it did not accept full implementation scope.
+
+Added only [ADR0004 §12, ALLOC45-U4-D1](../adr/0004-public-capture-allocation-boundary.md#alloc45-u4-d1).
+Entire prior ADR and Handoff byte prefixes are preserved. Actual publication
+SHA/tree/parent/diffs/hashes, checks and new-head CI are bound by the canonical
+receipt in existing #45/47; this input SHA is not a guessed publication head.
+
+**DESIGN_FEASIBLE_FOR_BOUNDED_EXPERIMENT / PROPOSED / SCOPE_DECISION_PENDING:**
+one prepaid, universally headered GlobalAlloc family, explicit fallible
+System preparation, exact plan for a named infallible POD Box leaf and
+deferred physical reclamation. A compatible deallocator frees original
+base/physical Layout and retains ledger independently of extracted children.
+Pinned official Rust1.98.1 source commit matches the existing compiler;
+stable Box/Arc try_new remain unavailable. No experiment/component install
+or repeated publisher audit was performed.
+
+Exactly one next step: Architecture/owner decision on **ALLOC45-U4-CORE-E1**,
+the separately proposed three-path isolated fixture scope: new
+`apps/radar/tests/support/alloc45_u4_core.rs`, new
+`apps/radar/tests/alloc45_u4_core.rs`, feature/target-only edit of
+`apps/radar/Cargo.toml`. Nothing in those paths is changed now. E1 tests POD/
+bytes/String, custom strong/Weak and real General(String) source extraction;
+upstream Arc/full TLS errors/provider/parser/crypto and application composition
+remain unprotected. Default CI would not exercise that nondefault target;
+any CI delta needs a separately named decision.
+
+All U1–U7 UNRESOLVED; ADR remains PROPOSED, full implementation scope
+NOT_ACCEPTED, dependent activation STOPPED. H/T/buffers/Diagnostic and
+accepted #45 bounds/deadlines/TimerA/sole owner/SessionTurn/same original Close/
+Unknown/native-control/WAL/ACK NotReconstructed/usable_data=false unchanged.
+Production gate FAIL/NOT_PROVEN; capture/WAL/replay/independent QA NOT_RUN.
+M1 not accepted; #21/M2 idle; no merge or second executor/task/PR/QA.

@@ -976,3 +976,293 @@ Handoff if docs correction is authorized. Preserve historical receipts.
 Then give one next step and a full copy-ready packet. Until concrete ADR
 and complete scope acceptance: fork/runtime/dependent activation STOPPED,
 production gate FAIL/NOT_PROVEN, capture/WAL/replay/QA NOT_RUN; no merge.
+
+<a id="alloc45-u4-d1"></a>
+
+## 12. ALLOC45-U4-D1 — PROPOSED stable ownership feasibility dossier
+
+**PROPOSED / DESIGN_FEASIBLE_FOR_BOUNDED_EXPERIMENT / SCOPE_DECISION_PENDING.**
+This is a design feasibility conclusion for the small, separately proposed
+experiment below, not a U4 resolution, implemented mechanism, production gate
+or permission to run it. [D2 review6100686192](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6100686192)
+on input `3a59dc5bccb6ee11891dd98e28c4983df6b89bbe` accepted R1–R3 partial
+requirements with explicit stops. §§1–11 remain unchanged and historical;
+all U1–U7 remain UNRESOLVED, full implementation scope NOT_ACCEPTED.
+
+### 12.1 Pinned source facts and feasibility boundary
+
+The read-only source target is **Rust1.98.1**, commit
+`48a229ceaefd4985c50990b14116b6d856af0985`, Linux
+`x86_64-unknown-linux-gnu`/amd64. Official annotated tag1.98.1 resolves through
+`18ed059b1465ce6195154de3250a668f1dd3b1fa` to that exact compiler commit in
+the existing runner's identity receipt. Cargo remains1.98.1
+`797e8a9bca276c1c9f9f738d2a20f484fa4eea9d`. No component was installed:
+existing runner has neither rust-src nor rust-docs; exact official source
+files were read through GitHub, not substituted with latest/nightly docs.
+
+| ID | Pinned source fact (not the proposed implementation) |
+|---|---|
+| S1 | [core GlobalAlloc](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/alloc/global.rs#L90-L113): allocator unwind is undefined behavior; allocation calls can be optimized away. `alloc` may return null; `dealloc` requires its allocation pointer and the same Layout. A null response does not itself make an infallible caller return an error. |
+| S2 | [Box constructor](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/boxed.rs#L247-L291) calls Global.allocate and handle_alloc_error on failure. [Box::try_new](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/boxed.rs#L367-L378) is allocator_api/unstable. Its absence on stable cannot be repaired with a Result wrapper around Box::new. |
+| S3 | [Arc::new/control](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L382-L437) allocates a Box of private ArcInner; [Arc::try_new](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L578-L599) remains unstable. [Internal layout/allocation](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L2171-L2224) includes control and can invoke handle_alloc_error. No public API supplies that private layout before construction. |
+| S4 | [Arc clone](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L2408-L2430) and [Weak clone](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3424-L3446) can abort on reference-count overflow; [Weak upgrade](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3280-L3307) uses checked increment/CAS. [Last Weak Drop](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/sync.rs#L3497-L3525), rather than last strong alone, deallocates control backing through its allocator. These are not bounded fallible share APIs. |
+| S5 | [Vec ownership contract](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/vec/mod.rs#L54-L67) uses Global and Layout::array of actual capacity; [stable raw ownership transfer](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/vec/mod.rs#L535-L645) requires matching allocator/alignment/capacity/initialization. [try_reserve_exact](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/vec/mod.rs#L1532-L1579) returns TryReserveError; [RawVec growth](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/raw_vec/mod.rs#L503-L568) computes its requested capacity/layout. Capacity arithmetic and allocator failure both require explicit mapping. Ordinary reserve/collect/clone/shrink paths are not thereby protected. |
+| S6 | [Stable Layout::extend](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/alloc/layout.rs#L486-L507) returns combined layout/offset; pad_to_align finalizes it. [std System contract](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/alloc.rs#L55-L80) forbids mixing incompatible backing allocator interfaces. [Linux System](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/alloc/unix.rs#L5-L65) uses malloc/posix_memalign/free and may use realloc. This source supplies no finite latency guarantee for System.alloc/free. |
+| S7 | [Pinned native TLS macro](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/thread_local/native/mod.rs#L1-L15) uses a direct native TLS value for const initialization without Drop; [expansion](https://github.com/rust-lang/rust/blob/48a229ceaefd4985c50990b14116b6d856af0985/library/std/src/sys/thread_local/native/mod.rs#L56-L90) distinguishes this from lazy/destructor storage. This permits proposing a const Cell of a raw borrowed plan pointer, not arbitrary thread_local!/thread::current/logging in a hook. Native TLS/OS storage is separately disclosed, not deducted from T. |
+
+Only these focused std sources and four already locked dependency files were
+read for this dossier; no repeated publisher/call-site audit or runtime probe.
+Source formulas below are symbolic until a separately accepted prototype
+reports actual Layouts. No numerical Header, Arc control or allocator usable
+size is asserted. Requested physical Rust Layout includes padding; libc
+bookkeeping/rounding, RSS, stack, native TLS and OS allocation remain separate
+disclosures, not an8MiB process cap.
+
+### 12.2 One recommended mechanism: prepaid storage plus one allocator family
+
+Recommend **one process-wide GlobalAlloc family with universal headers,
+explicit fallible preparation and deferred physical reclamation**. Its first
+scope is only the isolated experimental integration-test process in §12.6;
+no allocator is installed in radar/capture binaries or rustls by this proposal.
+A later private capture process allocator would require a separately named
+root/path/scope decision. This is not a global provider, allocation ACTIVE
+interval or baseline subtraction.
+
+1. A private fallible `try_prepare` receives the existing original deadline/
+   stop, allocation class and exact payload Layout `L`. It computes
+   `(F, offset) = Layout::new::<Header>().extend(L)?`, then `F.pad_to_align()`.
+   Checked transactional admission pays **F.size()** plus any separately
+   allocated plan/control storage, using the unchanged §2 memberships.
+   Overflow, deadline/stop, quota, refcount limit or AdmissionBusy returns
+   scalar evidence **before any System allocation or downstream call**.
+2. After valid admission, `try_prepare` calls **System.alloc(F)** directly,
+   once for this backing. Null rolls back the reservation and returns the
+   existing AllocatorNull meaning without handle_alloc_error, formatting,
+   panic/unwind/SIGABRT or network effects. Multi-block preparation frees any
+   successful earlier blocks before rolling back their charges. It returns
+   a `Prepaid` owning actual storage, not merely quota credits.
+3. For one specifically verified infallible leaf, a stack-resident exact
+   `CallPlan` borrows those prepaid blocks. A const/no-Drop native TLS Cell
+   publishes only its borrowed pointer for the synchronous call. The global
+   hook consumes a matching ticket and returns `base.add(offset)` without
+   invoking System or admitting more memory. Byte/Vec raw ownership helpers
+   first consume their prepaid ticket through stable std::alloc::alloc(L),
+   so the resulting pointer is allocated by the selected Global family,
+   before Vec::from_raw_parts; they do not adopt a bare System pointer.
+   Initial infallible leaf: Box::new of a
+   named sealed POD value, whose S2 allocation is Layout::new::<Pod>(); a
+   Box-to-trait unsizing coercion retains that same allocation. Fallible
+   preparation precedes this infallible call, so preparation null is returned
+   by its outer operation. Unconsumed tickets after allocation elision stay
+   charged until reclaimed; correctness does not require std to allocate.
+4. **An unplanned infallible call is not permitted to execute.** There is no
+   lawful general way to turn its later missing ticket/null into the proposed
+   returned error. A complete finite source-derived plan, including every
+   possible branch/callback request, is required before entering a protected
+   leaf. Unknown nested allocations remain U1/U2/U3/U7 stops. Returning null
+   from the hook to Box/Arc, catch_unwind, emergency uncharged fallback or
+   a guessed reserve pool is not an accepted solution.
+5. Every allocation made through this experimental process's global family,
+   including unprotected harness allocations, uses the same header/pointer
+   convention. Untagged headers select normal System-backed unprotected
+   behavior; their existence proves no production category coverage. Tagged
+   headers carry immutable class, identity, original physical Layout and an
+   independent ledger lifetime reference. Global dealloc receives payload
+   pointer `p` and original `L`, recomputes offset/F and identifies its own
+   header; it never passes `p` to System.dealloc. Untagged harness deallocation
+   uses base/F through System and is not claimed bounded by the tagged core.
+   No reading before a foreign
+   malloc/System pointer is legal: foreign-family ownership transfers stop.
+6. For a tagged block, global dealloc publishes RETIRED into its prepaid
+   record with one release atomic store and returns without allocating or
+   waiting. A bounded record scan claims retired blocks; only that reclaimer
+   calls **System.dealloc(base, F)**, and only after that call returns may
+   its charge and ledger backing reference be released. A pending or blocked
+   physical free remains charged and prevents completion. Hook pointer/Layout
+   agreement, record synchronization and reclaimer safety are experimental
+   proof obligations, not accomplished enforcement.
+
+### 12.3 Compatibility matrix
+
+`F(L)` denotes the header-extended/padded physical Layout above. T counts each
+physical allocation once; sublimit membership is the unchanged §2 predicate.
+The global family observes the actual Layout supplied by std; it does not
+manufacture private ArcInner pointers or recover them through guessed offsets.
+
+| Object / compatibility | Allocation entry and effective Layout | Admission / owner, aliases and lifetime | Physical deallocation and lawful result / remaining delta |
+|---|---|---|---|
+| Custom owned POD/byte storage; **proposed core compatible** | try_prepare uses public Layout::new/array, checked capacity and F(L); inline fields are already paid. | Original context; quota/overflow before System; valid admission+System null returns AllocatorNull. Header and record retain ledger independently of user handle; custom strong/Weak controls have their own known charged Layout. | Retire publishes the record; reclaimer System.dealloc(base,F). Last actual backing free, not wrapper Drop, permits debit. Custom refcount/record proof belongs to U4 experiment. |
+| Ordinary Vec/String/Box; **compatible only with explicit prepared creation/operations** | Family-produced Global allocation has L=Layout::array::<T>(actual capacity), byte capacity for String, or Layout::new::<T> for sized Box. Header/alignment/padding are F(L). Stable raw transfers must satisfy S5 and Box's Global ownership contract; UTF-8 validation/move must not create an unplanned copy. | Fallible helper acquires storage first; Vec spare-capacity writes or a verified single Box leaf need no further allocation. Each actual clone/new backing needs a new admission. Ordinary clone/collect/push beyond capacity, shrink-to-fit and formatting are unprotected until their plan is proved. | std Drop calls selected family with p,L, then physical base,F is freed. Passing the prefixed payload to ordinary System/free, using logical length as capacity, or changing allocator family is incompatible. No blanket protection from a Result wrapper or raw transfer alone. |
+| Upstream Arc/Weak; **lifetime interception possible, fallible/bounded construction and sharing NOT ESTABLISHED** | Actual L includes private strong/weak control and data per S3; hook can receive L at runtime, but stable Arc::try_new is unavailable. No private Arc ABI or numeric pre-construction layout is assumed. | If origin were lawfully prepaid, allocation-attached charge would survive aliases and last strong until last Weak. The required prior full Layout bound/plan and bounded overflow-safe shares/upgrades are not supplied by this dossier. | Last Weak reaches global family (S4); physical free would release charge. Current proposed wrappers cannot silently replace Arc<T> in upstream trait signatures. A separately reviewed U1/U4 private ownership/API delta or source-complete prepayment/refcount solution is required; no std patch/nightly permission. |
+| Direct-return Box/Arc trait objects; **only the named POD Box leaf is a feasible core test** | Concrete Box leaf Layout::new::<Pod>, followed by unsizing, preserves backing; dyn Drop supplies that object's effective Layout. Provider/verifier objects may own additional heap and Arc control. | The POD leaf's storage is prepaid before invocation; nested constructor/clone/destructor/callback closure is not inferred from trait-object size. Upstream direct-return Arc callbacks remain stopped. | Compatible family deallocation for the leaf; general rustls provider/callback proof needs named U1 paths/API plan. No change to certificate verification algorithms or trait semantics is accepted. |
+| Publicly extracted rustls::Error children; **General(String) fixture feasible, complete enum closure NOT ESTABLISHED** | Locked rustls0.23.45 src/error.rs:26/36 contains Vec fields,81 General(String),444–490 owned certificate-context data,1048 OtherError(pub Arc<dyn StdError+Send+Sync>). All actual child allocations require their own F(L), including nested strings/OIDs and controls. | Each tagged child retains immutable H/T membership and ledger independently after source extraction/replacement, config/connection/budget Drop, aliases/Weak or leak. No outer error guard can discharge it. An ordinary new clone needs separate preparation. | Child std dealloc reaches the family even after the outer wrapper disappears. Only actual free permits debit. Error::General(String) will exercise this in the proposed fixture; Arc OtherError, all other variants and pki/webpki construction remain U1/U2/U4/U7 stops. Error meaning is unchanged. |
+
+### 12.4 Bootstrap, growth, concurrency and reclamation proposal
+
+**Bootstrap:** before a ledger exists, caller stack scalars check the original
+context and reserve the aggregate physical Layout of LedgerCore (including
+fixed record array/refcounts), its header and the131,072-byte Diagnostic
+storage plus its T-charged metadata. No heap bootstrap object is exempt.
+First System null returns Copy/scalar refusal without requiring a ledger or
+allocating failure evidence; later partial null frees/debits actual earlier
+backings. A successful core imports this reservation exactly once. Its
+diagnostic/record storage is owned internally, not circularly counted as
+external ledger references. Existing TLS/config/owner/etc must later be
+admitted in the actual composition; harness/test baseline cannot exclude them.
+
+**Growth/shrink:** new F(Lnew) is admitted and physically prepaid while old
+F(Lold) remains live. Copy/move only after success; null/overflow/quota leaves
+old ownership/capacity intact. Old charge persists through retirement to
+physical free. Shrink uses the same moving old+new rule, including smaller
+but newly allocated headers; no System.realloc in-place shortcut is assumed.
+Global realloc for tagged storage must implement this rule through a verified
+fallible leaf/plan; an infallible resize is stopped before entry. Zero-sized
+values/capacity-zero use std's lawful dangling/nonallocating convention and
+do not invent a physical block or free.
+
+**Admission:** one nonallocating try-lock/CAS serializes the entire checked
+T+membership+record+ledger-reference transaction. A failed attempt returns
+AdmissionBusy before allocation; no unbounded spin or new deadline. Failure
+rollback uses the same prepaid record, not an allocating RAII queue. Counters
+and record generation change together; reusing a record before physical free
+and debit is forbidden. Custom try_share/try_upgrade use checked bounded CAS;
+overflow/refusal precedes mutation. Required last-reference decrement and
+retirement after stop/expiry use finite atomic operations, not timed admission.
+This does not make external std Arc clone/Weak upgrade bounded or fallible.
+
+**Reclamation:** a fixed, prepaid record table avoids a dynamically allocating
+queue and unbounded Treiber retry in GlobalAlloc::dealloc. Retired records keep
+base/F/class/generation/ledger reference; a bounded scan may fail to claim a
+contended record and leave it charged. No record is reused while a producer,
+deallocator or reclaimer can access its old generation. After physical free,
+a debit-pending record may conservatively retain a charge until a serialized
+nonallocating debit completes; pending debit/control is explicit, not a fake
+live backing or duplicate allocation. Ledger/control may outlive every public
+handle. Leaks stay live/charged; last Weak may keep control after payload death.
+The final core release occurs only after external references, live/retired
+records and pending debits are gone, then Diagnostic/records/core themselves
+are physically freed. Bootstrap backings are raw internally owned family
+blocks with no external self-reference; final reclamation holds their base/F
+and last scalar witness on the caller stack, never accesses a freed ledger,
+and never places these raw bootstrap pointers into std ownership. No
+self-referential header/core ownership cycle is allowed.
+
+**Boundedness limit:** native S6 System alloc/free latency is not guaranteed.
+The hook's finite retirement work can be tested independently; physical drain
+must report retained pending work if it has not returned. Arbitrary T::drop,
+foreign allocator callbacks, thread exit and process shutdown are not proved
+nonallocating/bounded. The first fixture uses sealed POD and explicitly owned
+byte/String drops only. A stalled reclaimer does not imply physical cessation,
+Ready, seal or owner completion. Original dispatch/Unknown/pending same Close
+and native-control fail-stop remain §6/U6 obligations; this core is not an
+application shutdown adapter. No budget refusal goes through panic/unwind/abort.
+
+### 12.5 Named dependencies and residual unknowns
+
+- **U1:** rustls0.23.45 original17/new budget files remain a future proposal.
+  At minimum the already named `src/crypto/mod.rs`, `src/crypto/ring/{mod,kx,hash,hmac,tls12,tls13}.rs`,
+  `src/crypto/{hash,hmac,tls12,tls13,cipher}.rs`, `src/webpki/{server_verifier,verify}.rs`
+  and helpers in §8 still need concrete construction/callback/clone/drop plans
+  or a separately proposed private ownership/API delta. The mechanism alone
+  does not make direct-return Box/Arc/provider calls fallible.
+- **U2:** locked rustls-pki-types1.15.1 `src/lib.rs` owned DER/Bytes conversion
+  and `src/server_name.rs` owned names, plus rustls-webpki0.103.15
+  `src/verify_cert.rs` EKU/OID growth and `src/error.rs` owned diagnostic data,
+  need a separately named fallible/prepaid ownership/error API decision if
+  existing calls cannot be source-completely planned. These are candidate
+  deltas, not a closed dependency allowlist or changed verification policy.
+- **U3:** ring0.17.14 `src/arithmetic/bigint/{boxed_limbs,modulus,modulusvalue}.rs`,
+  `src/arithmetic/bigint.rs` and `src/rsa/{verification,public_key,public_modulus}.rs`
+  remain the named heap/clone/Montgomery multiplicity/null-plan gap. All current
+  algorithms remain; no substitution, removal or Rust-heap-as-native exclusion.
+- **U4 residuals:** unsafe family/header/raw-ownership validity; finite plan
+  completeness; std Arc construction/layout/refcount solution; generation and
+  reclaim races; core final-free/bootstrap; unbounded System/destructor latency;
+  foreign allocator/FFI/dynamic-library/thread-exit interoperability. These are not solved by the
+  symbolic layout formula, source reading or header sketch.
+- **U5/U6/U7:** vendor/features/lock maintenance, exact application ABI bridge/
+  original-context mapping/protected composition, and exhaustive allocation
+  closure stay unresolved. No bridge is designed here. Missing components
+  remain NOT_RUN. Original119 publisher copies/17.rs+manifest/3new files are
+  unchanged historical proposal; this dossier neither copies nor authorizes them.
+
+### 12.6 One exact proposed experimental scope and decision request
+
+**Request ALLOC45-U4-CORE-E1, separately PROPOSED, not accepted or started:**
+authorize the same Integrator, same Draft branch, to implement only the family,
+prepaid POD/byte leaves and custom core strong/Weak/reclamation fixture. This
+bounded experiment is feasible from S1/S2/S5/S6/S7 without nightly/private Arc
+ABI or dependency patch; its outcome may still reject the production direction.
+
+| Future path | Exact proposed change / copies |
+|---|---|
+| `apps/radar/tests/support/alloc45_u4_core.rs` | **New**, private experimental FamilyAllocator:GlobalAlloc, Header, LedgerCore with inline16-record fixture table, CoreStrong/CoreWeak, CoreClass/CoreFailure, Prepaid/CallPlan/CoreOp, Snapshot/ReclaimReport and sealed Pod. Zero publisher/std copies; no rustls facade or accepted project API. |
+| `apps/radar/tests/alloc45_u4_core.rs` | **New**, isolated integration-test binary installs this one #[global_allocator], includes the support module and allocation/null fault fixtures, exercises real pinned rustls::Error::General(String) source extraction in a fixture wrapper. No sockets/TLS/provider/production activation. |
+| `apps/radar/Cargo.toml` | **Edit only**: nondefault feature `alloc45-u4-experiment = []` and this [[test]] target with required-features=["alloc45-u4-experiment"]. No dependency/version/MSRV/default-feature changes. Cargo.lock remains identical. |
+
+No other code path, CI/workspace/std/vendor/dependency copy or accepted API edit
+is included. Sixteen records is a bounded **experiment fixture**, not a new
+production input/certificate-count cap or allocation policy. Production record
+capacity/backing bounds and their admission require a later exact Layout proof
+inside T; this fixture must not be activated as a production limit.
+
+Exact proposed private API families (signatures belong only to this new scope):
+
+```rust,ignore
+fn try_bootstrap(deadline: Instant, stop: &AtomicBool) -> Result<CoreStrong, CoreFailure>;
+impl CoreStrong {
+    fn try_share(&self, deadline: Instant, stop: &AtomicBool) -> Result<Self, CoreFailure>;
+    fn try_downgrade(&self, deadline: Instant, stop: &AtomicBool) -> Result<CoreWeak, CoreFailure>;
+}
+impl CoreWeak {
+    fn try_upgrade(&self, deadline: Instant, stop: &AtomicBool) -> Result<Option<CoreStrong>, CoreFailure>;
+}
+fn try_prepare(op: &CoreOp<'_>, class: CoreClass, layout: Layout) -> Result<Prepaid, CoreFailure>;
+fn try_vec_bytes(op: &CoreOp<'_>, class: CoreClass, capacity: usize) -> Result<Vec<u8>, CoreFailure>;
+fn try_string(op: &CoreOp<'_>, class: CoreClass, text: &str) -> Result<String, CoreFailure>;
+fn try_prepaid_pod_box(op: &CoreOp<'_>, class: CoreClass, value: Pod) -> Result<Box<Pod>, CoreFailure>;
+fn try_resize_bytes(op: &CoreOp<'_>, class: CoreClass, bytes: &mut Vec<u8>, capacity: usize) -> Result<(), CoreFailure>;
+fn collect_retired(core: &CoreStrong, max_steps: usize) -> ReclaimReport;
+```
+
+CoreOp borrows the original caller context/core; CoreFailure is fixed scalar
+evidence mapping to the unchanged §3 refusal/deadline/stop meanings, not a new
+TLS error semantics. Mandatory collect/Drop retirement receives no fresh
+deadline and cannot claim successful physical drain until frees/debits finish.
+The ordinary GlobalAlloc method signatures remain exactly S1. No general
+closure-taking or arbitrary T/Arc conversion API is proposed for E1.
+
+**Meaningful future validation, NOT_RUN now:** bootstrap aggregate admission,
+first/later System null and rollback with scalar evidence; quota/overflow/
+stop/deadline before allocator and downstream calls (rejected calls=0);
+actual Layout/alignment/padded headers including over-aligned Pod; POD Box
+ticket consumed or safely unused; compatible std Vec/String/Box final frees;
+moving growth AND shrink old+new peaks/refusal leaving old intact; aliases,
+custom Weak, leaked backing and real extracted/replaced General(String)
+outliving wrapper and user core handle; exact-once debit/no double-count;
+concurrent admission/share/upgrade/retire/free and generation reuse; bounded
+retirement/contended drain after stop/expiry; hook recursion counter=0 and no
+logging/allocating TLS/queue/mutex/thread::current path. Instrument the direct
+family/preparation boundaries; optimizer-elided std calls cannot be used as
+proof that an allocator was invoked or failed. No expected-abort test is PASS.
+
+The exact accepted E1 head would require pinned locked/offline compilation,
+targeted `cargo test -p radar --test alloc45_u4_core --features alloc45-u4-experiment --locked --offline`
+and applicable fmt/clippy checks, with actual commands/exits/hashes/traces.
+Existing default CI does not select this nondefault target: its exact-head
+SUCCESS would remain regression only. A CI edit/remote E1 proof route needs a
+separate named U5 decision; no silent CI scope expansion. Normal/adversarial
+TLS12/13/fragmented certificate/OCSP, complete extracted error enum/Arc paths,
+physical application deadlines, owner/WAL/decoder/evidence composition and
+capture/replay/independent QA remain unprotected/NOT_RUN in E1.
+
+**One decision requested:** Architecture/owner either accepts this exact
+three-path E1 experiment only, with these limits and residual stops, or returns
+one named minimal design/scope delta. Acceptance of the recommended mechanism
+alone is not experimental permission. Do not authorize dependency expansion,
+full fork scope, U6 integration or production gate with that decision.
+H1048576/T8388608/three buffers65536each/Diagnostic131072 inside T and every
+accepted #45 bound/deadline/TimerA/SessionTurn/Unknown/same original Close/
+native-control/ACK NotReconstructed/usable_data=false remain unchanged.
+Production gate FAIL/NOT_PROVEN; capture/WAL/replay/independent QA NOT_RUN;
+dependent activation STOPPED. No experiment has been executed for this dossier.
