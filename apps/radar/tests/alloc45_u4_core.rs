@@ -186,25 +186,27 @@ fn refusal_and_nulls() {
     let after = core.snapshot().unwrap();
     assert_eq!(before, after); // not just returned error: no mutation/calls
     assert_eq!(system_counts(), (0, 0));
-    set_refcount_fault(&core, true, usize::MAX);
+    // SAFETY: sole driver/no concurrent users; each artificial count restored
+    // before any handle Drop/reclamation. No extra strong references exist.
+    unsafe { set_refcount_fault(&core, true, usize::MAX) };
     assert!(matches!(
         core.try_share(op.deadline, &stop),
         Err(CoreFailure::ReferenceCountOverflow)
     ));
-    set_refcount_fault(&core, true, 1);
-    set_refcount_fault(&core, false, usize::MAX);
+    unsafe { set_refcount_fault(&core, true, 1) };
+    unsafe { set_refcount_fault(&core, false, usize::MAX) };
     assert!(matches!(
         core.try_downgrade(op.deadline, &stop),
         Err(CoreFailure::ReferenceCountOverflow)
     ));
-    set_refcount_fault(&core, false, 0);
+    unsafe { set_refcount_fault(&core, false, 0) };
     let weak = core.try_downgrade(op.deadline, &stop).unwrap();
-    set_refcount_fault(&core, true, usize::MAX);
+    unsafe { set_refcount_fault(&core, true, usize::MAX) };
     assert!(matches!(
         weak.try_upgrade(op.deadline, &stop),
         Err(CoreFailure::ReferenceCountOverflow)
     ));
-    set_refcount_fault(&core, true, 1);
+    unsafe { set_refcount_fault(&core, true, 1) };
     assert!(matches!(
         weak.try_upgrade(Instant::now(), &stop),
         Err(CoreFailure::DeadlineExpired)

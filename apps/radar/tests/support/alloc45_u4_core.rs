@@ -1137,8 +1137,11 @@ pub fn collect_retired(owner: &mut CoreReclaimOwner, max_steps: usize) -> Reclai
 pub fn hold_admission() -> Result<impl Drop, CoreFailure> {
     Admission::acquire()
 }
-pub fn set_refcount_fault(core: &CoreStrong, strong: bool, value: usize) {
-    // Test driver only while no concurrent refcount users; restored before Drop.
+/// # Safety
+/// Fixture driver must have exclusive refcount-operation/cleanup custody and
+/// restore the true count before any handle Drop or custodial reclamation.
+/// Artificial counts are not ownership references. Not a production operation.
+pub unsafe fn set_refcount_fault(core: &CoreStrong, strong: bool, value: usize) {
     if strong {
         core.get().strong.store(value, Ordering::Relaxed);
     } else {
