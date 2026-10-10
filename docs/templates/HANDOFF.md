@@ -1,28 +1,46 @@
 # Handoff: TASK-ID
 
-Использовать для прерванной/сложной передачи, milestone или прямого deliverable packet. Для обычной завершённой задачи этот же набор полей хранится в PR report; отдельный файл не обязателен.
+Обычный PR report может быть Handoff; отдельный файл нужен при сложной/прерванной передаче/milestone или explicit deliverable. After-freeze Worker/QA/integration receipts сохранять в Issue/PR comments без нового source commit. Все уникальные объекты должны быть durable в GitHub; executor context disposable.
 
-Status / Issue / PR:
-Role / actual executor:
-Base / current head / tested refs:
-Branch / retained patch:
+```text
+TASK / STATUS / ISSUE / PR
+ROLE / ACTUAL_EXECUTOR
+EXECUTOR_EXCEPTION / REASON / SCOPE (если Integrator пишет source)
+BASE_SHA / FINAL_SHA / TREE
+BRANCH / RETAINED_PATCH
+CHANGED_PATHS
+KNOWN_UNKNOWNS_PRESERVED
+HANDOFF_PATH = файл либо canonical PR report URL
+```
 
-## Результат и scope
+## Результат и границы
 
-Что сделано; файлы; accepted contracts/ADR; limitations/provenance.
+Bounded objective/result; accepted inputs/contracts/ADR; deviations/limitations. Не принимать ADR/milestone или расширять scope результатом Worker/QA.
 
-## Реальные checks / evidence
+## Реальные проверки
 
-| Check | PASS/FAIL/NOT_RUN/NOT_APPLICABLE | Executor / exit / URL or digest |
+| Check | PASS/FAIL/NOT_RUN/NOT_APPLICABLE | Executor / command / exit / log or CI URL |
 |---|---|---|
 
-## Blocker и продолжение
+Developer checks / independent QA / CI отдельно. Не переносить PASS на новые bytes/executor; applicability прежнего evidence явная.
 
-Причина, ответственное действие, resume condition. Перед выбором другой задачи текущая явно отложена; одновременного исполнения нет.
+## Freeze и QA
 
-## Следующий один шаг и обязательный copy-ready пакет
+IMPLEMENTATION_COMPLETE:
+SOURCE_FROZEN receipt:
+FINAL_SHA / TREE:
+QA_EXECUTOR / independence:
+FINAL_VERDICT = PASS | FAIL | BLOCKED:
+FINDINGS / reproduction:
+QA report URL:
 
-Какой один чат/роль и среда нужны сейчас. Полный prompt/packet: Issue/PR, actual refs, branch, sources, allowed paths/shared-file owner, acceptance/evidence, starts/stops, формат результата.
+Любой source commit после freeze требует нового review/freeze/QA. FAIL -> Integrator corrective packet -> один Worker, same Issue/branch/PR; QA source не исправляет. PASS -> Integrator receipt -> owner acceptance; merge/Architecture/milestone не автоматические.
 
-Выдать автоматически при передаче, не ждать просьбы владельца. Уникальные материалы и код/patch сохранены в GitHub; Issue/PR URL:
-Отсутствуют уникальные решения только в чате. Исторические Handoff/receipts не переписываются. Merge принимает владелец.
+## Blocker / один следующий шаг
+
+Cause / owner action / resume condition; current task явно отложена до другой implementation.
+NEXT_EXECUTOR:
+AUTOSPAWN = фактический spawn/agent identity либо UNAVAILABLE_IN_CURRENT_ENVIRONMENT:
+Canonical bounded Task Packet / полный copy-ready prompt URL:
+
+Передачу готовит и запускает Integrator без напоминания при доступном orchestration; fallback сохраняет полный prompt. Исторические записи сохранять; уникального контекста только в чате нет.

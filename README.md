@@ -8,7 +8,7 @@ Bitget → recorder → replay → горизонтальные уровни →
 
 M0 принят; M1 в работе. Workspace/CI, decoder, WAL, DataHealth и supervisor library приняты; F-1/F-2 приняты только в partial diagnostic/synthetic scopes. Реальный capture и canonical local book ещё не приняты, usable_data=false. Актуальные accepted baseline и blockers — в [PROJECT_STATE](docs/PROJECT_STATE.md) и GitHub Issues.
 
-Разработка последовательная: одна активная задача, один исполнитель, один PR. [WORKFLOW](docs/WORKFLOW.md) задаёт проверки по риску и обязательную автоматическую подготовку следующего шага/prompts/packet. Следующая implementation — [#45](https://github.com/al-gri/pro-sclpng/issues/45) после принятия governance PR #43 и подтверждения способа сборки.
+Разработка последовательная: одна активная задача, один implementation executor, одна ветка, один PR. [WORKFLOW](docs/WORKFLOW.md) задаёт Integrator orchestration → ephemeral Worker → exact source freeze → separate independent QA; при доступном spawn роли запускает Integrator. GOV-ORCH-001 [#48](https://github.com/al-gri/pro-sclpng/issues/48) ожидает принятия отдельного governance PR. Existing #45/PR47 и уже выполненный E1-CORR-01 сохраняются; [migration packet](docs/task-packets/GOV-ORCH-001.md) задаёт продолжение без restart.
 
 ## Источники истины
 

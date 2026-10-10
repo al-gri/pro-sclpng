@@ -39,3 +39,7 @@ The ordinary Windows sandbox restricted Docker and shell-network access; executi
 - Preserve historical handoffs/receipts, including their valid NOT_RUN statements. Record newer executor capability or exact-head runtime results in a new dated receipt; do not rewrite old evidence. Independent QA still verifies its own concrete final head, and absent live access remains NOT_RUN.
 
 This snapshot changes no permissions, settings, toolchain, code, CI workflow, accepted contracts or milestone status. Full M1 and data usability are not accepted by tool availability or the reported baseline run.
+
+## Separate orchestration observation — GOV-ORCH-001, 2026-10-10
+
+The current ChatGPT Work executor exposes real subagent orchestration. Integrator actually spawned a separate read-only process reviewer for #48; independent frozen-head QA is a later sequential role. AUTOSPAWN_CAPABILITY=AVAILABLE_IN_CURRENT_ENVIRONMENT. This observation does not transfer any historical Windows/Linux runtime PASS, establish Rust/Cargo/Docker/cache/network/live access, or change the pinned toolchain/technical gates. Worker and QA each record their actual environment and exact refs. Normal implementation goes to one ephemeral Worker; explicitly scoped governance/shared integration exceptions remain Integrator-owned under [WORKFLOW](WORKFLOW.md). Unavailable orchestration in another executor requires the honest saved full-prompt fallback; available orchestration must be used.

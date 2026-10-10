@@ -1,5 +1,13 @@
 # Project state
 
+## Текущий governance snapshot — GOV-ORCH-001
+
+Проверено 2026-10-10: actual main `273bfac01bc7a7954644e5270eb96cc99d787fab`, tree `abfca247bbaa6fbad0c9f78d643dc9e8df7b3961`; PR #43 MERGED. [#48](https://github.com/al-gri/pro-sclpng/issues/48) готовит новый role contract, **PROPOSED / OWNER_ACCEPTANCE_PENDING**, не объявляет его accepted содержащим этот текст commit. Следующие baseline/acceptance записи сохранены как история соответствующих scoped receipts.
+
+Единственная активная задача — governance #48 с EXECUTOR_EXCEPTION=INTEGRATOR (process/state/packets only). Existing [#45 / Draft PR47](https://github.com/al-gri/pro-sclpng/pull/47) приостановлены; [pause receipt](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6102089039). Current source `4f599f5ab687ca1fddb43c2dd8a814e3cd70ad5a`, tree `8c9cf1f05ca9c85f140ad53087a925cc3a31d845`; E1-CORR-01 уже доставлен и ожидает sequential Architecture/source re-review per [receipt6101864975](https://github.com/al-gri/pro-sclpng/pull/47#issuecomment-6101864975). Новый Worker не запущен для повторения завершённой коррекции. После governance acceptance — recheck actual refs и resume по [packet](task-packets/GOV-ORCH-001.md).
+
+ADR0004 PROPOSED, U1–U7 UNRESOLVED/FULL_IMPLEMENTATION_SCOPE_NOT_ACCEPTED, production FAIL/NOT_PROVEN; capture/WAL/replay/independent production QA NOT_RUN; activation STOPPED; usable_data=false; M1 unaccepted; #21/M2 idle. Historical accepted F1/F2/contracts/budgets остаются прежними.
+
 Обновлено: 2026-10-10. Проверенный actual main после docs PR #38: `8baf610b4ac15122dfcdbfe07730bc30c6558d73`, tree `ef5ae29b1ab546641c50110c9053834ad2891219`. Implementation baseline F-2: `cfda8a29e29c2b15faf7350faa2fa7679d08915e`; исходный base F-2: `8b251e1ef09354a1a205fa152ce7726ea5f5749b`.
 
 Это owner-confirmed governance change последовательного процесса и автоматической передачи (2026-10-10), с сохранением ранее подготовленной docs-only синхронизации статуса. PR #38 **MERGED / ACCEPTED_IN_MAIN / DOCS_ONLY** по [финальному receipt 6095953590](https://github.com/al-gri/pro-sclpng/pull/38#issuecomment-6095953590), superseding прежние OPEN/UNMERGED/NOT_AUTHORIZED утверждения. Его приёмка не расширяет F-2: PR #39 принят только в partial synthetic/unverified scope. Reviewed source, implementation baseline и actual main учитываются отдельно; SHA выше — проверенные baseline до этой синхронизации, не будущий containing commit. Исторические packets/handoffs/receipts сохраняются без переписывания.
@@ -114,13 +122,13 @@ Every report remains synthetic/unverified, `canonical_status=NotEvaluated`, `can
 
 ## Управление
 
-Один Integrator, одна активная задача, один исполнитель, один PR. Review/QA/исправления идут последовательно. Владелец подтвердил процесс и обязательную подготовку prompts/packets 2026-10-10; действующие подробные правила после принятия governance PR #43 — в [WORKFLOW](WORKFLOW.md). Merge остаётся за владельцем.
+Постоянный Integrator управляет одной активной задачей; ordinary implementation выполняет один ephemeral Worker. После Integrator scope/shared review — exact SHA/tree SOURCE_FROZEN и separate independent QA; FAIL возвращается bounded corrective Worker в той же задаче/branch/PR. ONE ACTIVE IMPLEMENTATION EXECUTOR сохраняется, shared edits последовательны. Role migration #48 вступает в силу после governance acceptance; подробности и spawn/fallback — [WORKFLOW](WORKFLOW.md). Merge/ADR/milestone authority остаются за Owner/Architecture.
 
 GitHub — единственный источник истины: accepted main/specs/ADR; Issue assignments/blockers; PR result/checks/Handoff. Этот файл — milestone snapshot; не обновляется отдельным PR после каждого микрошагa. Исторические packets/handoffs/receipts сохраняются.
 
 ## Следующая практическая поставка
 
-После принятия governance [PR #43](https://github.com/al-gri/pro-sclpng/pull/43) в main единственная следующая implementation — [#45](https://github.com/al-gri/pro-sclpng/issues/45), branch feat/REC-001F-3-public-text-capture. Одна фактическая build environment, затем dependency/transport/allocation probes внутри реализации. Их PASS нужен для соответствующей приёмки, а не до разрешения создать ветку. Current executor blockers и actual claim/status читать в #45; owner-reported Windows/Docker — кандидат, без переноса PASS. Исторический [executor report](EXECUTOR_CAPABILITIES.md) и более поздний [gate handoff](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6097013140) относятся к своим средам/датам.
+PR #43 уже принят. Existing [#45](https://github.com/al-gri/pro-sclpng/issues/45), branch feat/REC-001F-3-public-text-capture / Draft PR47 сохраняются. Governance #48 приостанавливает исполнение, не перезапускает работу. После acceptance возобновить pending sequential Architecture/source re-review delivered E1-CORR-01; при новых findings corrective Worker. Full implementation final QA только после полного candidate и exact freeze. Actual status/claim/accepted scope читать в #45/PR47; capabilities/evidence относятся к своим executor/date, не наследуются. Все dependency/transport/allocation probes и technical acceptance gates остаются обязательными.
 
 [#40/#44](https://github.com/al-gri/pro-sclpng/pull/44) доставили source-level API-compatible direction на head 830f8953dca540e751fbd5645d0532735b8c6527. Integrator записал её limited acceptance в #45; report сам по себе не является runtime или full-M1 acceptance. Сохранять synchronous completion, sole owner/SessionTurn, Timer A, original Close, Unknown outcomes и conditional ACR stops. Numerical budgets #45, включая pre-allocation memory enforcement, не ослабляются процессом.
 
@@ -132,4 +140,4 @@ GitHub — единственный источник истины: accepted main
 
 Оставшиеся full-M1 gates — в [GitHub integration checklist](https://github.com/al-gri/pro-sclpng/issues/45#issuecomment-6096975470): нормализация/applicability, artifacts/proofs, recovery/lifecycle и final canonical replay/QA. Checkpoint не закрывает M1. #37/#22/#5 остаются OPEN; M2 #29 BLOCKED. RULE-001 #7 допускается только как одна выбранная задача при наличии источников.
 
-Integrator на каждом переходе сам выдаёт один следующий шаг, полный copy-ready prompt/packet нужной роли и GitHub место сохранения. Новая задача не выполняется одновременно. Это правило подготовки материалов, не scheduled automation и не разрешение merge/settings/execution.
+Integrator на каждом переходе сохраняет один bounded prompt/packet в GitHub и при доступном orchestration сам запускает Worker/QA последовательно; unavailable spawn — честный copy-ready fallback. Worker/QA context disposable. После freeze receipts пишутся в comments; source changes требуют нового freeze/QA. Новая задача не выполняется одновременно; scheduled automation, merge/settings и расширение runtime scope этим правилом не разрешены.

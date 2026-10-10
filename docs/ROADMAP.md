@@ -15,11 +15,11 @@
 
 ## Текущая последовательность M1
 
-Одна активная задача/исполнитель/PR по [WORKFLOW](WORKFLOW.md). Backlog хранится в GitHub Issues; этот файл описывает checkpoints, не копирует оперативные назначения.
+Одна активная задача/implementation executor/ветка/PR по [WORKFLOW](WORKFLOW.md); Integrator orchestrates, один ephemeral Worker реализует, independent QA проверяет exact frozen head. Backlog хранится в GitHub Issues; этот файл описывает checkpoints, не копирует оперативные назначения.
 
 | Очередь | Проверяемый результат |
 |---|---|
-| 1 | Governance PR #43 принят владельцем; фактический способ сборки для #45 |
+| 1 | PR #43 уже принят; role migration GOV-ORCH-001 #48 ожидает owner acceptance; existing #45 продолжается из сохранённой стадии без restart |
 | 2 | #45: real bounded capture → WAL → два diagnostic replay; probes внутри implementation |
 | 3 | Независимый QA критического #45 и owner acceptance его ограниченного scope |
 | 4 | Отдельный bounded book-engine child #21 на accepted types и synthetic metadata/fixtures |

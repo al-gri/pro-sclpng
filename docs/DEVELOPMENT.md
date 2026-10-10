@@ -1,5 +1,7 @@
 # Development — BOOT-001
 
+Active role/lifecycle authority is [WORKFLOW](WORKFLOW.md): Integrator orchestration, one ephemeral Worker, exact FINAL_SHA/TREE SOURCE_FROZEN, then separate independent QA. The dated implementation/baseline commands and historical readiness labels below retain their original scoped meaning; they do not replace the current freeze/QA lifecycle or transfer PASS to another executor/head.
+
 ## Scope
 
 Exactly two workspace members: `crates/domain` (library) and `apps/radar`

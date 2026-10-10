@@ -7,11 +7,11 @@
 - Scope соблюдён; отсутствуют неутверждённые изменения contracts/семантики.
 - Код/документ и результат сохранены в GitHub. PR report содержит actual base/head и выполняет роль Handoff.
 - Применимые checks имеют PASS/FAIL/NOT_RUN, executor и exit code/log/CI reference. NOT_APPLICABLE допустим с причиной для проверки вне scope.
-- Review/CI относится к итоговому head; применимость прошлых специальных evidence указана явно.
-- Риск определён по последствиям. Критические boundaries получают независимый review/целевой QA; самопроверка автора отмечается отдельно.
+- IMPLEMENTATION_COMPLETE / SOURCE_FROZEN / exact FINAL_SHA/TREE сохранены после Integrator review/shared edits. Final independent QA PASS и требуемые review/CI относятся к этому candidate; любой новый source commit требует нового review/freeze/QA. Применимость прошлого специального evidence указана явно.
+- Отдельный ephemeral QA после freeze возвращает PASS/FAIL/BLOCKED; documentary scope не выдумывает runtime tests. Риск определён по последствиям; критические boundaries сохраняют дополнительные independent review/negative gates. Самопроверка автора отмечается отдельно. QA FAIL исправляет один Worker по corrective packet Integrator, same Issue/branch/PR; QA source не пишет.
 - Нет секретов, приватных источников и больших raw archives; limitations/blockers/evidence refs явны.
 - Владелец принимает merge. DONE не означает только Draft PR или зелёный CI.
-- Integrator автоматически выдаёт один следующий шаг и нужные copy-ready prompts/packet; материалы сохранены в Issue/PR.
+- Integrator автоматически сохраняет один следующий bounded packet/full prompt и при доступном orchestration запускает Worker/QA последовательно. При unavailable spawn честный fallback. Worker/QA result содержит exact refs/tree/checks/preserved unknowns/Handoff; их contexts disposable, GitHub — durable context. Owner/Architecture принятие ADR/milestone и merge остаются отдельными.
 
 ## Docs-only
 
