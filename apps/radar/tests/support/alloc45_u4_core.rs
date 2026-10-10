@@ -232,7 +232,11 @@ thread_local! {
     static FAULT_AT: Cell<usize> = const { Cell::new(0) };
     static DIRECT_CALLS: Cell<usize> = const { Cell::new(0) };
     static ACTUAL_CALLS: Cell<usize> = const { Cell::new(0) };
+    static ACTUAL_SUCCESSES: Cell<usize> = const { Cell::new(0) };
     static DIRECT_FREES: Cell<usize> = const { Cell::new(0) };
+    static FREE_WITNESSES: Cell<[Option<FreeWitness>; 4]> = const { Cell::new([None; 4]) };
+    static LATE_CONTEXT_FAULT: Cell<u8> = const { Cell::new(0) };
+    static LATE_CONTEXT_WITNESS: Cell<Option<PreparationWitness>> = const { Cell::new(None) };
 }
 static RECURSIONS: AtomicUsize = AtomicUsize::new(0);
 static PLAN_VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -242,13 +246,44 @@ pub fn set_null_fault(nth: usize) {
     FAULT_AT.set(nth);
     DIRECT_CALLS.set(0);
     ACTUAL_CALLS.set(0);
+    ACTUAL_SUCCESSES.set(0);
     DIRECT_FREES.set(0);
+    FREE_WITNESSES.set([None; 4]);
 }
 pub fn direct_counts() -> (usize, usize) {
     (DIRECT_CALLS.get(), DIRECT_FREES.get())
 }
 pub fn system_counts() -> (usize, usize) {
     (ACTUAL_CALLS.get(), DIRECT_FREES.get())
+}
+pub fn system_successes() -> usize {
+    ACTUAL_SUCCESSES.get()
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreeWitness {
+    pub base: usize,
+    pub bytes: usize,
+    pub before: Counts,
+    pub returned: Counts,
+}
+pub fn free_witnesses() -> [Option<FreeWitness>; 4] {
+    FREE_WITNESSES.get()
+}
+// Modes: 0 disabled, 1 original stop, 2 real original Instant expiry. Private
+// direct-preparation scheduling only; never read by allocator/refcount/retire.
+pub fn set_late_context_fault(mode: u8) {
+    LATE_CONTEXT_FAULT.set(mode);
+    LATE_CONTEXT_WITNESS.set(None);
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PreparationWitness {
+    pub snapshot: Snapshot,
+    pub stopped: bool,
+    pub deadline_live: bool,
+    pub successes: usize,
+}
+pub fn late_context_witness() -> Option<PreparationWitness> {
+    LATE_CONTEXT_WITNESS.get()
 }
 pub fn hook_counts() -> (usize, usize, usize) {
     (
@@ -268,13 +303,31 @@ unsafe fn system_prepare(layout: Layout) -> *mut u8 {
     } else {
         ACTUAL_CALLS.set(ACTUAL_CALLS.get() + 1);
         // SAFETY: caller checked valid nonzero physical Layout and admitted it.
-        unsafe { System.alloc(layout) }
+        let pointer = unsafe { System.alloc(layout) };
+        if !pointer.is_null() {
+            ACTUAL_SUCCESSES.set(ACTUAL_SUCCESSES.get() + 1);
+        }
+        pointer
     }
 }
 unsafe fn system_free(block: Block) {
+    // All direct frees hold ADMISSION. Copy only scalars outside the freed
+    // backing; no pointer dereference or core access after returned free.
+    let before = unsafe { *AGGREGATE.0.get() };
     // SAFETY: original System base/physical Layout, one custodial/rollback free.
     unsafe { System.dealloc(block.base.as_ptr(), block.physical) };
-    DIRECT_FREES.set(DIRECT_FREES.get() + 1);
+    let n = DIRECT_FREES.get();
+    let mut witnesses = FREE_WITNESSES.get();
+    if n < witnesses.len() {
+        witnesses[n] = Some(FreeWitness {
+            base: block.base.as_ptr() as usize,
+            bytes: block.physical.size(),
+            before,
+            returned: unsafe { *AGGREGATE.0.get() },
+        });
+        FREE_WITNESSES.set(witnesses);
+    }
+    DIRECT_FREES.set(n + 1);
 }
 
 unsafe fn allocate_block(payload: Layout) -> Result<Block, CoreFailure> {
@@ -678,6 +731,24 @@ pub fn try_prepare(
         entry,
         consumed: false,
     };
+    let fault = LATE_CONTEXT_FAULT.get();
+    if fault != 0 {
+        // Controlled scheduling AFTER actual success/PREPAID publication and
+        // BEFORE the unchanged context check. No injected clock/error, callback
+        // or wait in GlobalAlloc, reference operations or retirement. This
+        // deliberate delay supplies NO bound on System allocation/free latency.
+        LATE_CONTEXT_WITNESS.set(Some(PreparationWitness {
+            snapshot: snapshot_locked(core),
+            stopped: op.stop.load(Ordering::Acquire),
+            deadline_live: Instant::now() < op.deadline,
+            successes: ACTUAL_SUCCESSES.get(),
+        }));
+        if fault == 1 {
+            op.stop.store(true, Ordering::Release);
+        } else if fault == 2 {
+            std::thread::sleep(op.deadline.saturating_duration_since(Instant::now()));
+        }
+    }
     context(op.deadline, op.stop)?; // original context; late preparation retires, stays charged
     Ok(ticket)
 }

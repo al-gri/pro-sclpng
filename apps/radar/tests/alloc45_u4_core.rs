@@ -580,6 +580,7 @@ fn leak_pending_then_recover() {
     std::mem::forget(bytes);
     drop(core);
     let before = owner.snapshot().unwrap();
+    assert_eq!((before.strong, before.weak), (0, 0)); // E1-R01: refs0 cannot bypass LIVE record
     assert!(!drain(&mut owner).complete);
     assert_eq!(owner.snapshot().unwrap().counts, before.counts);
     assert_eq!(before.states[2], 1);
@@ -671,6 +672,281 @@ fn concurrent_protocol() {
     );
 }
 
+fn last_strong_upgrade_and_collection() {
+    // Upgrade linearizes at strong CAS(old,old+1); Drop linearizes at fetch_sub.
+    // If CAS wins, terminal zero cannot occur until the returned Strong drops.
+    // If terminal Drop wins, load0 returns None or a stale nonzero CAS fails
+    // once (Busy); no path writes 0->1. The borrowed live Weak keeps core alive
+    // through either operation. Collection requires refs0 AND every record FREE.
+    // All barriers are harness-only, outside refcount/allocator/retire operations.
+    for schedule in ["upgrade-wins", "drop-wins", "overlapping-start"] {
+        let stop = AtomicBool::new(false);
+        let (core, mut owner) = bootstrap(&stop);
+        let end = deadline();
+        let weak = core.try_downgrade(end, &stop).unwrap();
+        let ticket = try_prepare(
+            &CoreOp {
+                core: &core,
+                deadline: end,
+                stop: &stop,
+            },
+            CoreClass::Handshake,
+            Layout::new::<u64>(),
+        )
+        .unwrap();
+        let start = std::sync::Barrier::new(3);
+        let ordered = std::sync::Barrier::new(2);
+        let (result, concurrent_collect) = std::thread::scope(|scope| {
+            let start_ref = &start;
+            let ordered_ref = &ordered;
+            let dropper = scope.spawn(move || {
+                start_ref.wait();
+                if schedule == "upgrade-wins" {
+                    ordered_ref.wait();
+                }
+                drop(core); // the ORIGINAL LAST Strong, no observer Strong retained
+                if schedule == "drop-wins" {
+                    ordered_ref.wait();
+                }
+            });
+            let upgrader = scope.spawn(|| {
+                set_null_fault(0);
+                start.wait();
+                if schedule == "drop-wins" {
+                    ordered.wait();
+                }
+                let result = weak.try_upgrade(end, &stop);
+                if schedule == "upgrade-wins" {
+                    ordered.wait();
+                }
+                assert_eq!(direct_counts(), (0, 0));
+                assert_eq!(system_counts(), (0, 0));
+                result // only the actual returned Strong can remain live
+            });
+            start.wait();
+            let report = collect_retired(&mut owner, RECORDS);
+            dropper.join().unwrap();
+            (upgrader.join().unwrap(), report)
+        });
+        assert!(!concurrent_collect.complete);
+        assert_eq!(
+            (concurrent_collect.freed, concurrent_collect.debited),
+            (0, 0)
+        );
+        let outcome = match &result {
+            Ok(Some(_)) => "Some(Strong)",
+            Ok(None) => "None/terminal-zero",
+            Err(CoreFailure::AdmissionBusy) if schedule == "overlapping-start" => "Busy/stale-CAS",
+            _ => panic!("unexpected last-reference outcome"),
+        };
+        if schedule == "upgrade-wins" {
+            assert!(matches!(&result, Ok(Some(_))));
+        }
+        if schedule == "drop-wins" {
+            assert!(matches!(&result, Ok(None)));
+        }
+        let returned = result.unwrap_or(None); // Busy is recorded, never retried
+        let held = owner.snapshot().unwrap();
+        assert_eq!(held.strong, usize::from(returned.is_some()));
+        assert_eq!(held.weak, 1);
+        assert_eq!(held.states, [RECORDS - 1, 1, 0, 0, 0]);
+        assert_eq!(held.aggregate, held.counts);
+        drop(ticket);
+        let retired = owner.snapshot().unwrap();
+        assert_eq!(retired.states, [RECORDS - 1, 0, 0, 1, 0]);
+        assert_eq!(retired.counts, held.counts);
+        assert_eq!((retired.frees, retired.debits), (0, 0));
+        let child_free = drain(&mut owner);
+        assert_eq!((child_free.freed, child_free.debited), (1, 1));
+        assert!(!child_free.complete);
+        let (layouts, base) = bootstrap_layouts().unwrap();
+        let handles_only = owner.snapshot().unwrap();
+        assert_eq!(handles_only.states, [RECORDS, 0, 0, 0, 0]);
+        assert_eq!(handles_only.counts, base);
+        assert!(!drain(&mut owner).complete); // ALL records FREE; live Weak still retains core
+        let traces: [Trace; 5] = std::array::from_fn(|i| owner.trace(i).unwrap().unwrap());
+        assert_eq!(traces.map(|t| t.kind), [1, 2, 4, 5, 6]);
+        assert_eq!(traces[3].total, held.counts.0[0]);
+        assert_eq!(traces[4].total, base.0[0]);
+        if returned.is_none() {
+            // Separate post-terminal observation, NOT a retry of a Busy upgrade.
+            assert!(weak.try_upgrade(end, &stop).unwrap().is_none());
+            assert_eq!(owner.snapshot().unwrap().strong, 0);
+        }
+        drop(weak);
+        if let Some(strong) = &returned {
+            let only_returned = strong.snapshot().unwrap();
+            assert_eq!((only_returned.strong, only_returned.weak), (1, 0));
+            assert_eq!(only_returned.states, [RECORDS, 0, 0, 0, 0]);
+            assert!(!drain(&mut owner).complete); // returned Strong alone retains core
+            assert_eq!(strong.snapshot().unwrap().counts, base);
+        }
+        drop(returned);
+        let refs_zero = owner.snapshot().unwrap();
+        assert_eq!((refs_zero.strong, refs_zero.weak), (0, 0));
+        assert_eq!(refs_zero.states, [RECORDS, 0, 0, 0, 0]);
+        assert_eq!(refs_zero.counts, base); // all core evidence copied before final free
+        set_null_fault(0); // external scalar free witnesses, no core-owned post-free evidence
+        let report = drain(&mut owner);
+        assert!(report.complete);
+        assert_eq!(
+            (report.freed, report.debited, report.remaining),
+            (0, 0, Some(0))
+        );
+        assert_eq!(system_counts(), (0, 3)); // exactly THREE bootstrap frees
+        let witnesses = free_witnesses();
+        let frees = [
+            witnesses[0].unwrap(),
+            witnesses[1].unwrap(),
+            witnesses[2].unwrap(),
+        ];
+        assert_eq!(witnesses[3], None);
+        for (i, expected) in [layouts[1], layouts[2], layouts[0]].into_iter().enumerate() {
+            assert_eq!(frees[i].bytes, expected.size());
+            assert_eq!(frees[i].before, base);
+            assert_eq!(frees[i].returned, base); // aggregate nonzero through core free
+        }
+        for i in 0..frees.len() {
+            for j in 0..i {
+                assert_ne!(frees[i].base, frees[j].base);
+            }
+        }
+        assert_eq!(aggregate_snapshot().unwrap(), Counts::default());
+        let repeated = drain(&mut owner); // owner=None; no core access after final free
+        assert!(repeated.complete);
+        assert_eq!((repeated.freed, repeated.debited), (0, 0));
+        assert_eq!(system_counts(), (0, 3));
+        assert_eq!(free_witnesses(), witnesses);
+        assert_eq!(aggregate_snapshot().unwrap(), Counts::default());
+        println!(
+            "E1-R01 {schedule}: outcome={outcome}; overlap={concurrent_collect:?}; refs0={refs_zero:?}; traces={traces:?}; external-returned-frees={frees:?}; final={report:?}; repeated={repeated:?}"
+        );
+    }
+}
+
+fn late_original_context_after_preparation() {
+    for mode in [1, 2] {
+        for pod_leaf in [false, true] {
+            let stop = AtomicBool::new(false);
+            let (core, mut owner) = bootstrap(&stop);
+            let base = bootstrap_layouts().unwrap().1;
+            let reuse_end = deadline(); // pre-existing independent reuse context, no refresh
+            let original_end = if mode == 1 {
+                reuse_end
+            } else {
+                Instant::now() + Duration::from_millis(100)
+            };
+            let op = CoreOp {
+                core: &core,
+                deadline: original_end,
+                stop: &stop,
+            };
+            let expected = if mode == 1 {
+                CoreFailure::Stopped
+            } else {
+                CoreFailure::DeadlineExpired
+            };
+            set_null_fault(0);
+            set_late_context_fault(mode);
+            if pod_leaf {
+                assert_eq!(
+                    try_prepaid_pod_box(&op, CoreClass::Handshake, Pod::new(7)),
+                    Err(expected)
+                );
+            } else {
+                assert_eq!(try_vec_bytes(&op, CoreClass::Handshake, 64), Err(expected));
+            }
+            let prepared = late_context_witness().unwrap();
+            assert!(!prepared.stopped && prepared.deadline_live);
+            assert_eq!(prepared.successes, 1); // actual NONNULL System success before fault
+            assert_eq!(prepared.snapshot.states, [RECORDS - 1, 1, 0, 0, 0]);
+            assert_eq!(prepared.snapshot.aggregate, prepared.snapshot.counts);
+            assert_eq!(
+                (prepared.snapshot.consumed, prepared.snapshot.downstream),
+                (0, 0)
+            );
+            assert_eq!(op.deadline, original_end);
+            if mode == 1 {
+                assert!(stop.load(Ordering::Acquire));
+            } else {
+                assert!(!stop.load(Ordering::Acquire));
+                assert!(Instant::now() >= original_end);
+            }
+            let retired = core.snapshot().unwrap();
+            assert_eq!(retired.states, [RECORDS - 1, 0, 0, 1, 0]);
+            assert_eq!(retired.counts, prepared.snapshot.counts);
+            assert_eq!(retired.aggregate, retired.counts);
+            assert_eq!(
+                (
+                    retired.consumed,
+                    retired.downstream,
+                    retired.retired,
+                    retired.frees,
+                    retired.debits
+                ),
+                (0, 0, 1, 0, 0)
+            );
+            assert_eq!(direct_counts(), (1, 0));
+            assert_eq!(system_counts(), (1, 0));
+            assert_eq!(system_successes(), 1);
+            set_late_context_fault(0); // only scheduling control reset; original stop/expiry retained
+            assert_eq!(drain(&mut owner).freed, 1); // no new deadline, still stopped/expired
+            assert_eq!(system_counts(), (1, 1));
+            let clean = core.snapshot().unwrap();
+            assert_eq!(clean.counts, base);
+            assert_eq!((clean.frees, clean.debits), (1, 1));
+            let traces: [Trace; 5] = std::array::from_fn(|i| owner.trace(i).unwrap().unwrap());
+            assert_eq!(traces.map(|t| t.kind), [1, 2, 4, 5, 6]);
+            assert_eq!(traces[3].total, retired.counts.0[0]); // 5 AFTER free but BEFORE debit
+            assert_eq!(traces[4].total, base.0[0]);
+            assert!(
+                traces
+                    .iter()
+                    .all(|t| (t.id, t.generation, t.class) == (0, 1, CoreClass::Handshake))
+            );
+            let freed = free_witnesses()[0].unwrap();
+            assert_eq!(
+                (freed.before, freed.returned),
+                (retired.counts, retired.counts)
+            );
+            assert_eq!(drain(&mut owner).freed, 0);
+            assert_eq!(core.snapshot().unwrap(), clean);
+            // Generation reuse is a separate eligible context created BEFORE
+            // expiry. It is never a fresh cleanup deadline or retry of refusal.
+            stop.store(false, Ordering::Release);
+            let reused = try_prepare(
+                &CoreOp {
+                    core: &core,
+                    deadline: reuse_end,
+                    stop: &stop,
+                },
+                CoreClass::Handshake,
+                Layout::new::<u64>(),
+            )
+            .unwrap();
+            let reused_trace = owner
+                .trace(owner.snapshot().unwrap().trace_len - 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!((reused_trace.id, reused_trace.generation), (0, 2));
+            drop(reused);
+            stop.store(true, Ordering::Release);
+            assert_eq!(drain(&mut owner).freed, 1);
+            assert_eq!(core.snapshot().unwrap().counts, base);
+            println!(
+                "E1-R03 mode={mode} pod={pod_leaf} returned={expected:?}; original-deadline-expired={}; prepared={prepared:?}; retired={retired:?}; trace={traces:?}; returned-free={freed:?}; reuse={reused_trace:?}; controlled preparation scheduling, System latency NOT_PROVEN",
+                Instant::now() >= original_end
+            );
+            finish(
+                core,
+                owner,
+                "E1-R03 original-stop/real-expiry/prepaid-retirement",
+            );
+            assert_eq!(aggregate_snapshot().unwrap(), Counts::default());
+        }
+    }
+}
+
 fn concurrent_quota_races() {
     let stop = AtomicBool::new(false);
     let (core, mut owner) = bootstrap(&stop);
@@ -681,7 +957,9 @@ fn concurrent_quota_races() {
     ] {
         let barrier = std::sync::Barrier::new(3); // untagged harness coordination
         let accepted = AtomicUsize::new(0);
-        let refused = AtomicUsize::new(0);
+        let total_quota = AtomicUsize::new(0);
+        let handshake_quota = AtomicUsize::new(0);
+        let admission_busy = AtomicUsize::new(0);
         let end = deadline();
         std::thread::scope(|scope| {
             for _ in 0..2 {
@@ -692,21 +970,24 @@ fn concurrent_quota_races() {
                         deadline: end,
                         stop: &stop,
                     };
+                    barrier.wait(); // simultaneous start, no admission retries
                     let result = try_vec_bytes(&op, class, cap);
                     match &result {
                         Ok(_) => {
                             accepted.fetch_add(1, Ordering::Relaxed);
                         }
-                        Err(
-                            CoreFailure::TotalQuota
-                            | CoreFailure::HandshakeQuota
-                            | CoreFailure::AdmissionBusy,
-                        ) => {
+                        Err(reason) => {
                             assert_eq!(direct_counts(), (0, 0));
                             assert_eq!(system_counts(), (0, 0));
-                            refused.fetch_add(1, Ordering::Relaxed);
+                            assert_eq!(system_successes(), 0);
+                            match reason {
+                                CoreFailure::TotalQuota => &total_quota,
+                                CoreFailure::HandshakeQuota => &handshake_quota,
+                                CoreFailure::AdmissionBusy => &admission_busy,
+                                other => panic!("unexpected near-limit author result {other:?}"),
+                            }
+                            .fetch_add(1, Ordering::Relaxed);
                         }
-                        other => panic!("unexpected near-limit author result {other:?}"),
                     }
                     barrier.wait(); // keep successful backing LIVE through both admissions
                     barrier.wait();
@@ -714,12 +995,21 @@ fn concurrent_quota_races() {
                 });
             }
             barrier.wait();
+            barrier.wait();
             let s = core.snapshot().unwrap();
             assert_eq!(accepted.load(Ordering::Relaxed), 1);
-            assert_eq!(refused.load(Ordering::Relaxed), 1);
+            let outcomes = [
+                total_quota.load(Ordering::Relaxed),
+                handshake_quota.load(Ordering::Relaxed),
+                admission_busy.load(Ordering::Relaxed),
+            ];
+            assert_eq!(outcomes.iter().sum::<usize>(), 1);
+            assert_eq!(outcomes[usize::from(class == CoreClass::Configuration)], 0);
             assert!(s.counts.0[0] <= T && s.counts.0[1] <= H);
             assert_eq!(s.aggregate, s.counts);
-            println!("E1 concurrent near-limit {class:?}: accepted=1 refused=1 {s:?}");
+            println!(
+                "E1-R02 simultaneous {class:?}: accepted=1 [TotalQuota,HandshakeQuota,AdmissionBusy]={outcomes:?} {s:?}"
+            );
             barrier.wait();
         });
         drain(&mut owner);
@@ -728,6 +1018,90 @@ fn concurrent_quota_races() {
         core,
         owner,
         "concurrent-T-H-no-overcommit/rejected-actual-calls-zero",
+    );
+}
+
+fn deterministic_quota_and_busy() {
+    let stop = AtomicBool::new(false);
+    let (core, mut owner) = bootstrap(&stop);
+    let base = bootstrap_layouts().unwrap().1;
+    let end = deadline(); // same pre-existing context for A, B and Busy
+    for (class, cap, expected) in [
+        (
+            CoreClass::Configuration,
+            (T - base.0[0]) / 2 + 4096,
+            CoreFailure::TotalQuota,
+        ),
+        (
+            CoreClass::Handshake,
+            H / 2 + 4096,
+            CoreFailure::HandshakeQuota,
+        ),
+    ] {
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                set_null_fault(0);
+                let op = CoreOp {
+                    core: &core,
+                    deadline: end,
+                    stop: &stop,
+                };
+                let bytes = try_vec_bytes(&op, class, cap).unwrap();
+                assert_eq!(direct_counts(), (1, 0));
+                assert_eq!(system_counts(), (1, 0));
+                assert_eq!(system_successes(), 1);
+                barrier.wait(); // actual success, LIVE, admission guard released
+                barrier.wait(); // keep A's returned backing through B/Busy assertions
+                drop(bytes);
+            });
+            barrier.wait();
+            let before = core.snapshot().unwrap();
+            assert_eq!(before.states, [RECORDS - 1, 0, 1, 0, 0]);
+            assert_eq!(before.aggregate, before.counts);
+            set_null_fault(0);
+            let op = CoreOp {
+                core: &core,
+                deadline: end,
+                stop: &stop,
+            };
+            assert_eq!(try_vec_bytes(&op, class, cap), Err(expected));
+            assert_eq!(direct_counts(), (0, 0));
+            assert_eq!(system_counts(), (0, 0));
+            assert_eq!(system_successes(), 0);
+            assert_eq!(core.snapshot().unwrap(), before); // includes downstream/consumed/records
+            // The very same request now loses the intentionally held admission
+            // lock BEFORE quota inspection. No retries hide the Busy outcome.
+            let held = hold_admission().unwrap();
+            assert_eq!(
+                try_vec_bytes(&op, class, cap),
+                Err(CoreFailure::AdmissionBusy)
+            );
+            assert_eq!(direct_counts(), (0, 0));
+            assert_eq!(system_counts(), (0, 0));
+            assert_eq!(system_successes(), 0);
+            drop(held);
+            assert_eq!(core.snapshot().unwrap(), before);
+            println!(
+                "E1-R02 two-phase {class:?}: exact={expected:?}; separate AdmissionBusy; B direct/System/success/downstream delta=0; unchanged={before:?}"
+            );
+            barrier.wait();
+        });
+        let retired = core.snapshot().unwrap();
+        assert_eq!(retired.states, [RECORDS - 1, 0, 0, 1, 0]);
+        assert_eq!(retired.frees + 1, retired.retired);
+        assert_eq!(retired.frees, retired.debits);
+        let report = drain(&mut owner);
+        assert_eq!((report.freed, report.debited), (1, 1));
+        assert_eq!(core.snapshot().unwrap().counts, base);
+        let clean = core.snapshot().unwrap();
+        assert_eq!(drain(&mut owner).freed, 0);
+        assert_eq!(core.snapshot().unwrap(), clean);
+    }
+    finish(
+        core,
+        owner,
+        "E1-R02 deterministic-quota/separate-Busy/exact-once",
     );
 }
 
@@ -776,7 +1150,10 @@ fn alloc45_u4_core_e1_author_matrix() {
     error_child_and_custom_lifetimes();
     leak_pending_then_recover();
     concurrent_protocol();
+    last_strong_upgrade_and_collection();
     concurrent_quota_races();
+    deterministic_quota_and_busy();
+    late_original_context_after_preparation();
     custody_loss_is_pending_last();
     assert_eq!(hook_counts(), (0, 0, 0));
 }
